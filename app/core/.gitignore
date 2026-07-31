@@ -1,0 +1,9 @@
+# 사용자 데이터 (업로드 PDF / 크롭 PNG / DB / 평문 API 키)
+data/
+!data/.gitkeep
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

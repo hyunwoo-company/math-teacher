@@ -1,0 +1,50 @@
+# ── 의존성 / 빌드 산출물 ───────────────────────────
+node_modules/
+app/web/.next/
+app/web/out/
+app/web/build/
+dist/
+*.tsbuildinfo
+
+# ── 파이썬 ────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+
+# ── 비밀/인증 (절대 커밋 금지) ─────────────────────
+.env
+.env.*
+!.env.example
+**/settings.json
+!app/web/**/settings.json          # 필요 시 웹 설정은 예외(민감정보 없을 때만)
+*.credentials.json
+.credentials.json
+
+# ── 런타임 사용자 데이터 (코드 아님) ───────────────
+app/core/data/
+!app/core/data/.gitkeep
+
+# ── 시험지 원본·산출물 (저작권/사적 자료) ──────────
+*.pdf
+!**/fixtures/*.pdf                 # 테스트 픽스처 PDF는 예외
+tmp/
+tmp_crops/
+카톡전송용/
+scratchpad/
+
+# ── 에디터/OS ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# ── 스크립트 검증 산출물 ───────────────────────────
+app/web/scripts/browser-smoke/*.png
+app/web/scripts/browser-smoke/shots/
+tmp_pt.xml

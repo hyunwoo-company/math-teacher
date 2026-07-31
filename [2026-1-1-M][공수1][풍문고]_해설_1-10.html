@@ -1,0 +1,646 @@
+<meta charset="utf-8">
+<title>풍문고 2026 1학년 1학기 중간고사 공통수학1 — 1~10번 해설</title>
+
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]']] },
+    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre'] }
+  };
+</script>
+<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --ink: #1c2128;
+    --muted: #5b6672;
+    --line: #e3e7ec;
+    --accent: #2f6feb;
+    --accent-soft: #eaf1fe;
+    --good: #128a5b;
+    --good-soft: #e6f6ef;
+    --warn: #a15c00;
+    --warn-soft: #fdf3e3;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 0 16px 80px;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+    line-height: 1.75;
+    font-size: 16px;
+  }
+
+  .wrap { max-width: 880px; margin: 0 auto; }
+
+  header.top {
+    margin: 32px 0 24px;
+    padding: 28px 28px 24px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+  }
+  header.top h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: -0.02em; }
+  header.top .sub { color: var(--muted); font-size: 14px; margin: 0; }
+  header.top .meta {
+    margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--line);
+    display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 14px; color: var(--muted);
+  }
+
+  .notice {
+    margin: 0 0 24px; padding: 14px 18px;
+    background: var(--accent-soft); border: 1px solid #cfe0fd;
+    border-radius: 10px; font-size: 14px; color: #1b3f86;
+  }
+
+  h2.section {
+    font-size: 18px; margin: 36px 0 14px; padding-left: 10px;
+    border-left: 4px solid var(--accent);
+  }
+
+  .answers { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 15px; }
+  th, td { padding: 10px 8px; text-align: center; border-bottom: 1px solid var(--line); }
+  thead th { background: #f0f3f7; font-weight: 600; color: var(--muted); font-size: 13px; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.ans { font-weight: 700; color: var(--accent); }
+
+  article.q {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 24px 26px; margin: 18px 0;
+  }
+  article.q > h3 {
+    margin: 0 0 14px; font-size: 18px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 8px;
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
+  }
+  .tag {
+    font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+    background: #eef1f5; color: var(--muted);
+  }
+
+  .stem {
+    background: #fafbfc; border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 18px; margin: 0 0 18px;
+  }
+  .stem p { margin: 0 0 6px; }
+  .stem p:last-child { margin-bottom: 0; }
+  .choices { margin: 10px 0 0; padding: 0; list-style: none; font-size: 15px; color: #333; }
+  .choices li { display: inline-block; margin: 2px 18px 2px 0; }
+  .boxed {
+    border: 1px solid #cfd6df; border-radius: 8px; padding: 10px 14px;
+    margin: 10px 0; background: #fff;
+  }
+
+  .concept {
+    background: var(--warn-soft); border-left: 4px solid #e2a94a;
+    padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 0 0 16px; font-size: 15px;
+  }
+  .concept b { color: var(--warn); }
+
+  ol.steps { margin: 0 0 16px; padding-left: 22px; }
+  ol.steps > li { margin-bottom: 12px; }
+  ol.steps > li::marker { font-weight: 700; color: var(--accent); }
+
+  .final {
+    background: var(--good-soft); border: 1px solid #bfe6d4;
+    border-radius: 10px; padding: 12px 18px; font-weight: 600; color: var(--good);
+  }
+
+  .tip {
+    margin-top: 14px; font-size: 14px; color: var(--muted);
+    border-top: 1px dashed var(--line); padding-top: 12px;
+  }
+  .tip b { color: var(--ink); }
+
+  .warnbox {
+    background: var(--warn-soft); border: 1px solid #f0d9ac;
+    border-radius: 10px; padding: 12px 16px; margin: 0 0 16px; font-size: 14.5px;
+  }
+
+  footer { text-align: center; color: var(--muted); font-size: 13px; margin-top: 40px; }
+
+  @media print {
+    body { background: #fff; }
+    article.q { break-inside: avoid; border-color: #ccc; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="top">
+  <h1>공통수학1 중간고사 풀이집 <span style="font-size:16px;color:#5b6672;">(1번 ~ 10번)</span></h1>
+  <p class="sub">풍문고등학교 · 2026년 1학년 1학기 중간고사 · 출제범위: 다항식 ~ 이차함수 최대·최소</p>
+  <div class="meta">
+    <span>선택형 15문항 50점</span>
+    <span>서답형 7문항 50점</span>
+    <span>이 문서: 1~10번 (선택형)</span>
+  </div>
+</header>
+
+<div class="notice">
+  이번 문서는 <b>1번부터 10번까지</b>만 담았습니다. 각 문제마다 <b>핵심 개념 → 단계별 풀이 → 정답</b> 순으로 정리했으니,
+  먼저 스스로 풀어 본 뒤 막힌 단계만 확인하는 방식으로 활용하세요.
+</div>
+
+<h2 class="section">정답 한눈에 보기</h2>
+<div class="answers">
+<table>
+  <thead>
+    <tr><th>문항</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>정답</td>
+      <td class="ans">③</td><td class="ans">④</td><td class="ans">③</td><td class="ans">⑤</td><td class="ans">①</td>
+      <td class="ans">②</td><td class="ans">②</td><td class="ans">④</td><td class="ans">④</td><td class="ans">③</td>
+    </tr>
+    <tr>
+      <td>배점</td>
+      <td>2.7</td><td>2.8</td><td>2.9</td><td>3</td><td>3.1</td><td>3.1</td><td>3.2</td><td>3.3</td><td>3.4</td><td>3.5</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h2 class="section">문항별 상세 해설</h2>
+
+<!-- ─────────────────────────── 1 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">1</span> 다항식의 덧셈과 뺄셈 <span class="tag">2.7점</span></h3>
+
+  <div class="stem">
+    <p>두 다항식 \(A = 4x^2+2x-1\), \(B = x^2+x-3\)에 대하여 \(2(A-3B)-(A-4B)\)를 간단히 하면?</p>
+    <ul class="choices">
+      <li>① \(x^2+2\)</li><li>② \(x^2+5\)</li><li>③ \(2x^2+5\)</li>
+      <li>④ \(x^2-x+4\)</li><li>⑤ \(2x^2-x+4\)</li>
+    </ul>
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — 다항식도 문자처럼 다룹니다. \(A, B\)에 식을 <u>먼저 대입하지 말고</u>,
+    \(A\)와 \(B\)에 대해 <b>먼저 정리(동류항 계산)</b>한 뒤 대입하면 계산량이 확 줄어듭니다.
+  </div>
+
+  <ol class="steps">
+    <li>
+      괄호를 풀어 \(A, B\)끼리 정리합니다.
+      \[2(A-3B)-(A-4B) = 2A-6B-A+4B = A-2B\]
+    </li>
+    <li>
+      이제 딱 한 번만 대입합니다.
+      \[A-2B = (4x^2+2x-1) - 2(x^2+x-3)\]
+    </li>
+    <li>
+      뒤쪽 괄호를 풀 때 <b>부호에 주의</b>하세요. \(-2 \times (-3) = +6\) 입니다.
+      \[= 4x^2+2x-1-2x^2-2x+6\]
+    </li>
+    <li>
+      동류항끼리 묶습니다.
+      \[= (4-2)x^2 + (2-2)x + (-1+6) = 2x^2+5\]
+      \(x\)항이 완전히 사라지는 것이 이 문제의 포인트입니다.
+    </li>
+  </ol>
+
+  <div class="final">정답: ③ \(2x^2+5\)</div>
+
+  <div class="tip"><b>실수 주의</b> — \(-(A-4B)\)에서 앞의 마이너스를 \(A\)에만 곱하고 \(-4B\)에는 안 곱하는 실수가 가장 많습니다. \(-(A-4B)=-A+4B\).</div>
+</article>
+
+<!-- ─────────────────────────── 2 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">2</span> 이차방정식의 중근 조건 <span class="tag">2.8점</span></h3>
+
+  <div class="stem">
+    <p>이차방정식 \(x^2-3x+k=0\)이 중근을 갖도록 하는 실수 \(k\)의 값은?</p>
+    <ul class="choices">
+      <li>① \(\dfrac{3}{2}\)</li><li>② \(\dfrac{7}{4}\)</li><li>③ \(2\)</li>
+      <li>④ \(\dfrac{9}{4}\)</li><li>⑤ \(\dfrac{5}{2}\)</li>
+    </ul>
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — 이차방정식 \(ax^2+bx+c=0\)의 판별식 \(D=b^2-4ac\)에 대하여<br>
+    \(D&gt;0\) → 서로 다른 두 실근 / \(D=0\) → <b>중근</b> / \(D&lt;0\) → 서로 다른 두 허근
+  </div>
+
+  <ol class="steps">
+    <li>
+      계수를 확인합니다. \(a=1,\; b=-3,\; c=k\).
+    </li>
+    <li>
+      중근 조건은 \(D=0\)입니다.
+      \[D = (-3)^2 - 4\cdot 1\cdot k = 9-4k\]
+    </li>
+    <li>
+      \[9-4k=0 \;\Longrightarrow\; k=\frac{9}{4}\]
+    </li>
+    <li>
+      검산: \(k=\frac94\)이면 \(x^2-3x+\frac94=\left(x-\frac32\right)^2=0\) 이므로 \(x=\frac32\) (중근) ✔
+    </li>
+  </ol>
+
+  <div class="final">정답: ④ \(\dfrac{9}{4}\)</div>
+
+  <div class="tip"><b>더 빠른 방법</b> — 완전제곱식으로 보면 \(x^2-3x+k\)가 \(\left(x-\frac32\right)^2\) 꼴이어야 하므로 \(k=\left(\frac{-3}{2}\right)^2=\frac94\). ‘\(x\)의 계수의 절반의 제곱’을 떠올리면 암산도 가능합니다.</div>
+</article>
+
+<!-- ─────────────────────────── 3 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">3</span> 근과 계수의 관계 <span class="tag">2.9점</span></h3>
+
+  <div class="stem">
+    <p>이차방정식 \(x^2-4x+2=0\)의 두 근을 \(\alpha,\ \beta\)라고 할 때, \(\alpha^2+\beta^2\)의 값은?</p>
+    <ul class="choices">
+      <li>① 4</li><li>② 8</li><li>③ 12</li><li>④ 16</li><li>⑤ 20</li>
+    </ul>
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — \(ax^2+bx+c=0\)의 두 근이 \(\alpha,\beta\)이면
+    \(\alpha+\beta=-\dfrac{b}{a},\quad \alpha\beta=\dfrac{c}{a}\).<br>
+    그리고 <b>곱셈공식의 변형</b> \(\alpha^2+\beta^2=(\alpha+\beta)^2-2\alpha\beta\) 를 씁니다.
+  </div>
+
+  <ol class="steps">
+    <li>
+      근과 계수의 관계로 두 값을 먼저 구합니다. (근을 직접 구할 필요 없습니다!)
+      \[\alpha+\beta = -\frac{-4}{1} = 4, \qquad \alpha\beta = \frac{2}{1} = 2\]
+    </li>
+    <li>
+      대칭식을 기본 대칭식으로 바꿉니다.
+      \[\alpha^2+\beta^2 = (\alpha+\beta)^2 - 2\alpha\beta\]
+    </li>
+    <li>
+      대입하여 계산합니다.
+      \[= 4^2 - 2\cdot 2 = 16-4 = 12\]
+    </li>
+  </ol>
+
+  <div class="final">정답: ③ 12</div>
+
+  <div class="tip"><b>확인</b> — 실제 근은 \(x=2\pm\sqrt2\). \((2+\sqrt2)^2+(2-\sqrt2)^2=(6+4\sqrt2)+(6-4\sqrt2)=12\) ✔ 하지만 시험장에서는 근을 구하지 말고 대칭식으로 처리하는 게 훨씬 빠릅니다.</div>
+</article>
+
+<!-- ─────────────────────────── 4 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">4</span> 복소수의 기본 성질 (보기) <span class="tag">3점</span></h3>
+
+  <div class="stem">
+    <p>다음 &lt;보기&gt;의 설명 중 옳은 것만을 있는 대로 고른 것은? (단, \(i=\sqrt{-1}\))</p>
+    <div class="boxed">
+      <p>ㄱ. \(a,b,c,d\)가 모두 실수일 때, \(a+bi=c+di\)이면 \(a=c,\ b=d\)이다.</p>
+      <p>ㄴ. 복소수 \(z\)에 대하여 \(z+\bar{z}\), \(z\bar{z}\)는 모두 실수이다.</p>
+      <p>ㄷ. 허수는 대소 관계를 정할 수 없다.</p>
+    </div>
+    <ul class="choices">
+      <li>① ㄱ</li><li>② ㄴ</li><li>③ ㄱ, ㄷ</li><li>④ ㄴ, ㄷ</li><li>⑤ ㄱ, ㄴ, ㄷ</li>
+    </ul>
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — 복소수 \(z=a+bi\) (\(a,b\) 실수), 켤레복소수 \(\bar z = a-bi\).<br>
+    \(z+\bar z = 2a\) (실수), \(z\bar z = a^2+b^2\) (실수). 또 복소수 전체에는 실수처럼 순서(대소)를 줄 수 없습니다.
+  </div>
+
+  <ol class="steps">
+    <li>
+      <b>ㄱ (복소수의 상등)</b> — 교과서 정의 그대로입니다. \(a+bi=c+di\)에서 이항하면 \((a-c)=(d-b)i\).
+      좌변은 실수인데 우변이 허수이면 모순이므로 \(d-b=0\), 따라서 \(a=c,\ b=d\). <b>참</b>
+      <br><span style="color:#5b6672;font-size:14px;">※ 단, \(a,b,c,d\)가 <u>실수</u>라는 조건이 반드시 필요합니다. 이 문제엔 있으니 참.</span>
+    </li>
+    <li>
+      <b>ㄴ</b> — \(z=a+bi\)라 두면
+      \[z+\bar z = (a+bi)+(a-bi) = 2a \quad(\text{실수})\]
+      \[z\bar z = (a+bi)(a-bi) = a^2-(bi)^2 = a^2+b^2 \quad(\text{실수})\]
+      둘 다 실수이므로 <b>참</b>
+    </li>
+    <li>
+      <b>ㄷ</b> — 허수 단위 \(i\)에 대해 \(i&gt;0\)이라 가정하면 양변에 \(i\)를 곱해 \(i^2=-1&gt;0\)이 되어 모순,
+      \(i&lt;0\)이라 가정해도 \(i^2=-1&gt;0\)이 되어 모순입니다. 즉 허수에는 대소 관계를 줄 수 없습니다. <b>참</b>
+    </li>
+    <li>ㄱ, ㄴ, ㄷ이 모두 참입니다.</li>
+  </ol>
+
+  <div class="final">정답: ⑤ ㄱ, ㄴ, ㄷ</div>
+</article>
+
+<!-- ─────────────────────────── 5 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">5</span> 치환을 이용한 인수분해 <span class="tag">3.1점</span></h3>
+
+  <div class="stem">
+    <p>다음 식을 인수분해 했을 때의 인수가 <b>아닌</b> 것은?</p>
+    <div class="boxed" style="text-align:center;">\[(x^2+x)^2-8(x^2+x)+12\]</div>
+    <ul class="choices">
+      <li>① \(x+1\)</li><li>② \(x-1\)</li><li>③ \(x+2\)</li><li>④ \(x-2\)</li><li>⑤ \(x+3\)</li>
+    </ul>
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — 같은 덩어리가 반복되면 <b>치환</b>! \(x^2+x=t\)로 놓으면 평범한 이차식 인수분해가 됩니다.
+    치환 후에는 <b>반드시 원래 문자로 되돌려</b> 끝까지 인수분해해야 합니다.
+  </div>
+
+  <ol class="steps">
+    <li>
+      \(x^2+x = t\)로 치환합니다.
+      \[t^2-8t+12\]
+    </li>
+    <li>
+      곱해서 12, 더해서 \(-8\)인 두 수는 \(-2, -6\).
+      \[t^2-8t+12=(t-2)(t-6)\]
+    </li>
+    <li>
+      \(t\)를 되돌립니다.
+      \[=(x^2+x-2)(x^2+x-6)\]
+    </li>
+    <li>
+      각각을 또 인수분해합니다. 여기서 멈추면 함정에 걸립니다.
+      \[x^2+x-2=(x+2)(x-1),\qquad x^2+x-6=(x+3)(x-2)\]
+      \[\therefore (x+2)(x-1)(x+3)(x-2)\]
+    </li>
+    <li>
+      인수는 \(x+2,\ x-1,\ x+3,\ x-2\) 네 개입니다. 보기 중 여기 없는 것은 \(x+1\).
+    </li>
+  </ol>
+
+  <div class="final">정답: ① \(x+1\)</div>
+
+  <div class="tip"><b>빠른 확인법</b> — \(x=-1\)을 원식에 대입해 0이 아니면 \(x+1\)은 인수가 아닙니다. \(x^2+x=0\)이므로 원식 \(=0-0+12=12\neq0\) ✔</div>
+</article>
+
+<!-- ─────────────────────────── 6 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">6</span> 음수의 제곱근 — 오류 찾기 <span class="tag">3.1점</span></h3>
+
+  <div class="stem">
+    <p>다음은 제곱근을 계산하는 과정이다. 계산된 과정에서 오류인 단계의 번호는? (단, 계산은 ①→②→③→④→⑤의 순으로 한다.)</p>
+    <div class="boxed">
+      <p>허수 단위 \(i=\sqrt{-1}\)과 양의 실수 \(a, b\)에 대하여</p>
+      \[\underbrace{ab = \sqrt{(-a)(-b)}}_{①}\ \underbrace{=\sqrt{-a}\,\sqrt{-b}}_{②}\]
+      \[\underbrace{=\sqrt{a}\,i \times \sqrt{b}\,i}_{③}\ \underbrace{=\sqrt{a}\,\sqrt{b}\times i^2}_{④}\ \underbrace{=-\sqrt{ab}}_{⑤}\]
+    </div>
+    <ul class="choices">
+      <li>①</li><li>②</li><li>③</li><li>④</li><li>⑤</li>
+    </ul>
+  </div>
+
+  <div class="warnbox">
+    <b>먼저 알아둘 점(인쇄 오타)</b> — 시험지에는 맨 왼쪽이 \(ab\)로 인쇄되어 있는데, 이는 \(\sqrt{ab}\)의 <u>근호가 빠진 오타</u>로 보입니다.
+    (그대로 두면 \(ab=\sqrt{ab}\)라는 별개의 오류가 생겨 “오류 단계가 하나”라는 문제 설정과 맞지 않습니다.)
+    출제 의도대로 \(\sqrt{ab}=\sqrt{(-a)(-b)}\)로 읽고 풀이합니다.
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — 제곱근의 성질 \(\sqrt{x}\sqrt{y}=\sqrt{xy}\) 는 <b>아무 때나 성립하지 않습니다.</b><br>
+    \(x&lt;0\) <b>그리고</b> \(y&lt;0\)일 때는 예외로
+    \[\sqrt{x}\,\sqrt{y} = -\sqrt{xy}\]
+    즉 <b>음수 × 음수</b>일 때만 부호가 뒤집힙니다.
+  </div>
+
+  <ol class="steps">
+    <li>
+      <b>① 검토</b> — \(a,b&gt;0\)이므로 \((-a)(-b)=ab\). 따라서 \(\sqrt{ab}=\sqrt{(-a)(-b)}\)는 <b>옳음</b>.
+    </li>
+    <li>
+      <b>② 검토</b> — 여기서 \(\sqrt{(-a)(-b)}=\sqrt{-a}\sqrt{-b}\)로 쪼갰습니다.
+      그런데 \(-a&lt;0,\ -b&lt;0\)으로 <b>둘 다 음수</b>이므로 이 경우엔
+      \[\sqrt{-a}\,\sqrt{-b} = -\sqrt{(-a)(-b)}\]
+      가 되어야 합니다. <b>부호가 반대 → 오류!</b>
+    </li>
+    <li>
+      <b>③ 검토</b> — \(a&gt;0\)일 때 \(\sqrt{-a}=\sqrt{a}\,i\)는 정의 그대로. <b>옳음</b>.
+    </li>
+    <li>
+      <b>④ 검토</b> — \(\sqrt{a}\,i\times\sqrt{b}\,i = \sqrt{a}\sqrt{b}\times i^2\), 곱셈의 교환·결합법칙일 뿐. <b>옳음</b>.
+    </li>
+    <li>
+      <b>⑤ 검토</b> — \(i^2=-1\)이고 \(a,b&gt;0\)이므로 \(\sqrt{a}\sqrt{b}=\sqrt{ab}\). 따라서 \(=-\sqrt{ab}\). <b>옳음</b>.
+    </li>
+    <li>
+      결국 \(\sqrt{ab}=-\sqrt{ab}\)라는 모순이 나온 원인은 오직 <b>②</b>입니다.
+    </li>
+  </ol>
+
+  <div class="final">정답: ②</div>
+
+  <div class="tip"><b>암기 포인트</b> — \(\dfrac{\sqrt{x}}{\sqrt{y}}=-\sqrt{\dfrac{x}{y}}\) 는 \(x&gt;0,\ y&lt;0\)일 때. 곱은 ‘둘 다 음수’, 나눗셈은 ‘분자 양수·분모 음수’일 때만 부호가 바뀝니다.</div>
+</article>
+
+<!-- ─────────────────────────── 7 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">7</span> 항등식 + 판별식(접할 조건) <span class="tag">3.2점</span></h3>
+
+  <div class="stem">
+    <p>이차함수 \(y=x^2-2(a+k)x+k^2+bk+a\)의 그래프가 실수 \(k\)의 값에 관계없이 항상 \(x\)축에 접할 때, \(a+b\)의 값은? (단, \(a&gt;0\))</p>
+    <ul class="choices">
+      <li>① 2</li><li>② 3</li><li>③ 4</li><li>④ 5</li><li>⑤ 6</li>
+    </ul>
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — 두 가지가 결합된 문제입니다.<br>
+    ① 이차함수 그래프가 \(x\)축에 <b>접한다</b> ⟺ \(D=0\)<br>
+    ② “\(k\)의 값에 관계없이 항상” ⟹ \(k\)에 대한 <b>항등식</b> ⟹ \(k\)로 정리한 뒤 <b>모든 계수 = 0</b>
+  </div>
+
+  <ol class="steps">
+    <li>
+      \(x\)의 계수가 짝수이므로 <b>짝수 판별식</b>을 씁니다. \(x^2-2(a+k)x+(k^2+bk+a)\)에서
+      \[\frac{D}{4} = (a+k)^2 - (k^2+bk+a)\]
+    </li>
+    <li>
+      전개해서 정리합니다.
+      \[= a^2+2ak+k^2-k^2-bk-a = (2a-b)k + (a^2-a)\]
+    </li>
+    <li>
+      이것이 <b>모든 실수 \(k\)에 대하여</b> 0이어야 하므로, \(k\)에 대한 일차식의 계수와 상수항이 각각 0이어야 합니다.
+      \[2a-b=0, \qquad a^2-a=0\]
+    </li>
+    <li>
+      \(a^2-a=a(a-1)=0\)에서 \(a=0\) 또는 \(a=1\). 조건 \(a&gt;0\)이므로 <b>\(a=1\)</b>.
+    </li>
+    <li>
+      \(b=2a=2\). 따라서
+      \[a+b = 1+2 = 3\]
+    </li>
+    <li>
+      검산: \(a=1,b=2\)이면 \(y=x^2-2(1+k)x+k^2+2k+1 = x^2-2(k+1)x+(k+1)^2=\big(x-(k+1)\big)^2\).
+      정말 모든 \(k\)에 대해 \(x\)축에 접합니다 ✔
+    </li>
+  </ol>
+
+  <div class="final">정답: ② 3</div>
+
+  <div class="tip"><b>실수 주의</b> — “\(k\)에 관계없이”를 보고 \(k=0,1\) 같은 값을 대입해 푸는 것도 가능하지만, 그건 <u>필요조건</u>일 뿐이라 마지막에 검산이 꼭 필요합니다. 항등식으로 계수비교하는 쪽이 안전합니다.</div>
+</article>
+
+<!-- ─────────────────────────── 8 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">8</span> 치환을 이용한 항등식 계수 비교 <span class="tag">3.3점</span></h3>
+
+  <div class="stem">
+    <p>모든 실수 \(x\)에 대하여 등식</p>
+    <div style="text-align:center;">\[(x-1)^4+a(x-1)^3+b(x-1)^2+c(x-1)=(x-1)(x+1)(x^2-x+1)\]</div>
+    <p>이 성립할 때, 상수 \(a, b, c\)에 대하여 \(a+b-c\)의 값은?</p>
+    <ul class="choices">
+      <li>① 1</li><li>② 2</li><li>③ 3</li><li>④ 4</li><li>⑤ 5</li>
+    </ul>
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — 좌변이 전부 \((x-1)\)의 거듭제곱 꼴입니다. 그러면 \(x-1=t\)로 <b>치환</b>해서
+    양변을 모두 \(t\)에 대한 식으로 바꾼 뒤 계수를 비교하는 것이 정석입니다.
+  </div>
+
+  <ol class="steps">
+    <li>
+      \(x-1=t\)로 놓으면 \(x=t+1\). 좌변은 바로 정리됩니다.
+      \[(\text{좌변}) = t^4+at^3+bt^2+ct\]
+    </li>
+    <li>
+      우변도 \(t\)로 바꿉니다. \(x-1=t,\ x+1=t+2\) 이고
+      \[x^2-x+1=(t+1)^2-(t+1)+1 = (t^2+2t+1)-t-1+1 = t^2+t+1\]
+    </li>
+    <li>
+      우변을 전개합니다. 먼저 뒤의 두 인수부터.
+      \[(t+2)(t^2+t+1) = t^3+t^2+t+2t^2+2t+2 = t^3+3t^2+3t+2\]
+      \[(\text{우변}) = t\,(t^3+3t^2+3t+2) = t^4+3t^3+3t^2+2t\]
+    </li>
+    <li>
+      좌변과 우변의 계수를 비교합니다.
+      \[a=3,\quad b=3,\quad c=2\]
+    </li>
+    <li>
+      \[a+b-c = 3+3-2 = 4\]
+    </li>
+  </ol>
+
+  <div class="final">정답: ④ 4</div>
+
+  <div class="tip"><b>참고</b> — 우변 \((x+1)(x^2-x+1)=x^3+1\) 이므로 우변은 \((x-1)(x^3+1)\)로도 볼 수 있습니다. 어느 쪽으로 정리하든 결과는 같지만, 좌변이 \((x-1)\)의 거듭제곱이므로 \(t=x-1\) 치환이 가장 깔끔합니다.</div>
+</article>
+
+<!-- ─────────────────────────── 9 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">9</span> 곱셈공식의 변형 (대칭식) <span class="tag">3.4점</span></h3>
+
+  <div class="stem">
+    <p>실수 \(a, b, c\)가 \(a+b+c=2\sqrt3\), \(a^2+b^2+c^2=4\)를 만족할 때, \(9abc\)의 값은?</p>
+    <ul class="choices">
+      <li>① \(\sqrt3\)</li><li>② 3</li><li>③ \(4\sqrt3\)</li><li>④ \(8\sqrt3\)</li><li>⑤ \(9\sqrt3\)</li>
+    </ul>
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — \((a+b+c)^2 = a^2+b^2+c^2+2(ab+bc+ca)\)<br>
+    그리고 <b>실수 조건에서 매우 강력한 항등식</b>
+    \[a^2+b^2+c^2-ab-bc-ca=\tfrac12\{(a-b)^2+(b-c)^2+(c-a)^2\}\ \ge 0\]
+    이 값이 <b>0이면 \(a=b=c\)</b> 입니다.
+  </div>
+
+  <ol class="steps">
+    <li>
+      먼저 \(ab+bc+ca\)를 구합니다.
+      \[(a+b+c)^2 = a^2+b^2+c^2+2(ab+bc+ca)\]
+      \[(2\sqrt3)^2 = 12 = 4 + 2(ab+bc+ca) \;\Longrightarrow\; ab+bc+ca = 4\]
+    </li>
+    <li>
+      그런데 \(a^2+b^2+c^2 = 4\)이고 \(ab+bc+ca=4\)이므로
+      \[a^2+b^2+c^2-(ab+bc+ca) = 0\]
+    </li>
+    <li>
+      위 핵심 항등식에 의해
+      \[\tfrac12\{(a-b)^2+(b-c)^2+(c-a)^2\}=0\]
+      \(a,b,c\)가 실수이므로 제곱의 합이 0 ⟹ 각 항이 0 ⟹ <b>\(a=b=c\)</b>
+    </li>
+    <li>
+      \(3a = 2\sqrt3\) 이므로
+      \[a = \frac{2\sqrt3}{3} = \frac{2}{\sqrt3}\]
+      (검산: \(a^2=\frac43\), \(3a^2=4\) ✔)
+    </li>
+    <li>
+      \[abc = a^3 = \left(\frac{2}{\sqrt3}\right)^3 = \frac{8}{3\sqrt3} = \frac{8\sqrt3}{9}\]
+      \[\therefore 9abc = 9\cdot\frac{8\sqrt3}{9} = 8\sqrt3\]
+    </li>
+  </ol>
+
+  <div class="final">정답: ④ \(8\sqrt3\)</div>
+
+  <div class="tip"><b>출제 의도</b> — “\(9abc\)”라고 굳이 9를 붙인 이유는 \(abc=\frac{8\sqrt3}{9}\)라는 지저분한 분수를 정리해 주려는 배려입니다. \(a=b=c\)를 눈치채는 순간 끝나는 문제입니다.</div>
+</article>
+
+<!-- ─────────────────────────── 10 ─────────────────────────── -->
+<article class="q">
+  <h3><span class="num">10</span> 나머지정리 · 항등식 <span class="tag">3.5점</span></h3>
+
+  <div class="stem">
+    <p>삼차식 \(f(x)\)가 다음 조건을 만족시킨다.</p>
+    <div class="boxed">
+      <p>(가) \(f(x)\)를 \(x^2+x+1\)로 나눈 나머지는 \(-x+1\)이다.</p>
+      <p>(나) \(f(1)=3\)</p>
+    </div>
+    <p>\(f(x)\)를 \(x^3-1\)로 나눈 나머지를 \(R(x)\)라 할 때, \(R(-1)\)의 값은?</p>
+    <ul class="choices">
+      <li>① 1</li><li>② 2</li><li>③ 3</li><li>④ 4</li><li>⑤ 5</li>
+    </ul>
+  </div>
+
+  <div class="concept">
+    <b>핵심 개념</b> — \(x^3-1=(x-1)(x^2+x+1)\) 이라는 <b>인수분해가 열쇠</b>입니다.<br>
+    나눗셈 정리: \(f(x) = (\text{나누는 식})\times(\text{몫}) + (\text{나머지})\), 나머지의 차수 &lt; 나누는 식의 차수.
+  </div>
+
+  <ol class="steps">
+    <li>
+      조건 (가)를 식으로 씁니다. \(f(x)\)는 삼차식, 나누는 식이 이차식이므로 <b>몫은 일차식</b>입니다.
+      \[f(x) = (x^2+x+1)(px+q) - x + 1 \quad (p\neq 0)\]
+    </li>
+    <li>
+      조건 (나)를 대입합니다. \(x=1\)이면 \(x^2+x+1=3\)이고 \(-x+1=0\)이므로
+      \[f(1) = 3(p+q) + 0 = 3 \;\Longrightarrow\; p+q = 1\]
+      <span style="color:#5b6672;font-size:14px;">→ \(p, q\)가 <u>각각</u> 정해지지는 않지만, 합이 1이라는 정보만으로 충분합니다.</span>
+    </li>
+    <li>
+      이제 \(x^3-1\)로 나눈 나머지를 구합니다. \(x^3-1=(x-1)(x^2+x+1)\)이므로,
+      \(f(x)\)에서 \((x^3-1)\)의 배수를 빼내면 됩니다. \(px\cdot(x^2+x+1)\)를 이렇게 변형합니다.
+      \[px(x^2+x+1) = p(x^3+x^2+x) = p(x^3-1) + p(x^2+x+1)\]
+    </li>
+    <li>
+      이를 대입해 정리합니다.
+      \[f(x) = p(x^3-1) + p(x^2+x+1) + q(x^2+x+1) - x+1\]
+      \[= p(x^3-1) + (p+q)(x^2+x+1) - x + 1\]
+    </li>
+    <li>
+      \(p+q=1\)을 넣으면 뒷부분이 이차 이하가 되므로 그것이 곧 나머지입니다.
+      \[R(x) = (x^2+x+1) - x + 1 = x^2 + 2\]
+    </li>
+    <li>
+      \[R(-1) = (-1)^2 + 2 = 3\]
+    </li>
+  </ol>
+
+  <div class="final">정답: ③ 3</div>
+
+  <div class="tip">
+    <b>검산해 보기</b> — 예를 들어 \(p=1, q=0\)이면 \(f(x)=x(x^2+x+1)-x+1=x^3+x^2+1\).
+    확인: \(f(1)=3\) ✔, \(x^3=1+(x^3-1)\)이므로 \(f(x)\)를 \(x^3-1\)로 나눈 나머지는 \(1+x^2+1=x^2+2\) ✔.
+    \(p,q\)를 다르게 잡아도 \(p+q=1\)만 지키면 \(R(x)\)는 항상 같습니다.
+  </div>
+</article>
+
+<footer>
+  1~10번 해설 끝 · 나머지 11~22번은 이어서 정리해 드릴게요.
+</footer>
+
+</div>

@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>시험지 문제 추출 + AI 풀이 비용 실측</title>
+<script>
+  window.MathJax = {
+    tex: {
+      inlineMath: [['\\(', '\\)']],
+      displayMath: [['\\[', '\\]']]
+    },
+    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre'] }
+  };
+</script>
+<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --line: #e2e5ea;
+    --text: #1f2328;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-weak: #eff4ff;
+    --ok: #15803d;
+    --warn: #b45309;
+    --err: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px 64px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Pretendard", -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  #drop {
+    border: 2px dashed var(--line);
+    border-radius: 10px;
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+    transition: .15s;
+    background: #fbfcfd;
+  }
+  #drop:hover, #drop.over { border-color: var(--accent); background: var(--accent-weak); color: var(--accent); }
+  #drop strong { color: var(--text); display: block; font-size: 15px; margin-bottom: 4px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .row + .row { margin-top: 12px; }
+  button {
+    font: inherit;
+    padding: 8px 16px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: #fff;
+    color: var(--text);
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: #c3c8d0; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #1d4ed8; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  select {
+    font: inherit; padding: 7px 10px; border-radius: 7px;
+    border: 1px solid var(--line); background: #fff;
+  }
+  label.inline { color: var(--muted); font-size: 13px; }
+  .meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .chip {
+    background: #f1f3f6; border: 1px solid var(--line); border-radius: 999px;
+    padding: 3px 11px; font-size: 12px; color: var(--muted);
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+  .chip.free { background: #ecfdf3; border-color: #bbf7d0; color: var(--ok); }
+  .chip.mode { background: var(--accent-weak); border-color: #c7d7fe; color: var(--accent); }
+  .note { font-size: 12.5px; color: var(--muted); margin-top: 10px; }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px; margin-top: 14px;
+  }
+  .prob {
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+    background: #fff; display: flex; flex-direction: column; gap: 8px;
+  }
+  .prob.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-weak); }
+  .prob header { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+  .prob header b { font-size: 14px; }
+  .prob header span { color: var(--muted); font-size: 12px; margin-left: auto; }
+  .thumb {
+    width: 100%; border: 1px solid #eef0f3; border-radius: 5px;
+    background: #fff; display: block; cursor: zoom-in;
+  }
+  .thumb.zoom { position: fixed; inset: 4vh 4vw; width: auto; height: 92vh;
+    object-fit: contain; z-index: 99; background: #fff; box-shadow: 0 8px 40px rgba(0,0,0,.35);
+    cursor: zoom-out; }
+  .txt { font-size: 11.5px; color: var(--muted); max-height: 48px; overflow: hidden;
+    white-space: pre-wrap; word-break: break-all; }
+  .res { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+  .res > .head {
+    background: #f8f9fb; border-bottom: 1px solid var(--line);
+    padding: 9px 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .res > .head b { font-size: 14px; }
+  .res > .body { padding: 14px 16px; }
+  .res > .body h2 { font-size: 14px; margin: 16px 0 6px; color: var(--accent); }
+  .res > .body h2:first-child { margin-top: 0; }
+  .res > .body p { margin: 6px 0; }
+  .res > .body ul, .res > .body ol { margin: 6px 0; padding-left: 22px; }
+  .res > .body code { background: #f1f3f6; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+  table.usage { border-collapse: collapse; width: 100%; margin-top: 14px; font-size: 12.5px; }
+  table.usage th, table.usage td {
+    border: 1px solid var(--line); padding: 5px 9px; text-align: right;
+  }
+  table.usage th { background: #f8f9fb; color: var(--muted); font-weight: 500; }
+  table.usage td:first-child, table.usage th:first-child { text-align: left; }
+  .totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .tot { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: #fbfcfd; }
+  .tot .k { font-size: 12px; color: var(--muted); }
+  .tot .v { font-size: 17px; font-weight: 700; margin-top: 2px; }
+  .tot.hl { background: var(--accent-weak); border-color: #c7d7fe; }
+  .tot.hl .v { color: var(--accent); }
+  .msg { padding: 11px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
+  .msg.err { background: #fef2f2; border: 1px solid #fecaca; color: var(--err); }
+  .msg.warn { background: #fffbeb; border: 1px solid #fde68a; color: var(--warn); }
+  .msg.info { background: var(--accent-weak); border: 1px solid #c7d7fe; color: var(--accent); }
+  .msg b { display: block; margin-bottom: 3px; }
+  .hidden { display: none !important; }
+  .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid #fff6;
+    border-top-color: #fff; border-radius: 50%; animation: r .7s linear infinite;
+    vertical-align: -2px; margin-right: 6px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  .foot { font-size: 12px; color: var(--muted); text-align: center; margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>시험지 문제 추출 + AI 풀이 비용 실측</h1>
+  <p class="sub">추출은 코드(PyMuPDF)로 — 비용 0원. 풀이만 AI로 — 토큰/비용은 API 응답 usage 실측값.</p>
+
+  <div id="msgs"></div>
+
+  <!-- 1단계: 업로드 & 추출 -->
+  <div class="card">
+    <h2>① 추출 (AI 호출 없음)</h2>
+    <div id="drop">
+      <strong>시험지 PDF를 여기에 끌어다 놓으세요</strong>
+      클릭해서 파일 선택도 가능합니다
+      <input type="file" id="file" accept="application/pdf,.pdf" class="hidden" />
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button id="btnExtract" class="primary" disabled>① 추출</button>
+      <span id="fname" class="chip hidden"></span>
+    </div>
+    <div id="extractMeta" class="meta hidden"></div>
+    <div id="modeReason" class="note hidden"></div>
+  </div>
+
+  <!-- 2단계: 문제 목록 -->
+  <div class="card hidden" id="listCard">
+    <h2>② 문제 목록</h2>
+    <div class="row">
+      <button id="btnAll">전체 선택</button>
+      <button id="btnNone">전체 해제</button>
+      <button id="btnFirst3">앞 3문항만</button>
+      <span id="selCount" class="chip"></span>
+    </div>
+    <div class="row">
+      <label class="inline" for="model">모델</label>
+      <select id="model">
+        <option value="claude-opus-5">claude-opus-5 (in $5 / out $25)</option>
+        <option value="claude-sonnet-5">claude-sonnet-5 (in $3 / out $15)</option>
+        <option value="claude-haiku-4-5">claude-haiku-4-5 (in $1 / out $5)</option>
+      </select>
+      <label class="inline" for="effort">effort</label>
+      <select id="effort">
+        <option value="low">low</option>
+        <option value="medium" selected>medium</option>
+        <option value="high">high</option>
+        <option value="xhigh">xhigh</option>
+        <option value="max">max</option>
+      </select>
+      <button id="btnSolve" class="primary">선택 문제 풀기</button>
+    </div>
+    <div class="note">
+      비용 테스트가 목적이면 2~3문항만 먼저 풀어보세요. 하단에 전체 문항 환산 예상비용이 나옵니다.
+      2번째 문항부터 <code>cache_read</code> 토큰이 잡히면 프롬프트 캐싱이 동작한 것입니다.
+    </div>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <!-- 3단계: 결과 -->
+  <div class="card hidden" id="resultCard">
+    <h2>③ 풀이 결과 (실측)</h2>
+    <div id="results"></div>
+  </div>
+
+  <div class="card hidden" id="totalCard">
+    <h2>합계</h2>
+    <div class="totals" id="totals"></div>
+    <div class="note" id="totalNote"></div>
+  </div>
+
+  <p class="foot">단가는 2026-06 기준 하드코딩 값입니다. 실제 정산 전 platform.claude.com/docs/en/pricing 확인 필요. 환율은 상수(1 USD = 1,400 KRW)입니다.</p>
+</div>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const state = { jobId: null, problems: [], selected: new Set(), mode: null, count: 0 };
+
+/* ---------- 메시지 ---------- */
+function clearMsgs() { $("msgs").innerHTML = ""; }
+function showMsg(kind, title, body) {
+  const el = document.createElement("div");
+  el.className = "msg " + kind;
+  const b = document.createElement("b");
+  b.textContent = title;
+  el.appendChild(b);
+  if (body) el.appendChild(document.createTextNode(body));
+  $("msgs").appendChild(el);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+/* 서버 에러(JSON)에서 사람이 읽을 메시지를 뽑는다 */
+async function readError(res) {
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* 본문이 JSON이 아님 */ }
+  const d = data && data.detail;
+  if (d && typeof d === "object" && d.message) {
+    return { title: d.message, body: d.hint || "" };
+  }
+  if (typeof d === "string") return { title: d, body: "" };
+  if (Array.isArray(d)) return { title: "요청 형식 오류", body: JSON.stringify(d) };
+  return { title: `요청 실패 (HTTP ${res.status})`, body: "" };
+}
+
+/* ---------- 포맷 ---------- */
+const nf = new Intl.NumberFormat("ko-KR");
+const fmtInt = (n) => nf.format(Math.round(n || 0));
+function fmtUsd(v) {
+  v = v || 0;
+  if (v === 0) return "$0";
+  if (v < 0.01) return "$" + v.toFixed(6);
+  return "$" + v.toFixed(4);
+}
+function fmtKrw(v) {
+  v = v || 0;
+  if (v === 0) return "0원";
+  if (v < 10) return v.toFixed(2) + "원";
+  return fmtInt(v) + "원";
+}
+
+/* ---------- 업로드 ---------- */
+let picked = null;
+const drop = $("drop");
+drop.addEventListener("click", () => $("file").click());
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault();
+  drop.classList.remove("over");
+  if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+});
+$("file").addEventListener("change", (e) => {
+  if (e.target.files.length) setFile(e.target.files[0]);
+});
+
+function setFile(f) {
+  if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") {
+    showMsg("err", "PDF 파일만 업로드할 수 있습니다.", f.name);
+    return;
+  }
+  picked = f;
+  const chip = $("fname");
+  chip.textContent = `${f.name} (${(f.size / 1048576).toFixed(1)}MB)`;
+  chip.classList.remove("hidden");
+  $("btnExtract").disabled = false;
+  clearMsgs();
+}
+
+/* ---------- 추출 ---------- */
+$("btnExtract").addEventListener("click", async () => {
+  if (!picked) return;
+  const btn = $("btnExtract");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>추출 중...';
+  clearMsgs();
+  try {
+    const fd = new FormData();
+    fd.append("file", picked, picked.name);
+    const res = await fetch("/api/extract", { method: "POST", body: fd });
+    if (!res.ok) {
+      const e = await readError(res);
+      showMsg("err", e.title, e.body);
+      return;
+    }
+    renderExtract(await res.json());
+  } catch (err) {
+    showMsg("err", "네트워크 오류", String(err));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "① 추출";
+  }
+});
+
+function renderExtract(data) {
+  state.jobId = data.job_id;
+  state.problems = data.problems;
+  state.mode = data.mode;
+  state.count = data.problem_count;
+  state.selected = new Set();
+
+  const meta = $("extractMeta");
+  meta.innerHTML = "";
+  const chips = [
+    ["페이지", `${data.page_count}쪽`, ""],
+    ["문항", `${data.problem_count}개`, ""],
+    ["번호", `${data.problem_numbers[0]}~${data.problem_numbers[data.problem_numbers.length - 1]}`, ""],
+    ["PUA 비율", (data.pua_ratio * 100).toFixed(2) + "%", ""],
+    ["모드", data.mode, "mode"],
+    ["DPI", data.dpi, ""],
+    ["AI 호출", `${data.ai_calls}회 · 비용 0원`, "free"]
+  ];
+  for (const [k, v, cls] of chips) {
+    const c = document.createElement("span");
+    c.className = "chip " + cls;
+    c.innerHTML = `${k} <b></b>`;
+    c.querySelector("b").textContent = v;
+    meta.appendChild(c);
+  }
+  meta.classList.remove("hidden");
+
+  const reason = $("modeReason");
+  reason.textContent = data.mode_reason + " / " + data.cost_note;
+  reason.classList.remove("hidden");
+
+  const grid = $("grid");
+  grid.innerHTML = "";
+  for (const p of data.problems) {
+    const card = document.createElement("div");
+    card.className = "prob";
+    card.dataset.no = p.no;
+
+    const head = document.createElement("header");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.dataset.no = p.no;
+    cb.addEventListener("change", () => toggle(p.no, cb.checked));
+    const b = document.createElement("b");
+    b.textContent = `${p.no}번`;
+    const info = document.createElement("span");
+    info.textContent = `p.${p.page} · ${p.image_w}×${p.image_h}px`;
+    head.append(cb, b, info);
+    card.appendChild(head);
+
+    if (p.image_b64) {
+      const img = document.createElement("img");
+      img.className = "thumb";
+      img.loading = "lazy";
+      img.alt = `${p.no}번 문제`;
+      img.src = "data:image/png;base64," + p.image_b64;
+      img.addEventListener("click", () => img.classList.toggle("zoom"));
+      card.appendChild(img);
+    } else if (p.text) {
+      const t = document.createElement("div");
+      t.className = "txt";
+      t.textContent = p.text;
+      card.appendChild(t);
+    }
+    grid.appendChild(card);
+  }
+
+  $("listCard").classList.remove("hidden");
+  $("resultCard").classList.add("hidden");
+  $("totalCard").classList.add("hidden");
+  selectFirst(Math.min(3, data.problem_count));
+}
+
+/* ---------- 선택 ---------- */
+function toggle(no, on) {
+  if (on) state.selected.add(no); else state.selected.delete(no);
+  syncSelection();
+}
+function syncSelection() {
+  for (const cb of document.querySelectorAll('#grid input[type=checkbox]')) {
+    const no = Number(cb.dataset.no);
+    cb.checked = state.selected.has(no);
+    cb.closest(".prob").classList.toggle("sel", cb.checked);
+  }
+  $("selCount").textContent = `선택 ${state.selected.size} / ${state.count}`;
+  $("btnSolve").disabled = state.selected.size === 0;
+}
+function selectFirst(n) {
+  state.selected = new Set(state.problems.slice(0, n).map((p) => p.no));
+  syncSelection();
+}
+$("btnAll").addEventListener("click", () => { state.selected = new Set(state.problems.map(p => p.no)); syncSelection(); });
+$("btnNone").addEventListener("click", () => { state.selected = new Set(); syncSelection(); });
+$("btnFirst3").addEventListener("click", () => selectFirst(Math.min(3, state.count)));
+
+/* ---------- 풀기 ---------- */
+$("btnSolve").addEventListener("click", async () => {
+  if (!state.jobId || state.selected.size === 0) return;
+  const btn = $("btnSolve");
+  btn.disabled = true;
+  const n = state.selected.size;
+  btn.innerHTML = `<span class="spin"></span>${n}문항 푸는 중...`;
+  clearMsgs();
+  showMsg("info", `${n}문항을 순차 호출로 풀고 있습니다.`, "문항당 수십 초가 걸릴 수 있습니다.");
+  try {
+    const res = await fetch("/api/solve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: state.jobId,
+        problem_numbers: [...state.selected].sort((a, b) => a - b),
+        model: $("model").value,
+        effort: $("effort").value
+      })
+    });
+    clearMsgs();
+    if (!res.ok) {
+      const e = await readError(res);
+      showMsg("err", e.title, e.body);
+      return;
+    }
+    renderResults(await res.json());
+  } catch (err) {
+    clearMsgs();
+    showMsg("err", "네트워크 오류", String(err));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "선택 문제 풀기";
+  }
+});
+
+/* 아주 작은 마크다운 렌더러 (수식은 MathJax가 처리하므로 건드리지 않는다) */
+function mdToHtml(src) {
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const inline = (s) => esc(s)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  const out = [];
+  let list = null;
+  for (const raw of String(src || "").split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    const li = /^\s*(?:[-*+]|\d+\.)\s+(.*)$/.exec(line);
+    if (h) {
+      if (list) { out.push(`</${list}>`); list = null; }
+      out.push(`<h2>${inline(h[2])}</h2>`);
+    } else if (li) {
+      const tag = /^\s*\d+\./.test(line) ? "ol" : "ul";
+      if (list && list !== tag) { out.push(`</${list}>`); list = null; }
+      if (!list) { out.push(`<${tag}>`); list = tag; }
+      out.push(`<li>${inline(li[1])}</li>`);
+    } else if (!line.trim()) {
+      if (list) { out.push(`</${list}>`); list = null; }
+    } else {
+      if (list) { out.push(`</${list}>`); list = null; }
+      out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  if (list) out.push(`</${list}>`);
+  return out.join("\n");
+}
+
+function usageTable(cost) {
+  const t = (cost && cost.tokens) || {};
+  const u = (cost && cost.breakdown_usd) || {};
+  const k = (cost && cost.breakdown_krw) || {};
+  const rows = [
+    ["input", "input"], ["output", "output"],
+    ["cache_write", "cache_write"], ["cache_read", "cache_read"]
+  ];
+  let body = "";
+  for (const [label, key] of rows) {
+    body += `<tr><td>${label}</td><td>${fmtInt(t[key])}</td><td>${fmtUsd(u[key])}</td><td>${fmtKrw(k[key])}</td></tr>`;
+  }
+  body += `<tr><td><b>합계</b></td><td><b>${fmtInt(t.total)}</b></td>` +
+          `<td><b>${fmtUsd(cost && cost.total_usd)}</b></td>` +
+          `<td><b>${fmtKrw(cost && cost.total_krw)}</b></td></tr>`;
+  return `<table class="usage"><thead><tr><th>항목</th><th>토큰</th><th>USD</th><th>KRW</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderResults(data) {
+  const box = $("results");
+  box.innerHTML = "";
+
+  for (const r of data.results) {
+    const wrap = document.createElement("div");
+    wrap.className = "res";
+
+    const head = document.createElement("div");
+    head.className = "head";
+    const title = document.createElement("b");
+    title.textContent = `${r.no}번`;
+    head.appendChild(title);
+    const cost = r.cost || {};
+    const tk = cost.tokens || {};
+    const chips = [
+      `${r.model} · ${r.effort} · ${r.mode}`,
+      `in ${fmtInt(tk.input)} / out ${fmtInt(tk.output)}`,
+      `cache w ${fmtInt(tk.cache_write)} / r ${fmtInt(tk.cache_read)}`,
+      `${fmtUsd(cost.total_usd)} · ${fmtKrw(cost.total_krw)}`
+    ];
+    for (const c of chips) {
+      const s = document.createElement("span");
+      s.className = "chip";
+      s.textContent = c;
+      head.appendChild(s);
+    }
+    wrap.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "body";
+    if (r.error) {
+      const m = document.createElement("div");
+      m.className = "msg " + (r.ok ? "warn" : "err");
+      m.textContent = r.error;
+      body.appendChild(m);
+    }
+    if (r.solution) {
+      const sol = document.createElement("div");
+      sol.innerHTML = mdToHtml(r.solution);
+      body.appendChild(sol);
+    }
+    body.insertAdjacentHTML("beforeend", usageTable(cost));
+    wrap.appendChild(body);
+    box.appendChild(wrap);
+  }
+
+  $("resultCard").classList.remove("hidden");
+  renderTotals(data.totals);
+
+  if (window.MathJax && window.MathJax.typesetPromise) {
+    window.MathJax.typesetPromise([box]).catch(() => {});
+  }
+}
+
+function renderTotals(t) {
+  const el = $("totals");
+  el.innerHTML = "";
+  const cards = [
+    ["푼 문항", `${t.ok_count} / ${t.solved_count}`, ""],
+    ["input 토큰", fmtInt(t.input_tokens), ""],
+    ["output 토큰", fmtInt(t.output_tokens), ""],
+    ["cache write", fmtInt(t.cache_write_tokens), ""],
+    ["cache read", fmtInt(t.cache_read_tokens), ""],
+    ["총 토큰", fmtInt(t.total_tokens), ""],
+    ["총 비용 (USD)", fmtUsd(t.total_usd), ""],
+    ["총 비용 (KRW)", fmtKrw(t.total_krw), ""],
+    [`전체 ${t.total_problem_count}문항 환산`, fmtUsd(t.projected_all_usd), "hl"],
+    [`전체 ${t.total_problem_count}문항 환산`, fmtKrw(t.projected_all_krw), "hl"]
+  ];
+  for (const [k, v, cls] of cards) {
+    const d = document.createElement("div");
+    d.className = "tot " + cls;
+    d.innerHTML = '<div class="k"></div><div class="v"></div>';
+    d.querySelector(".k").textContent = k;
+    d.querySelector(".v").textContent = v;
+    el.appendChild(d);
+  }
+  $("totalNote").textContent =
+    `환산치 = 문항당 평균 ${fmtUsd(t.avg_usd_per_problem)} × ${t.total_problem_count}문항. ` +
+    `환율은 상수 1 USD = ${fmtInt(t.usd_krw)} KRW. ` +
+    `cache read 토큰이 0이 아니면 프롬프트 캐싱이 적용된 것입니다.`;
+  $("totalCard").classList.remove("hidden");
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,277 @@
+"""마이그레이션 테스트: 기존 DB 를 파괴하지 않고 컬럼/테이블만 더한다."""
+
+from __future__ import annotations
+
+import shutil
+import sqlite3
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+import config
+import storage
+
+# 마이그레이션 이전(v1) 스키마 그대로. section / problem_no / note_items 가 없다.
+LEGACY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS nodes (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    parent_id TEXT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
+
+CREATE TABLE IF NOT EXISTS files (
+    node_id TEXT PRIMARY KEY,
+    stored_path TEXT NOT NULL,
+    pages INTEGER NOT NULL,
+    mode TEXT NOT NULL,
+    pua_ratio REAL NOT NULL,
+    problem_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS problems (
+    node_id TEXT NOT NULL,
+    no INTEGER NOT NULL,
+    page INTEGER NOT NULL,
+    bbox TEXT NOT NULL,
+    crop_path TEXT NOT NULL,
+    image_w INTEGER NOT NULL DEFAULT 0,
+    image_h INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (node_id, no)
+);
+
+CREATE TABLE IF NOT EXISTS solutions (
+    node_id TEXT NOT NULL,
+    no INTEGER NOT NULL,
+    solution TEXT NOT NULL,
+    usage_json TEXT NULL,
+    cost_json TEXT NULL,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (node_id, no)
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    usage_json TEXT NULL,
+    cost_json TEXT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_node ON chat_messages(node_id, id);
+"""
+
+
+def _make_legacy_db(path: Path) -> None:
+    """v1 스키마 + 사용자 데이터가 들어 있는 DB 를 만든다."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(LEGACY_SCHEMA)
+        conn.execute(
+            "INSERT INTO nodes (id, type, name, parent_id, created_at)"
+            " VALUES ('folder1', 'folder', 'test-hw', NULL, '2026-07-31T20:00:00+09:00')"
+        )
+        conn.execute(
+            "INSERT INTO nodes (id, type, name, parent_id, created_at)"
+            " VALUES ('file1', 'file', '[2026-1-1-M][공수1][풍문고].pdf', 'folder1',"
+            " '2026-07-31T20:01:00+09:00')"
+        )
+        conn.execute(
+            "INSERT INTO files"
+            " (node_id, stored_path, pages, mode, pua_ratio, problem_count)"
+            " VALUES ('file1', 'files/file1.pdf', 7, 'image', 0.39, 22)"
+        )
+        conn.executemany(
+            "INSERT INTO problems (node_id, no, page, bbox, crop_path)"
+            " VALUES ('file1', ?, 1, '[0,0,1,1]', ?)",
+            [(no, f"crops/file1/q{no:02d}.png") for no in range(1, 23)],
+        )
+        conn.execute(
+            "INSERT INTO chat_messages (node_id, role, content, created_at)"
+            " VALUES ('file1', 'user', '예전 질문', '2026-07-31T20:02:00+09:00')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_migration_preserves_data_and_adds_schema(tmp_path: Path) -> None:
+    data_dir = tmp_path / "legacy-data"
+    _make_legacy_db(data_dir / "app.db")
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        storage.init_db()
+
+        conn = storage.connect()
+        try:
+            # ⒜ 기존 데이터가 그대로 살아 있다.
+            nodes = conn.execute(
+                "SELECT id, name, section FROM nodes ORDER BY id"
+            ).fetchall()
+            assert [(row["id"], row["section"]) for row in nodes] == [
+                ("file1", "exam"),
+                ("folder1", "exam"),
+            ]
+            assert conn.execute(
+                "SELECT problem_count FROM files WHERE node_id = 'file1'"
+            ).fetchone()["problem_count"] == 22
+            assert conn.execute(
+                "SELECT COUNT(*) AS n FROM problems WHERE node_id = 'file1'"
+            ).fetchone()["n"] == 22
+
+            # ⒝ chat_messages.problem_no 는 NULL(전역 스레드)로 백필된다.
+            chats = conn.execute(
+                "SELECT content, problem_no FROM chat_messages"
+            ).fetchall()
+            assert [(row["content"], row["problem_no"]) for row in chats] == [
+                ("예전 질문", None)
+            ]
+
+            # ⒞ 새 컬럼/테이블/인덱스가 생겼다.
+            assert "section" in storage.table_columns(conn, "nodes")
+            assert "problem_no" in storage.table_columns(conn, "chat_messages")
+            assert storage.table_columns(conn, "note_items") == {
+                "id",
+                "note_node_id",
+                "source_node_id",
+                "source_name",
+                "problem_no",
+                "crop_snapshot_path",
+                "memo",
+                "created_at",
+            }
+            indexes = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            }
+            assert {"idx_nodes_section", "idx_chat_thread"} <= indexes
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION
+        finally:
+            conn.close()
+    finally:
+        config.use_data_dir(original)
+
+
+def test_migration_is_idempotent(tmp_path: Path) -> None:
+    data_dir = tmp_path / "legacy-data"
+    _make_legacy_db(data_dir / "app.db")
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        for _ in range(3):  # 여러 번 기동해도 안전해야 한다
+            storage.init_db()
+        conn = storage.connect()
+        try:
+            assert conn.execute("SELECT COUNT(*) AS n FROM nodes").fetchone()["n"] == 2
+            assert (
+                conn.execute("SELECT COUNT(*) AS n FROM chat_messages").fetchone()["n"]
+                == 1
+            )
+        finally:
+            conn.close()
+    finally:
+        config.use_data_dir(original)
+
+
+def test_migrated_db_serves_api(tmp_path: Path) -> None:
+    """마이그레이션된 기존 DB 로 새 API(섹션/스레드/노트)가 동작한다."""
+    import main
+
+    data_dir = tmp_path / "legacy-data"
+    _make_legacy_db(data_dir / "app.db")
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        with TestClient(main.app) as client:
+            exam_nodes = client.get("/api/tree").json()["nodes"]
+            assert {node["name"] for node in exam_nodes} == {
+                "test-hw",
+                "[2026-1-1-M][공수1][풍문고].pdf",
+            }
+            assert all(node["section"] == "exam" for node in exam_nodes)
+            assert client.get("/api/tree", params={"section": "note"}).json() == {
+                "nodes": []
+            }
+
+            # 기존 채팅은 전역 스레드로 보인다.
+            threads = client.get("/api/files/file1/chat/threads").json()["threads"]
+            assert threads == [
+                {
+                    "problem_no": None,
+                    "turns": 1,
+                    "updated_at": "2026-07-31T20:02:00+09:00",
+                }
+            ]
+
+            note = client.post("/api/notes", json={"name": "이현우 오답"}).json()["node"]
+            added = client.post(
+                f"/api/notes/{note['id']}/items",
+                json={"source_node_id": "file1", "problem_numbers": [5]},
+            )
+            assert added.status_code == 201
+            assert added.json() == {"added": [5], "skipped": []}
+            # 크롭 원본이 없는(파일이 지워진) 항목은 crop_url 이 null 이다.
+            item = client.get(f"/api/notes/{note['id']}").json()["items"][0]
+            assert item["crop_url"] is None
+            assert item["source_available"] is True
+    finally:
+        config.use_data_dir(original)
+
+
+def test_real_user_db_copy_migrates_safely(tmp_path: Path) -> None:
+    """사용자 실제 DB **복사본**으로 마이그레이션 안전성을 검증한다.
+
+    원본(`app/core/data/app.db`)은 읽기만 하고, 없으면 건너뛴다.
+    """
+    source = Path(__file__).resolve().parents[1] / "data" / "app.db"
+    if not source.is_file():
+        return
+    data_dir = tmp_path / "copy-of-real"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, data_dir / "app.db")
+
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        before = storage.connect()
+        try:
+            names_before = [
+                str(row["name"])
+                for row in before.execute("SELECT name FROM nodes ORDER BY id")
+            ]
+            problems_before = int(
+                before.execute("SELECT COUNT(*) AS n FROM problems").fetchone()["n"]
+            )
+        finally:
+            before.close()
+
+        storage.init_db()
+
+        after = storage.connect()
+        try:
+            rows = after.execute("SELECT name, section FROM nodes ORDER BY id").fetchall()
+            assert [str(row["name"]) for row in rows] == names_before
+            assert all(row["section"] == "exam" for row in rows)
+            assert (
+                int(after.execute("SELECT COUNT(*) AS n FROM problems").fetchone()["n"])
+                == problems_before
+            )
+            assert "note_items" in {
+                str(row["name"])
+                for row in after.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        finally:
+            after.close()
+    finally:
+        config.use_data_dir(original)

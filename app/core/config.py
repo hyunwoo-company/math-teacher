@@ -1,0 +1,136 @@
+"""경로·배포모드·API 키 저장 등 런타임 설정.
+
+데이터 디렉터리는 기본값이 `app/core/data` 이고, 환경변수
+`MATH_TEACHER_DATA_DIR` 로 바꿀 수 있다(테스트/샌드박스용).
+`/tmp` 는 쓰지 않는다.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any, Final, Literal
+
+DeployMode = Literal["desktop", "web"]
+
+CORE_DIR: Final[Path] = Path(__file__).resolve().parent
+_DEFAULT_DATA_DIR: Final[Path] = CORE_DIR / "data"
+
+DATA_DIR_ENV: Final[str] = "MATH_TEACHER_DATA_DIR"
+DEPLOY_MODE_ENV: Final[str] = "MATH_TEACHER_MODE"
+API_KEY_ENV: Final[str] = "ANTHROPIC_API_KEY"
+
+MAX_UPLOAD_BYTES: Final[int] = 50 * 1024 * 1024  # 50MB
+MAX_NAME_LENGTH: Final[int] = 200
+
+# 풀이 1건의 출력 상한. API 키 모드에서만 강제된다(구독 모드는 CLI 가 관리).
+DEFAULT_MAX_TOKENS: Final[int] = 8000
+
+# 채팅 컨텍스트로 이어붙이는 최근 메시지 수 상한(토큰 폭주 방지).
+CHAT_HISTORY_LIMIT: Final[int] = 20
+
+MODEL_LABELS: Final[dict[str, str]] = {
+    "claude-opus-5": "Claude Opus 5 (가장 정확, 가장 비쌈)",
+    "claude-sonnet-5": "Claude Sonnet 5 (균형)",
+    "claude-haiku-4-5": "Claude Haiku 4.5 (가장 저렴)",
+}
+
+_data_dir: Path = Path(os.environ.get(DATA_DIR_ENV) or _DEFAULT_DATA_DIR)
+
+
+def data_dir() -> Path:
+    """데이터 루트(`app.db`, `files/`, `crops/`, `settings.json`)."""
+    return _data_dir
+
+
+def use_data_dir(path: Path) -> None:
+    """데이터 루트를 바꾼다. 테스트에서만 사용한다."""
+    global _data_dir
+    _data_dir = Path(path)
+    ensure_dirs()
+
+
+def db_path() -> Path:
+    """SQLite 파일 경로."""
+    return data_dir() / "app.db"
+
+
+def files_dir() -> Path:
+    """업로드 원본 PDF 디렉터리."""
+    return data_dir() / "files"
+
+
+def crops_dir() -> Path:
+    """문제별 크롭 PNG 디렉터리."""
+    return data_dir() / "crops"
+
+
+def note_crops_dir() -> Path:
+    """오답노트 항목의 크롭 **스냅샷** 디렉터리.
+
+    원본 시험지가 지워져도 오답노트가 남아야 하므로 `crops/` 를 참조하지 않고
+    추가 시점의 PNG 를 여기로 복사해 둔다.
+    """
+    return data_dir() / "note_crops"
+
+
+def settings_path() -> Path:
+    """설정(API 키) 파일 경로."""
+    return data_dir() / "settings.json"
+
+
+def ensure_dirs() -> None:
+    """데이터 디렉터리를 만든다(이미 있으면 통과)."""
+    files_dir().mkdir(parents=True, exist_ok=True)
+    crops_dir().mkdir(parents=True, exist_ok=True)
+    note_crops_dir().mkdir(parents=True, exist_ok=True)
+
+
+def deploy_mode() -> DeployMode:
+    """`desktop`(Tauri sidecar / 로컬 실행) 또는 `web`(서버 실행).
+
+    기본값은 `desktop`. 웹으로 배포할 때 `MATH_TEACHER_MODE=web` 을 설정한다.
+    """
+    return "web" if os.environ.get(DEPLOY_MODE_ENV, "").lower() == "web" else "desktop"
+
+
+def _read_settings() -> dict[str, Any]:
+    path = settings_path()
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _write_settings(settings: dict[str, Any]) -> None:
+    ensure_dirs()
+    settings_path().write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def stored_api_key() -> str | None:
+    """`data/settings.json` 에 저장된 키(없으면 환경변수 `ANTHROPIC_API_KEY`)."""
+    stored = _read_settings().get("anthropic_api_key")
+    if isinstance(stored, str) and stored.strip():
+        return stored.strip()
+    from_env = os.environ.get(API_KEY_ENV, "").strip()
+    return from_env or None
+
+
+def save_api_key(key: str) -> None:
+    """키를 평문으로 저장한다(데스크톱 전용, README 경고 참조)."""
+    settings = _read_settings()
+    settings["anthropic_api_key"] = key.strip()
+    _write_settings(settings)
+
+
+def clear_api_key() -> None:
+    """저장된 키를 지운다(환경변수는 건드리지 않는다)."""
+    settings = _read_settings()
+    settings.pop("anthropic_api_key", None)
+    _write_settings(settings)

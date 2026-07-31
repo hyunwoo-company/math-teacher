@@ -1,0 +1,609 @@
+/**
+ * 목 API 클라이언트. `NEXT_PUBLIC_MOCK=1` 일 때 실제 fetch 대신 이걸 쓴다.
+ *
+ * - 메모리 상태를 들고 있어 폴더 생성/이름변경/이동/삭제가 실제로 반영된다.
+ * - 스트리밍은 진짜 SSE 바이트를 만들어 실제 파서를 통과시킨다(`mock/sse-stream.ts`).
+ * - 백엔드가 붙은 뒤에도 개발/회귀 확인용으로 남겨둔다.
+ */
+
+import { ApiError } from '@/lib/api-error';
+import { iterateSSE } from '@/lib/sse';
+import { toStreamEvent } from '@/lib/stream-events';
+import { mockSseStream, type MockSseEvent } from '@/lib/mock/sse-stream';
+import {
+  MOCK_NOTE_ID,
+  MOCK_PDF_PATH,
+  MOCK_PROBLEM_COUNT,
+  makeMockEnv,
+  makeMockNodes,
+  makeMockNoteNodes,
+  makeMockProblems,
+  mockChatReply,
+  mockCropUrl,
+  mockSolutionText,
+} from '@/lib/mock/data';
+import type { ApiClient } from '@/lib/api-client';
+import type {
+  AddNoteItemsResult,
+  ChatHistoryResponse,
+  ChatMessage,
+  ChatRequest,
+  Cost,
+  EnvResponse,
+  FileDetail,
+  NoteDetail,
+  NoteItem,
+  Problem,
+  Section,
+  Solution,
+  SolutionsResponse,
+  SolveRequest,
+  StreamEvent,
+  ThreadsResponse,
+  TreeNode,
+  TreeResponse,
+  Usage,
+} from '@/types/api';
+
+/** 문항별 스레드 키. null = 시험지 전역. */
+function threadKey(fileId: string, problemNo: number | null): string {
+  return `${fileId}::${problemNo ?? 'global'}`;
+}
+
+interface MockState {
+  env: EnvResponse;
+  nodes: TreeNode[];
+  problems: Map<string, Problem[]>;
+  solutions: Map<string, Map<number, Solution>>;
+  /** key = threadKey(fileId, problemNo). */
+  chats: Map<string, ChatMessage[]>;
+  /** noteId -> items. */
+  noteItems: Map<string, NoteItem[]>;
+  counter: number;
+}
+
+function initialState(): MockState {
+  const nodes = [...makeMockNodes(), ...makeMockNoteNodes()];
+  const problems = new Map<string, Problem[]>();
+  for (const node of nodes) {
+    if (node.type === 'file' && node.section !== 'note' && node.file) {
+      problems.set(node.id, makeMockProblems(node.file.problem_count));
+    }
+  }
+  return {
+    env: makeMockEnv(),
+    nodes,
+    problems,
+    solutions: new Map(),
+    chats: new Map(),
+    noteItems: new Map([[MOCK_NOTE_ID, []]]),
+    counter: 0,
+  };
+}
+
+let state = initialState();
+
+/** 테스트에서 상태를 초기화한다. */
+export function resetMockState(): void {
+  state = initialState();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/** 네트워크 지연 흉내 — 로딩 상태가 실제로 보이게 한다. */
+const LATENCY_MS = 160;
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function nextId(prefix: string): string {
+  state.counter += 1;
+  return `${prefix}-${state.counter}`;
+}
+
+function findNode(id: string): TreeNode {
+  const node = state.nodes.find((candidate) => candidate.id === id);
+  if (!node) throw new ApiError('not_found', '항목을 찾을 수 없습니다.', null, 404);
+  return node;
+}
+
+function collectDescendantIds(id: string): string[] {
+  const result: string[] = [];
+  const queue = [id];
+  while (queue.length > 0) {
+    const current = queue.pop();
+    if (current == null) break;
+    for (const node of state.nodes) {
+      if (node.parent_id === current) {
+        result.push(node.id);
+        queue.push(node.id);
+      }
+    }
+  }
+  return result;
+}
+
+function usageFor(no: number): Usage {
+  return {
+    input_tokens: 1800 + no * 7,
+    output_tokens: 620 + no * 11,
+    cache_creation_input_tokens: no === 1 ? 1500 : 0,
+    cache_read_input_tokens: no === 1 ? 0 : 1500,
+  };
+}
+
+function costFor(model: string, usage: Usage): Cost {
+  // pricing.py 와 같은 방식(단가 x 토큰)으로 계산한다. 목이므로 opus 단가 기준.
+  const rates: Record<string, { input: number; output: number }> = {
+    'claude-opus-5': { input: 5, output: 25 },
+    'claude-sonnet-5': { input: 3, output: 15 },
+    'claude-haiku-4-5': { input: 1, output: 5 },
+  };
+  const rate = rates[model] ?? rates['claude-opus-5'] ?? { input: 5, output: 25 };
+  const input = usage.input_tokens ?? 0;
+  const output = usage.output_tokens ?? 0;
+  const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
+  const usd =
+    (input / 1e6) * rate.input +
+    (output / 1e6) * rate.output +
+    (cacheWrite / 1e6) * rate.input * 1.25 +
+    (cacheRead / 1e6) * rate.input * 0.1;
+  return {
+    model,
+    resolved_model: model,
+    tokens: {
+      input,
+      output,
+      cache_write: cacheWrite,
+      cache_read: cacheRead,
+      total: input + output + cacheWrite + cacheRead,
+    },
+    total_usd: Number(usd.toFixed(8)),
+    total_krw: Number((usd * state.env.usd_krw).toFixed(4)),
+    usd_krw: state.env.usd_krw,
+  };
+}
+
+/** 구독 모드로 동작하는 요청인지. 구독이면 usage/cost 를 null 로 준다(계약 3-1). */
+function isSubscriptionCall(provider: string): boolean {
+  if (provider === 'subscription') return true;
+  if (provider === 'auto') return state.env.subscription.available;
+  return false;
+}
+
+/** 텍스트를 자연스러운 크기로 잘라 delta 로 흘린다. */
+function chunkText(text: string, size: number): string[] {
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += size) chunks.push(text.slice(i, i + size));
+  return chunks;
+}
+
+async function* solveScript(
+  fileId: string,
+  body: SolveRequest,
+): AsyncGenerator<MockSseEvent, void, void> {
+  const problems = state.problems.get(fileId) ?? [];
+  const targets =
+    body.problem_numbers == null || body.problem_numbers.length === 0
+      ? problems.map((problem) => problem.no)
+      : body.problem_numbers;
+
+  const model = body.model ?? 'claude-opus-5';
+  const subscription = isSubscriptionCall(body.provider);
+
+  yield { event: 'start', data: { total: targets.length }, delayMs: 120 };
+
+  let totalUsage: Usage = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+  let totalUsd = 0;
+
+  for (const no of targets) {
+    yield { event: 'problem', data: { no, status: 'running' }, delayMs: 40 };
+
+    const text = mockSolutionText(no);
+    for (const piece of chunkText(text, 24)) {
+      yield { event: 'delta', data: { no, text: piece }, delayMs: 18 };
+    }
+
+    // 실제 백엔드 확인 결과: 구독 모드도 usage 는 실제 값을 주고 cost 만 null 이다.
+    // 목도 그 모양을 따라간다(과금 판별은 cost 로만 한다).
+    const usage = usageFor(no);
+    const cost = subscription ? null : costFor(model, usage);
+    if (usage) {
+      totalUsage = {
+        input_tokens: (totalUsage.input_tokens ?? 0) + (usage.input_tokens ?? 0),
+        output_tokens: (totalUsage.output_tokens ?? 0) + (usage.output_tokens ?? 0),
+        cache_creation_input_tokens:
+          (totalUsage.cache_creation_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
+        cache_read_input_tokens:
+          (totalUsage.cache_read_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
+      };
+    }
+    if (cost?.total_usd) totalUsd += cost.total_usd;
+
+    // 서버가 저장하는 것처럼 목 상태에도 남긴다.
+    const fileSolutions = state.solutions.get(fileId) ?? new Map<number, Solution>();
+    fileSolutions.set(no, {
+      no,
+      solution: text,
+      usage,
+      cost,
+      truncated: false,
+      created_at: nowIso(),
+    });
+    state.solutions.set(fileId, fileSolutions);
+    const problem = (state.problems.get(fileId) ?? []).find((candidate) => candidate.no === no);
+    if (problem) problem.has_solution = true;
+
+    yield {
+      event: 'done',
+      data: { no, solution: text, usage, cost, truncated: false },
+      delayMs: 30,
+    };
+  }
+
+  const totalCost = subscription ? null : costFor(model, totalUsage);
+  if (totalCost) {
+    totalCost.total_usd = Number(totalUsd.toFixed(8));
+    totalCost.total_krw = Number((totalUsd * state.env.usd_krw).toFixed(4));
+  }
+  yield {
+    event: 'end',
+    data: { total_usage: totalUsage, total_cost: totalCost },
+    delayMs: 60,
+  };
+}
+
+async function* chatScript(
+  fileId: string,
+  body: ChatRequest,
+): AsyncGenerator<MockSseEvent, void, void> {
+  const subscription = isSubscriptionCall(body.provider);
+  const model = body.model ?? 'claude-opus-5';
+  const reply = mockChatReply(body.message, body.problem_no ?? null);
+
+  for (const piece of chunkText(reply, 20)) {
+    yield { event: 'delta', data: { no: body.problem_no ?? null, text: piece }, delayMs: 22 };
+  }
+
+  // 구독도 usage 는 온다. cost 만 null.
+  const usage = usageFor(body.problem_no ?? 1);
+  const cost = subscription ? null : costFor(model, usage);
+
+  const key = threadKey(fileId, body.problem_no ?? null);
+  const history = state.chats.get(key) ?? [];
+  history.push({ role: 'assistant', content: reply, created_at: nowIso(), usage, cost });
+  state.chats.set(key, history);
+
+  // 스레드가 길면(6턴 초과) 이력이 잘렸다고 알린다(계약 6-B).
+  const truncatedBefore = Math.max(0, history.length - 6);
+
+  yield {
+    event: 'done',
+    data: {
+      no: body.problem_no ?? null,
+      solution: reply,
+      usage,
+      cost,
+      truncated: false,
+      history_truncated: truncatedBefore > 0,
+      truncated_before: truncatedBefore,
+    },
+    delayMs: 40,
+  };
+}
+
+async function* streamFrom(
+  script: AsyncGenerator<MockSseEvent, void, void>,
+  signal?: AbortSignal,
+): AsyncGenerator<StreamEvent, void, void> {
+  const stream = mockSseStream(script, signal);
+  for await (const message of iterateSSE(stream, signal)) {
+    if (signal?.aborted) return;
+    yield toStreamEvent(message);
+  }
+}
+
+export const mockClient: ApiClient = {
+  async getEnv() {
+    await sleep(LATENCY_MS);
+    return { ...state.env, models: [...state.env.models] };
+  },
+
+  async setApiKey(key: string) {
+    await sleep(LATENCY_MS);
+    if (key.trim() === '') {
+      throw new ApiError('invalid_key', 'API 키를 입력하세요.', null, 400);
+    }
+    state.env = { ...state.env, api_key_set: true };
+  },
+
+  async deleteApiKey() {
+    await sleep(LATENCY_MS);
+    state.env = { ...state.env, api_key_set: false };
+  },
+
+  async getTree(section: Section = 'exam'): Promise<TreeResponse> {
+    await sleep(LATENCY_MS);
+    return {
+      nodes: state.nodes
+        .filter((node) => (node.section ?? 'exam') === section)
+        .map((node) => ({ ...node })),
+    };
+  },
+
+  async createFolder(name: string, parentId: string | null, section: Section = 'exam') {
+    await sleep(LATENCY_MS);
+    const trimmed = name.trim();
+    if (trimmed === '') throw new ApiError('invalid_name', '폴더 이름을 입력하세요.', null, 400);
+    let resolvedSection = section;
+    if (parentId != null) {
+      const parent = findNode(parentId);
+      if (parent.type !== 'folder') {
+        throw new ApiError('invalid_parent', '파일 안에는 폴더를 만들 수 없습니다.', null, 400);
+      }
+      // 부모의 섹션을 따른다(섹션을 넘나드는 구성 방지).
+      resolvedSection = parent.section ?? 'exam';
+    }
+    const node: TreeNode = {
+      id: nextId('folder'),
+      type: 'folder',
+      name: trimmed,
+      parent_id: parentId,
+      section: resolvedSection,
+      created_at: nowIso(),
+    };
+    state.nodes = [...state.nodes, node];
+    return { ...node };
+  },
+
+  async updateNode(id: string, patch: { name?: string; parent_id?: string | null }) {
+    await sleep(LATENCY_MS);
+    const node = findNode(id);
+
+    if (patch.name != null) {
+      const trimmed = patch.name.trim();
+      if (trimmed === '') throw new ApiError('invalid_name', '이름을 입력하세요.', null, 400);
+      node.name = trimmed;
+    }
+
+    if (patch.parent_id !== undefined) {
+      const target = patch.parent_id;
+      if (target === id) {
+        throw new ApiError('invalid_move', '자기 자신 안으로는 옮길 수 없습니다.', null, 400);
+      }
+      if (target != null) {
+        const parent = findNode(target);
+        if (parent.type !== 'folder') {
+          throw new ApiError('invalid_parent', '파일 안으로는 옮길 수 없습니다.', null, 400);
+        }
+        if (collectDescendantIds(id).includes(target)) {
+          throw new ApiError('invalid_move', '하위 폴더 안으로는 옮길 수 없습니다.', null, 400);
+        }
+      }
+      node.parent_id = target;
+    }
+
+    state.nodes = [...state.nodes];
+    return { ...node };
+  },
+
+  async deleteNode(id: string) {
+    await sleep(LATENCY_MS);
+    findNode(id);
+    const doomed = new Set([id, ...collectDescendantIds(id)]);
+    state.nodes = state.nodes.filter((node) => !doomed.has(node.id));
+    for (const doomedId of doomed) {
+      state.problems.delete(doomedId);
+      state.solutions.delete(doomedId);
+      state.noteItems.delete(doomedId);
+      // 이 노드로 시작하는 스레드 전부 삭제.
+      for (const key of [...state.chats.keys()]) {
+        if (key.startsWith(`${doomedId}::`)) state.chats.delete(key);
+      }
+    }
+    // 계약 6-A: 원본 시험지를 지워도 오답노트 항목은 남기고 바로가기만 끊는다.
+    for (const [noteId, items] of state.noteItems.entries()) {
+      let changed = false;
+      const next = items.map((item) => {
+        if (item.source_node_id != null && doomed.has(item.source_node_id)) {
+          changed = true;
+          return { ...item, source_node_id: null, source_available: false };
+        }
+        return item;
+      });
+      if (changed) state.noteItems.set(noteId, next);
+    }
+  },
+
+  async uploadFile(file: File, parentId: string | null) {
+    // 업로드 + 추출은 시간이 걸린다 -> 진행 상태 확인용으로 좀 더 느리게.
+    await sleep(900);
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      throw new ApiError(
+        'unsupported_file',
+        'PDF 파일만 업로드할 수 있습니다.',
+        '시험지를 PDF 로 변환한 뒤 다시 시도하세요.',
+        400,
+      );
+    }
+    const node: TreeNode = {
+      id: nextId('file'),
+      type: 'file',
+      name: file.name,
+      parent_id: parentId,
+      created_at: nowIso(),
+      file: { pages: 7, problem_count: MOCK_PROBLEM_COUNT, mode: 'text', pua_ratio: 0.019 },
+    };
+    state.nodes = [...state.nodes, node];
+    state.problems.set(node.id, makeMockProblems(MOCK_PROBLEM_COUNT));
+    return { ...node };
+  },
+
+  async getFile(id: string): Promise<FileDetail> {
+    await sleep(LATENCY_MS);
+    const node = findNode(id);
+    if (node.type !== 'file') {
+      throw new ApiError('not_a_file', '파일이 아닙니다.', null, 400);
+    }
+    const problems = state.problems.get(id) ?? [];
+    return { node: { ...node }, problems: problems.map((problem) => ({ ...problem })) };
+  },
+
+  fileRawUrl() {
+    // 목 모드에서는 실제 시험지 사본을 그대로 열어 pdf.js 렌더를 확인한다.
+    return MOCK_PDF_PATH;
+  },
+
+  cropUrl(_id: string, no: number) {
+    return mockCropUrl(no);
+  },
+
+  async getSolutions(id: string): Promise<SolutionsResponse> {
+    await sleep(LATENCY_MS);
+    const solutions = state.solutions.get(id);
+    if (!solutions) return { solutions: [] };
+    return {
+      solutions: [...solutions.values()]
+        .map((solution) => ({ ...solution }))
+        .sort((a, b) => a.no - b.no),
+    };
+  },
+
+  async getChatHistory(id: string, problemNo: number | null = null): Promise<ChatHistoryResponse> {
+    await sleep(LATENCY_MS);
+    const key = threadKey(id, problemNo);
+    return { messages: (state.chats.get(key) ?? []).map((message) => ({ ...message })) };
+  },
+
+  async getChatThreads(id: string): Promise<ThreadsResponse> {
+    await sleep(LATENCY_MS);
+    const threads = [];
+    for (const [key, messages] of state.chats.entries()) {
+      if (!key.startsWith(`${id}::`) || messages.length === 0) continue;
+      const suffix = key.slice(id.length + 2);
+      const problemNo = suffix === 'global' ? null : Number(suffix);
+      const last = messages[messages.length - 1];
+      threads.push({
+        problem_no: problemNo,
+        turns: messages.filter((m) => m.role === 'user').length,
+        updated_at: last?.created_at ?? nowIso(),
+      });
+    }
+    threads.sort((a, b) => (a.problem_no ?? -1) - (b.problem_no ?? -1));
+    return { threads };
+  },
+
+  async clearChat(id: string, problemNo: number | null = null) {
+    await sleep(LATENCY_MS);
+    state.chats.delete(threadKey(id, problemNo));
+  },
+
+  async createNote(name: string, parentId: string | null) {
+    await sleep(LATENCY_MS);
+    const trimmed = name.trim();
+    if (trimmed === '') throw new ApiError('invalid_name', '노트 이름을 입력하세요.', null, 400);
+    let section: Section = 'note';
+    if (parentId != null) {
+      const parent = findNode(parentId);
+      if (parent.type !== 'folder') {
+        throw new ApiError('invalid_parent', '파일 안에는 노트를 만들 수 없습니다.', null, 400);
+      }
+      section = parent.section ?? 'note';
+    }
+    const node: TreeNode = {
+      id: nextId('note'),
+      type: 'file',
+      name: trimmed,
+      parent_id: parentId,
+      section,
+      file: null,
+      created_at: nowIso(),
+    };
+    state.nodes = [...state.nodes, node];
+    state.noteItems.set(node.id, []);
+    return { ...node };
+  },
+
+  async getNote(id: string): Promise<NoteDetail> {
+    await sleep(LATENCY_MS);
+    const node = findNode(id);
+    const items = state.noteItems.get(id) ?? [];
+    return { node: { ...node }, items: items.map((item) => ({ ...item })) };
+  },
+
+  async addNoteItems(
+    noteId: string,
+    sourceNodeId: string,
+    problemNumbers: number[],
+    memo: string | null = null,
+  ): Promise<AddNoteItemsResult> {
+    await sleep(LATENCY_MS);
+    findNode(noteId);
+    const source = state.nodes.find((node) => node.id === sourceNodeId);
+    const sourceName = source?.name ?? '(알 수 없는 시험지)';
+    const items = state.noteItems.get(noteId) ?? [];
+    const added: number[] = [];
+    const skipped: number[] = [];
+    for (const no of problemNumbers) {
+      const exists = items.some(
+        (item) => item.source_node_id === sourceNodeId && item.problem_no === no,
+      );
+      if (exists) {
+        skipped.push(no);
+        continue;
+      }
+      const itemId = nextId('item');
+      items.push({
+        id: itemId,
+        source_node_id: sourceNodeId,
+        source_name: sourceName,
+        problem_no: no,
+        crop_url: mockCropUrl(no),
+        memo,
+        created_at: nowIso(),
+        source_available: source != null,
+      });
+      added.push(no);
+    }
+    state.noteItems.set(noteId, items);
+    return { added, skipped };
+  },
+
+  async deleteNoteItem(noteId: string, itemId: string) {
+    await sleep(LATENCY_MS);
+    const items = state.noteItems.get(noteId) ?? [];
+    state.noteItems.set(
+      noteId,
+      items.filter((item) => item.id !== itemId),
+    );
+  },
+
+  noteCropUrl(_noteId: string, itemId: string) {
+    // 목에서는 항목 id 뒤 숫자를 번호처럼 써서 플레이스홀더를 만든다.
+    const match = /(\d+)/.exec(itemId);
+    return mockCropUrl(match ? Number(match[1]) % 22 || 1 : 1);
+  },
+
+  solve(id: string, body: SolveRequest, signal?: AbortSignal) {
+    return streamFrom(solveScript(id, body), signal);
+  },
+
+  chat(id: string, body: ChatRequest, signal?: AbortSignal) {
+    const key = threadKey(id, body.problem_no ?? null);
+    const history = state.chats.get(key) ?? [];
+    history.push({ role: 'user', content: body.message, created_at: nowIso() });
+    state.chats.set(key, history);
+    return streamFrom(chatScript(id, body), signal);
+  },
+};

@@ -1,0 +1,55 @@
+[project]
+name = "math-teacher-core"
+version = "0.1.0"
+description = "수학 문제풀이 워크스페이스 공용 백엔드 (FastAPI)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "pymupdf",
+    "pillow",
+    "anthropic",
+    "claude-agent-sdk",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "httpx", "ruff", "mypy"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "D", "RUF"]
+ignore = [
+    "D203",   # D211 과 충돌
+    "D213",   # D212 와 충돌
+    "ANN401", # **kwargs: Any 허용
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 이식한 검증 코드(로직 변경 금지) + 테스트는 문서화 규칙을 느슨하게 적용한다.
+"extractor.py" = ["D", "ANN", "B", "SIM"]
+"pricing.py" = ["D", "ANN"]
+"tests/*" = ["D", "ANN"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+mypy_path = "."
+exclude = "(^|/)data/"
+
+[[tool.mypy.overrides]]
+module = ["fitz", "extractor", "pricing"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"

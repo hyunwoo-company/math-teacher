@@ -1,0 +1,93 @@
+@import 'tailwindcss';
+
+/*
+ * 폰트: Pretendard 가 설치되어 있으면 쓰고, 없으면 시스템 한글 폰트로 폴백한다.
+ * CDN 을 쓰지 않는다(데스크톱 오프라인 대비). 웹폰트 파일을 번들하고 싶으면
+ * public/fonts 에 넣고 아래 @font-face 를 추가하면 된다.
+ */
+@theme {
+  --font-sans:
+    Pretendard, 'Pretendard Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Apple SD Gothic Neo', 'Malgun Gothic', '맑은 고딕', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'Cascadia Mono', 'Consolas', 'D2Coding', monospace;
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-slate-100 text-slate-800 antialiased;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    /* 문서 작업 도구답게 브라우저 기본 여백 제거 */
+    margin: 0;
+    overscroll-behavior: none;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  /* 밀도 높은 패널용 얇은 스크롤바 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: #cbd5e1;
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* 사이드 패널 행 공통 */
+  .row-hover {
+    @apply hover:bg-slate-100;
+  }
+}
+
+/* KaTeX 블록 수식이 좁은 패널에서 넘칠 때 가로 스크롤 */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+
+/* 스트리밍 중 커서 */
+@keyframes caret-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.streaming-caret::after {
+  content: '▍';
+  margin-left: 1px;
+  animation: caret-blink 1s steps(1, end) infinite;
+  color: #64748b;
+}
