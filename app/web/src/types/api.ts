@@ -85,6 +85,12 @@ export interface EnvResponse {
    */
   providers?: ProvidersMap;
   default_provider?: ProviderChoice;
+  /**
+   * 접속 비밀번호(공유 암호) 게이트가 필요한지.
+   * 비번 미설정(로컬 개발)이면 false. 구버전 백엔드는 주지 않으므로 optional(없으면 false).
+   * 이 값이 true 일 때만 프론트가 로그인 화면을 띄운다.
+   */
+  auth_required?: boolean;
 }
 
 /** 파일 노드에만 붙는 추출 메타데이터. */

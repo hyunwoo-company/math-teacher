@@ -21,6 +21,11 @@ import type {
 
 export interface ApiClient {
   getEnv(): Promise<EnvResponse>;
+  /**
+   * 접속 비밀번호 검증(계약: `POST /api/login {password}`).
+   * 맞으면 resolve, 틀리면 401 ApiError 로 reject.
+   */
+  login(password: string): Promise<void>;
   setApiKey(key: string): Promise<void>;
   deleteApiKey(): Promise<void>;
 

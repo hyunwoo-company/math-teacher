@@ -1,0 +1,14 @@
+# 런타임 데이터·비밀·캐시는 이미지에 넣지 않는다.
+data/
+tests/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+tmp_pt.xml
+*.log
+.env
+.env.*
+settings.json
+README.md

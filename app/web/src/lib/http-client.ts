@@ -7,6 +7,7 @@
  */
 
 import { API_BASE, API_KEY_STORAGE } from '@/lib/config';
+import { accessHeaders, reportUnauthorized, withAccess } from '@/lib/access-gate';
 import { ApiError, errorFromResponse, isAbortError, networkError } from '@/lib/api-error';
 import { iterateSSE } from '@/lib/sse';
 import { toStreamEvent } from '@/lib/stream-events';
@@ -51,9 +52,27 @@ function url(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+/**
+ * 요청마다 붙는 인증 헤더.
+ *  - `X-Api-Key`         : 웹 모드 API 키(계약 3-2)
+ *  - `X-Access-Password` : 접속 비밀번호 게이트(있을 때만)
+ */
 function authHeaders(): Record<string, string> {
   const key = readStoredApiKey();
-  return key ? { 'X-Api-Key': key } : {};
+  return {
+    ...(key ? { 'X-Api-Key': key } : {}),
+    ...accessHeaders(),
+  };
+}
+
+/** login 은 비번을 본문으로 검증하는 예외 경로다. 이 경로의 401 은 게이트를 잠그지 않는다. */
+function isLoginPath(path: string): boolean {
+  return path === '/api/login';
+}
+
+/** 401 이면 저장 비번을 지우고 게이트로 되돌린다(login 경로 제외). */
+function handleUnauthorized(path: string, status: number): void {
+  if (status === 401 && !isLoginPath(path)) reportUnauthorized();
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -72,7 +91,10 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw networkError(error);
   }
 
-  if (!response.ok) throw await errorFromResponse(response);
+  if (!response.ok) {
+    handleUnauthorized(path, response.status);
+    throw await errorFromResponse(response);
+  }
 
   if (response.status === 204) return undefined as T;
   try {
@@ -119,7 +141,10 @@ async function* openStream(
     throw networkError(error);
   }
 
-  if (!response.ok) throw await errorFromResponse(response);
+  if (!response.ok) {
+    handleUnauthorized(path, response.status);
+    throw await errorFromResponse(response);
+  }
   if (!response.body) {
     throw new ApiError('bad_response', '스트리밍 응답 본문이 비어 있습니다.', null, response.status);
   }
@@ -133,6 +158,11 @@ async function* openStream(
 export const httpClient: ApiClient = {
   getEnv() {
     return requestJson<EnvResponse>('/api/env');
+  },
+
+  async login(password: string) {
+    // 계약: POST /api/login {password} -> {ok:true} | 401. 비번 저장은 스토어가 성공 후 처리.
+    await requestJson<{ ok: boolean }>('/api/login', jsonBody({ password }));
   },
 
   async setApiKey(key: string) {
@@ -202,11 +232,13 @@ export const httpClient: ApiClient = {
   },
 
   fileRawUrl(id: string) {
-    return url(`/api/files/${encodeURIComponent(id)}/raw`);
+    // 브라우저가 직접 GET 하는 바이너리 URL → 헤더를 못 붙이니 ?access= 로 인증(있을 때만).
+    return withAccess(url(`/api/files/${encodeURIComponent(id)}/raw`));
   },
 
   cropUrl(id: string, no: number) {
-    return url(`/api/files/${encodeURIComponent(id)}/problems/${no}/crop`);
+    // 크롭 <img src> 도 헤더를 못 붙이므로 ?access= 로 인증(있을 때만).
+    return withAccess(url(`/api/files/${encodeURIComponent(id)}/problems/${no}/crop`));
   },
 
   getSolutions(id: string) {
@@ -259,8 +291,9 @@ export const httpClient: ApiClient = {
   },
 
   noteCropUrl(noteId: string, itemId: string) {
-    return url(
-      `/api/notes/${encodeURIComponent(noteId)}/items/${encodeURIComponent(itemId)}/crop`,
+    // 오답노트 크롭 스냅샷 <img src> → 헤더 대신 ?access= 로 인증(있을 때만).
+    return withAccess(
+      url(`/api/notes/${encodeURIComponent(noteId)}/items/${encodeURIComponent(itemId)}/crop`),
     );
   },
 

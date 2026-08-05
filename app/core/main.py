@@ -11,14 +11,26 @@
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Final, Literal
 
-from fastapi import FastAPI, File, Form, Header, Path, Query, UploadFile, status
+from fastapi import (
+    Body,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    Path,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 import ai_service
 import config
@@ -26,7 +38,7 @@ import pricing
 import service
 import sse
 import storage
-from errors import register_error_handlers
+from errors import ApiError, register_error_handlers
 from providers import agy, subscription
 from schemas import (
     AgyProviderInfo,
@@ -102,6 +114,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 접속 비밀번호가 필요 없는 경로(게이트 표시 판단·헬스체크·로그인 자체).
+_AUTH_EXEMPT: Final[frozenset[str]] = frozenset(
+    {"/api/health", "/api/env", "/api/login"}
+)
+
+
+def _is_binary_asset(path: str) -> bool:
+    """브라우저가 헤더 없이 직접 로드하는 바이너리 GET 경로인지.
+
+    `/api/files/{id}/raw`, `/api/files/{id}/problems/{no}/crop`,
+    `/api/notes/{id}/items/{item_id}/crop` 만 해당한다.
+    """
+    return path.endswith("/raw") or path.endswith("/crop")
+
+
+@app.middleware("http")
+async def _access_password_gate(request: Request, call_next: Any) -> Any:
+    """배포 시 친구 전용 접속 비밀번호 검사.
+
+    `MATH_TEACHER_ACCESS_PASSWORD` 가 설정된 경우에만 동작한다(로컬은 통과).
+    `/api/*` 요청은 `X-Access-Password` 헤더가 비밀번호와 일치해야 한다.
+
+    크롭 이미지(`<img>`)·원본 PDF(pdf.js)는 브라우저가 직접 GET 으로 로드해
+    커스텀 헤더를 못 붙인다. 이 GET 요청들만 예외로 `?access=<비번>` 쿼리
+    파라미터도 허용한다(그 외 경로·메서드는 헤더만 허용).
+    비교는 `secrets.compare_digest` 로 타이밍 공격을 피한다.
+    CORS preflight(OPTIONS)는 통과시킨다(브라우저가 헤더를 안 실음).
+    """
+    expected = config.access_password()
+    path = request.url.path
+    if (
+        expected is None
+        or request.method == "OPTIONS"
+        or path in _AUTH_EXEMPT
+        or not path.startswith("/api/")
+    ):
+        return await call_next(request)
+    supplied = request.headers.get("X-Access-Password", "")
+    # 헤더를 못 붙이는 바이너리 GET(raw/crop)만 쿼리 파라미터 허용.
+    if not supplied and request.method == "GET" and _is_binary_asset(path):
+        supplied = request.query_params.get("access", "")
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={
+                "error_code": "unauthorized",
+                "message": "접속 비밀번호가 필요합니다.",
+                "hint": None,
+            },
+        )
+    return await call_next(request)
+
+
 register_error_handlers(app)
 
 ApiKeyHeader = Annotated[str | None, Header(alias="X-Api-Key")]
@@ -134,17 +200,20 @@ def read_env() -> EnvResponse:
     최상위 `models`/`subscription` 은 하위호환으로 유지하고, 새 프론트가 쓰는
     `providers`/`default_provider` 를 함께 내려준다(ARCHITECTURE 3-C).
     """
+    # 배포판 agy 전용: API 키·구독을 아예 노출하지 않는다(과금 사고 방지).
+    agy_only = config.agy_only()
     detected = subscription.availability()
-    subscription_available = bool(detected["available"])
+    subscription_available = (not agy_only) and bool(detected["available"])
     agy_detected = agy.availability()
     agy_available = bool(agy_detected["available"])
-    api_key_set = config.stored_api_key() is not None
+    api_key_set = (not agy_only) and config.stored_api_key() is not None
 
     claude_models = _claude_provider_models()
     agy_models = [ProviderModelInfo.model_validate(item) for item in agy.agy_models()]
 
     default_provider: Literal["agy", "subscription", "apikey"]
-    if agy_available:
+    if agy_only or agy_available:
+        # agy 전용 배포에서는 agy 만 노출하므로 항상 agy 를 기본으로 한다.
         default_provider = "agy"
     elif subscription_available:
         default_provider = "subscription"
@@ -187,6 +256,7 @@ def read_env() -> EnvResponse:
             ),
         ),
         default_provider=default_provider,
+        auth_required=config.auth_required(),
     )
 
 
@@ -194,7 +264,17 @@ def read_env() -> EnvResponse:
     "/api/settings/apikey", response_model=OkResponse, status_code=status.HTTP_200_OK
 )
 def save_api_key(payload: ApiKeyIn) -> OkResponse:
-    """API 키를 `data/settings.json` 에 평문 저장한다 (README 경고 참조)."""
+    """API 키를 `data/settings.json` 에 평문 저장한다 (README 경고 참조).
+
+    배포판(agy 전용)에서는 키 저장 자체를 거부한다 — 키가 디스크에 남지 않게 한다.
+    """
+    if config.agy_only():
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "provider_disabled",
+            "이 서비스에서는 API 키를 사용할 수 없습니다.",
+            None,
+        )
     config.save_api_key(payload.key)
     return OkResponse()
 
@@ -528,4 +608,22 @@ def read_note_item_crop(note_id: NodeId, item_id: NodeId) -> FileResponse:
 @app.get("/api/health", response_model=OkResponse, status_code=status.HTTP_200_OK)
 def health() -> OkResponse:
     """헬스체크 (sidecar 기동 확인용)."""
+    return OkResponse()
+
+
+@app.post("/api/login", response_model=OkResponse, status_code=status.HTTP_200_OK)
+def login(password: Annotated[str, Body(embed=True)]) -> OkResponse:
+    """접속 비밀번호 검증(프론트가 저장 전에 확인).
+
+    인증이 꺼진 로컬에서는 항상 성공. 켜져 있으면 일치해야 200, 아니면 401.
+    """
+    expected = config.access_password()
+    if expected is None:
+        return OkResponse()
+    if not secrets.compare_digest(password.strip(), expected):
+        raise ApiError(
+            status.HTTP_401_UNAUTHORIZED,
+            "unauthorized",
+            "접속 비밀번호가 올바르지 않습니다.",
+        )
     return OkResponse()

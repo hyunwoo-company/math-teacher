@@ -127,6 +127,18 @@ export function makeMockNoteNodes(): TreeNode[] {
 
 const MOCK_CLI_PATH = 'C:\\Users\\hyunwoo\\.local\\bin\\claude.exe';
 
+/** 목 접속 비밀번호(게이트 시나리오에서 이 값만 통과). */
+export const MOCK_ACCESS_PASSWORD = 'friend';
+
+/**
+ * 이 목 환경이 접속 비밀번호 게이트를 요구하는지.
+ * `NEXT_PUBLIC_MOCK_MODE` 가 'web-auth' 일 때만 true(배포 게이트 시나리오).
+ * 그 외 시나리오는 false 라 기존 개발 흐름이 그대로 유지된다.
+ */
+export function mockAuthRequired(): boolean {
+  return (process.env.NEXT_PUBLIC_MOCK_MODE ?? 'desktop') === 'web-auth';
+}
+
 /**
  * 목 환경. `NEXT_PUBLIC_MOCK_MODE` 로 시나리오를 바꿔 UI 분기를 확인할 수 있다.
  *  - (기본) `desktop`     : 구독 가능 -> 구독 사용 표기
@@ -161,9 +173,24 @@ function claudeProviderModels() {
 
 export function makeMockEnv(): EnvResponse {
   const scenario = process.env.NEXT_PUBLIC_MOCK_MODE ?? 'desktop';
-  const base = { api_key_set: false, models: CLAUDE_MODELS, usd_krw: 1400 } as const;
+  // auth_required 는 배포 게이트 시나리오(web-auth)에서만 true.
+  const base = {
+    api_key_set: false,
+    models: CLAUDE_MODELS,
+    usd_krw: 1400,
+    auth_required: mockAuthRequired(),
+  } as const;
 
   switch (scenario) {
+    case 'web-auth':
+      // 배포본 게이트 시나리오: 접속 비밀번호를 요구한다. 친구 전용 배포는 서버에 키가
+      // 이미 설정돼 있으므로(api_key_set) 로그인 통과 후 바로 3분할로 진입한다.
+      return {
+        ...base,
+        mode: 'web',
+        api_key_set: true,
+        subscription: { available: false, cli_path: null, reason: 'web_mode' },
+      };
     case 'web':
       return {
         ...base,

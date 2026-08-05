@@ -54,8 +54,18 @@ def resolve_provider(requested: str, api_key: str | None) -> Provider:
     Raises:
         ApiError: 쓸 수 있는 프로바이더가 없을 때 (409).
     """
-    subscription_ok = subscription_provider.is_available()
+    agy_only = config.agy_only()
+    subscription_ok = (not agy_only) and subscription_provider.is_available()
     agy_ok = agy_provider.is_available()
+
+    # 배포판(agy 전용): API 키·구독 요청을 명시적으로 차단한다(과금 사고 방지).
+    if agy_only and requested in ("apikey", "subscription"):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "provider_disabled",
+            "이 서비스에서는 agy(무과금)만 사용할 수 있습니다.",
+            None,
+        )
 
     if requested == "agy":
         if not agy_ok:
@@ -92,7 +102,7 @@ def resolve_provider(requested: str, api_key: str | None) -> Provider:
         return agy_provider.AgyProvider()
     if subscription_ok:
         return subscription_provider.SubscriptionProvider()
-    if api_key:
+    if api_key and not agy_only:
         return apikey_provider.ApiKeyProvider(api_key)
     raise ApiError(
         status.HTTP_409_CONFLICT,

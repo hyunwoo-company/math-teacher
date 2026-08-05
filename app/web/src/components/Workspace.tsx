@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
+import { AccessGate } from '@/components/AccessGate';
 import { AiPanel } from '@/components/ai/AiPanel';
 import { CenterPanel } from '@/components/center/CenterPanel';
 import { FileTreePanel } from '@/components/tree/FileTreePanel';
 import { Onboarding } from '@/components/Onboarding';
 import { ErrorState, LoadingState } from '@/components/ui/Feedback';
+import { needsAccessGate } from '@/lib/access-gate';
 import { API_BASE, IS_MOCK } from '@/lib/config';
 import { RIGHT_MAX, RIGHT_MIN, useWorkspace } from '@/store/workspace';
 
@@ -23,12 +25,14 @@ export function Workspace() {
   const onboardingSkipped = useWorkspace((state) => state.onboardingSkipped);
   const hasLocalApiKey = useWorkspace((state) => state.hasLocalApiKey);
   const providerConfig = useWorkspace((state) => state.providerConfig);
+  const accessOk = useWorkspace((state) => state.accessOk);
   const rightWidth = useWorkspace((state) => state.rightWidth);
   const toast = useWorkspace((state) => state.toast);
 
   const hydratePrefs = useWorkspace((state) => state.hydratePrefs);
   const loadEnv = useWorkspace((state) => state.loadEnv);
   const loadTree = useWorkspace((state) => state.loadTree);
+  const logout = useWorkspace((state) => state.logout);
   const setRightWidth = useWorkspace((state) => state.setRightWidth);
   const dismissToast = useWorkspace((state) => state.dismissToast);
 
@@ -40,8 +44,13 @@ export function Workspace() {
     if (startedRef.current) return;
     startedRef.current = true;
     hydratePrefs();
-    void loadEnv();
-    void loadTree();
+    // env 를 먼저 확인한 뒤, 접근이 확보됐을 때만 트리를 불러온다.
+    // (비번 게이트가 필요한 배포본에서 로그인 전에 401 이 나지 않게 한다. 로그인 성공 시
+    //  store.login 이 트리를 불러온다.)
+    void (async () => {
+      await loadEnv();
+      if (useWorkspace.getState().accessOk) void loadTree();
+    })();
   }, [hydratePrefs, loadEnv, loadTree]);
 
   useEffect(() => {
@@ -95,6 +104,16 @@ export function Workspace() {
             }}
           />
         </div>
+      </main>
+    );
+  }
+
+  // 접속 비밀번호 게이트: 비번 요구 환경(env.auth_required)에서 접근 전이면 로그인 화면.
+  // auth_required 가 false(로컬 개발)면 이 조건은 항상 거짓이라 기존 흐름 그대로다.
+  if (needsAccessGate(env, accessOk)) {
+    return (
+      <main className="h-full">
+        <AccessGate />
       </main>
     );
   }
@@ -157,6 +176,16 @@ export function Workspace() {
           <AiPanel />
         </div>
       </div>
+
+      {env.auth_required ? (
+        <button
+          type="button"
+          onClick={logout}
+          className="fixed bottom-3 right-3 z-40 rounded border border-slate-300 bg-white/90 px-2 py-1 text-[11px] text-slate-500 shadow-sm hover:bg-slate-50 hover:text-slate-700"
+        >
+          로그아웃
+        </button>
+      ) : null}
 
       {toast ? (
         <div

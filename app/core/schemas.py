@@ -182,6 +182,8 @@ class EnvResponse(BaseModel):
     usd_krw: float
     providers: ProvidersInfo
     default_provider: Literal["agy", "subscription", "apikey"]
+    # 배포 시 접속 비밀번호 인증이 켜져 있으면 true. 프론트가 로그인 게이트 표시.
+    auth_required: bool = False
 
 
 class ApiKeyIn(BaseModel):

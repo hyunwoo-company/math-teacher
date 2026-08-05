@@ -100,16 +100,23 @@ _AGY_PREAMBLE: Final[str] = (
 def find_agy() -> Path | None:
     r"""Agy 실행파일을 찾는다.
 
-    PATH 를 먼저 보고, 없으면 `%USERPROFILE%\AppData\Local\agy\bin` 을 본다.
+    PATH 를 먼저 보고, 없으면 알려진 설치 위치를 본다.
+    - Windows: `%USERPROFILE%\AppData\Local\agy\bin`
+    - Linux(컨테이너/서버): `~/.local/bin` (hostPath 로 마운트되는 위치)
     """
     found = shutil.which("agy")
     if found and Path(found).is_file():
         return Path(found)
-    local_bin = Path.home() / "AppData" / "Local" / "agy" / "bin"
-    for name in _AGY_NAMES:
-        candidate = local_bin / name
-        if candidate.is_file():
-            return candidate
+    home = Path.home()
+    candidates = [
+        home / "AppData" / "Local" / "agy" / "bin",
+        home / ".local" / "bin",
+    ]
+    for directory in candidates:
+        for name in _AGY_NAMES:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
     return None
 
 

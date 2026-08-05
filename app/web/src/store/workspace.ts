@@ -11,6 +11,12 @@
 import { create } from 'zustand';
 import { api } from '@/lib/api';
 import { readStoredApiKey } from '@/lib/http-client';
+import {
+  initialAccessOk,
+  isUnauthorizedError,
+  setUnauthorizedHandler,
+  writeStoredPassword,
+} from '@/lib/access-gate';
 import { isAbortError, toUserMessage } from '@/lib/api-error';
 import { UI_PREFS_STORAGE } from '@/lib/config';
 import { mergeUsage } from '@/lib/format';
@@ -131,6 +137,17 @@ interface WorkspaceState {
    */
   hasLocalApiKey: boolean;
 
+  /* 접속 비밀번호 게이트 */
+  /**
+   * 접근이 확보됐는지. `env.auth_required` 가 false 면 항상 true.
+   * true 이면 3분할 UI, false 이면(비번 요구 환경) 로그인 화면을 띄운다.
+   */
+  accessOk: boolean;
+  /** 로그인 화면 인라인 에러(비번 오류/세션 만료 안내). */
+  authError: string | null;
+  /** 로그인 검증 진행 중. */
+  authChecking: boolean;
+
   /** 계약 3-C: provider/모델 선택 정규화 결과. loadEnv 시 갱신. */
   providerConfig: ProviderConfig | null;
 
@@ -204,6 +221,14 @@ interface WorkspaceState {
   saveApiKey: (key: string) => Promise<boolean>;
   clearApiKey: () => Promise<void>;
   skipOnboarding: () => void;
+
+  /* 접속 비밀번호 게이트 */
+  /** 비번 검증 후 통과하면 저장하고 트리를 불러온다. 성공 여부를 반환. */
+  login: (password: string) => Promise<boolean>;
+  /** 저장 비번을 지우고 로그인 화면으로 되돌린다. */
+  logout: () => void;
+  /** 401(세션 만료/비번 변경) 을 받았을 때 저수준 클라이언트가 깨우는 콜백. */
+  handleUnauthorized: () => void;
 
   setSection: (section: Section) => Promise<void>;
   loadTree: (section?: Section) => Promise<void>;
@@ -392,6 +417,10 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   envError: null,
   onboardingSkipped: false,
   hasLocalApiKey: false,
+  // 비번 요구 환경인지 아직 모른다. loadEnv 가 env.auth_required 로 확정한다.
+  accessOk: false,
+  authError: null,
+  authChecking: false,
   providerConfig: null,
 
   section: 'exam',
@@ -490,11 +519,66 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
           envStatus: 'ready',
           model,
           provider,
+          // 비번 미요구면 항상 통과. 요구 환경이면 저장 비번이 있는 동안 낙관적으로 통과시키고
+          // 유효성은 첫 요청의 401 로 판정한다(틀리면 handleUnauthorized 가 다시 잠근다).
+          // 이미 게이트를 통과(accessOk)했으면 그 상태를 유지한다(env 재조회로 로그아웃되지 않게).
+          accessOk: state.accessOk || initialAccessOk(env),
         };
       });
     } catch (error) {
       set({ envStatus: 'error', envError: toUserMessage(error) });
     }
+  },
+
+  async login(password: string) {
+    const trimmed = password.trim();
+    if (trimmed === '' || get().authChecking) return false;
+    set({ authChecking: true, authError: null });
+    try {
+      await api.login(trimmed);
+      writeStoredPassword(trimmed);
+      set({ accessOk: true, authError: null, authChecking: false });
+      // 게이트를 넘었으니 트리를 (다시) 불러온다.
+      void get().loadTree();
+      return true;
+    } catch (error) {
+      // 401 = 비번이 틀림. 그 외(네트워크 등)는 원인 메시지를 그대로 보여준다.
+      const wrong = isUnauthorizedError(error);
+      set({
+        authChecking: false,
+        authError: wrong ? '비밀번호가 올바르지 않습니다.' : toUserMessage(error),
+      });
+      return false;
+    }
+  },
+
+  logout() {
+    writeStoredPassword(null);
+    // 게이트 뒤에 남은 민감한 화면 상태를 비운다. (게이트는 전체화면으로 덮이지만 안전하게)
+    set({
+      accessOk: false,
+      authError: null,
+      authChecking: false,
+      nodes: [],
+      treeStatus: 'idle',
+      openKind: 'none',
+      selectedFileId: null,
+      fileDetail: null,
+      selectedNoteId: null,
+      noteDetail: null,
+      messages: [],
+      solutions: {},
+    });
+  },
+
+  handleUnauthorized() {
+    // 이미 잠겨 있으면(로그인 화면) 중복 처리하지 않는다.
+    if (!get().accessOk) return;
+    set({
+      accessOk: false,
+      authError: '세션이 만료되었거나 비밀번호가 변경되었습니다. 다시 로그인해 주세요.',
+      authChecking: false,
+    });
   },
 
   async saveApiKey(key: string) {
@@ -1434,6 +1518,14 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     set({ toast: null });
   },
 }));
+
+/**
+ * 저수준 클라이언트(http/mock)가 401 을 만나면 여기로 통지된다.
+ * 저장 비번은 access-gate 가 이미 지웠고, 여기서는 화면을 로그인으로 되돌린다.
+ */
+setUnauthorizedHandler(() => {
+  useWorkspace.getState().handleUnauthorized();
+});
 
 /* ── 순수 헬퍼 ────────────────────────────────────────────────── */
 

@@ -20,6 +20,10 @@ _DEFAULT_DATA_DIR: Final[Path] = CORE_DIR / "data"
 DATA_DIR_ENV: Final[str] = "MATH_TEACHER_DATA_DIR"
 DEPLOY_MODE_ENV: Final[str] = "MATH_TEACHER_MODE"
 API_KEY_ENV: Final[str] = "ANTHROPIC_API_KEY"
+# 배포 시 친구 전용 접속 비밀번호(k8s Secret 으로 주입). 없으면 인증 비활성(로컬).
+ACCESS_PASSWORD_ENV: Final[str] = "MATH_TEACHER_ACCESS_PASSWORD"
+# 배포판 agy 전용 스위치. 켜지면 API 키·구독 provider 를 완전히 비활성화한다.
+AGY_ONLY_ENV: Final[str] = "MATH_TEACHER_AGY_ONLY"
 
 MAX_UPLOAD_BYTES: Final[int] = 50 * 1024 * 1024  # 50MB
 MAX_NAME_LENGTH: Final[int] = 200
@@ -134,3 +138,27 @@ def clear_api_key() -> None:
     settings = _read_settings()
     settings.pop("anthropic_api_key", None)
     _write_settings(settings)
+
+
+def agy_only() -> bool:
+    """배포판에서 agy 만 허용하고 API 키·구독 provider 를 비활성화한다.
+
+    `MATH_TEACHER_AGY_ONLY=1` 이면 켜진다. 배포 시 API 키 도용·과금 사고를
+    원천 차단하기 위한 스위치다(키 기능 자체를 노출하지 않음). 로컬은 기본 꺼짐.
+    """
+    return os.environ.get(AGY_ONLY_ENV, "").strip() not in ("", "0", "false", "False")
+
+
+def access_password() -> str | None:
+    """배포용 접속 비밀번호. 환경변수 `MATH_TEACHER_ACCESS_PASSWORD` 에서 읽는다.
+
+    설정돼 있으면 모든 `/api/*` 요청이 `X-Access-Password` 헤더로 이 값을
+    제출해야 한다(로그인 게이트). 없으면(로컬 개발) 인증을 비활성화한다.
+    """
+    value = os.environ.get(ACCESS_PASSWORD_ENV, "").strip()
+    return value or None
+
+
+def auth_required() -> bool:
+    """접속 비밀번호 인증이 켜져 있는지."""
+    return access_password() is not None

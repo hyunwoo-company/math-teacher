@@ -1,0 +1,82 @@
+name: build-api
+
+# 백엔드(app/core) 변경 시 이미지를 빌드해 GHCR 에 push 하고,
+# k8s-helm 레포의 image.tag 를 새 SHA 로 갱신한다 → ArgoCD 가 git diff 로 감지해 배포.
+#
+# 필요한 Secret (레포 Settings → Secrets → Actions):
+#   HELM_REPO_TOKEN : k8s-helm 레포에 write 권한이 있는 PAT (repo scope).
+# GHCR push 는 기본 GITHUB_TOKEN 의 packages:write 로 충분(동일 org).
+#
+# ⚠️ 이 워크플로는 AI API 키를 다루지 않는다. 백엔드는 agy(로그인 기반)만 쓴다.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/core/**"
+      - ".github/workflows/build-api.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-api-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/hyunwoo-company/math-teacher-api
+  HELM_REPO: hyunwoo-company/k8s-helm
+  HELM_VALUES_PATH: apps/math-teacher-api/values.yaml
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "tag=sha-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: app/core
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+
+  bump-helm-tag:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout k8s-helm
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HELM_REPO }}
+          token: ${{ secrets.HELM_REPO_TOKEN }}
+
+      - name: Update image tag
+        run: |
+          NEW_TAG="${{ needs.build-and-push.outputs.tag }}"
+          sed -i "s|^  tag: .*|  tag: \"${NEW_TAG}\"|" "${{ env.HELM_VALUES_PATH }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "no change"
+          else
+            git add "${{ env.HELM_VALUES_PATH }}"
+            git commit -m "chore(math-teacher-api): image ${NEW_TAG}"
+            git push
+          fi

@@ -16,5 +16,11 @@ export const IS_MOCK: boolean = process.env.NEXT_PUBLIC_MOCK === '1';
 /** API 키를 브라우저에 보관할 때 쓰는 localStorage 키 (웹 모드는 요청마다 헤더로 보낸다). */
 export const API_KEY_STORAGE = 'math-teacher.apiKey';
 
+/**
+ * 접속 비밀번호(공유 암호)를 브라우저에 보관할 때 쓰는 localStorage 키.
+ * 배포본에서 친구만 쓰게 하려는 게이트용. 요청마다 `X-Access-Password` 헤더로 보낸다.
+ */
+export const ACCESS_PASSWORD_STORAGE = 'math-teacher.accessPassword';
+
 /** UI 환경설정 저장 키. */
 export const UI_PREFS_STORAGE = 'math-teacher.uiPrefs';

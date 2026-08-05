@@ -7,10 +7,12 @@
  */
 
 import { ApiError } from '@/lib/api-error';
+import { readStoredPassword, reportUnauthorized, withAccess } from '@/lib/access-gate';
 import { iterateSSE } from '@/lib/sse';
 import { toStreamEvent } from '@/lib/stream-events';
 import { mockSseStream, type MockSseEvent } from '@/lib/mock/sse-stream';
 import {
+  MOCK_ACCESS_PASSWORD,
   MOCK_NOTE_ID,
   MOCK_PDF_PATH,
   MOCK_PROBLEM_COUNT,
@@ -104,6 +106,22 @@ function nowIso(): string {
 function nextId(prefix: string): string {
   state.counter += 1;
   return `${prefix}-${state.counter}`;
+}
+
+/** 이 목 환경이 접속 비밀번호를 요구하는지(env.auth_required). */
+function authRequired(): boolean {
+  return state.env.auth_required === true;
+}
+
+/**
+ * 백엔드 미들웨어를 흉내낸다: 보호 대상 요청에서 저장된 비번(`X-Access-Password`
+ * 흉내)이 없거나 틀리면 401 로 막는다. health/env/login 은 이 검사를 타지 않는다.
+ */
+function requireAuth(): void {
+  if (!authRequired()) return;
+  if (readStoredPassword() === MOCK_ACCESS_PASSWORD) return;
+  reportUnauthorized();
+  throw new ApiError('unauthorized', '접속 비밀번호가 필요합니다.', null, 401);
 }
 
 function findNode(id: string): TreeNode {
@@ -320,8 +338,17 @@ export const mockClient: ApiClient = {
     return { ...state.env, models: [...state.env.models] };
   },
 
+  async login(password: string) {
+    await sleep(LATENCY_MS);
+    // 비번 미요구 환경이면 로그인은 무의미하게 성공시킨다(로컬 개발 흐름 보존).
+    if (!authRequired()) return;
+    if (password === MOCK_ACCESS_PASSWORD) return;
+    throw new ApiError('unauthorized', '접속 비밀번호가 필요합니다.', null, 401);
+  },
+
   async setApiKey(key: string) {
     await sleep(LATENCY_MS);
+    requireAuth();
     if (key.trim() === '') {
       throw new ApiError('invalid_key', 'API 키를 입력하세요.', null, 400);
     }
@@ -330,11 +357,13 @@ export const mockClient: ApiClient = {
 
   async deleteApiKey() {
     await sleep(LATENCY_MS);
+    requireAuth();
     state.env = { ...state.env, api_key_set: false };
   },
 
   async getTree(section: Section = 'exam'): Promise<TreeResponse> {
     await sleep(LATENCY_MS);
+    requireAuth();
     return {
       nodes: state.nodes
         .filter((node) => (node.section ?? 'exam') === section)
@@ -344,6 +373,7 @@ export const mockClient: ApiClient = {
 
   async createFolder(name: string, parentId: string | null, section: Section = 'exam') {
     await sleep(LATENCY_MS);
+    requireAuth();
     const trimmed = name.trim();
     if (trimmed === '') throw new ApiError('invalid_name', '폴더 이름을 입력하세요.', null, 400);
     let resolvedSection = section;
@@ -369,6 +399,7 @@ export const mockClient: ApiClient = {
 
   async updateNode(id: string, patch: { name?: string; parent_id?: string | null }) {
     await sleep(LATENCY_MS);
+    requireAuth();
     const node = findNode(id);
 
     if (patch.name != null) {
@@ -400,6 +431,7 @@ export const mockClient: ApiClient = {
 
   async deleteNode(id: string) {
     await sleep(LATENCY_MS);
+    requireAuth();
     findNode(id);
     const doomed = new Set([id, ...collectDescendantIds(id)]);
     state.nodes = state.nodes.filter((node) => !doomed.has(node.id));
@@ -429,6 +461,7 @@ export const mockClient: ApiClient = {
   async uploadFile(file: File, parentId: string | null) {
     // 업로드 + 추출은 시간이 걸린다 -> 진행 상태 확인용으로 좀 더 느리게.
     await sleep(900);
+    requireAuth();
     if (!file.name.toLowerCase().endsWith('.pdf')) {
       throw new ApiError(
         'unsupported_file',
@@ -452,6 +485,7 @@ export const mockClient: ApiClient = {
 
   async getFile(id: string): Promise<FileDetail> {
     await sleep(LATENCY_MS);
+    requireAuth();
     const node = findNode(id);
     if (node.type !== 'file') {
       throw new ApiError('not_a_file', '파일이 아닙니다.', null, 400);
@@ -462,15 +496,18 @@ export const mockClient: ApiClient = {
 
   fileRawUrl() {
     // 목 모드에서는 실제 시험지 사본을 그대로 열어 pdf.js 렌더를 확인한다.
-    return MOCK_PDF_PATH;
+    // auth 켠 목(web-auth)에서 실서버처럼 ?access= 가 붙는지 확인할 수 있게 감싼다.
+    return withAccess(MOCK_PDF_PATH);
   },
 
   cropUrl(_id: string, no: number) {
-    return mockCropUrl(no);
+    // 목 크롭은 data: URI 라 withAccess 가 쿼리를 붙이지 않고 그대로 돌려준다(깨짐 방지).
+    return withAccess(mockCropUrl(no));
   },
 
   async getSolutions(id: string): Promise<SolutionsResponse> {
     await sleep(LATENCY_MS);
+    requireAuth();
     const solutions = state.solutions.get(id);
     if (!solutions) return { solutions: [] };
     return {
@@ -482,12 +519,14 @@ export const mockClient: ApiClient = {
 
   async getChatHistory(id: string, problemNo: number | null = null): Promise<ChatHistoryResponse> {
     await sleep(LATENCY_MS);
+    requireAuth();
     const key = threadKey(id, problemNo);
     return { messages: (state.chats.get(key) ?? []).map((message) => ({ ...message })) };
   },
 
   async getChatThreads(id: string): Promise<ThreadsResponse> {
     await sleep(LATENCY_MS);
+    requireAuth();
     const threads = [];
     for (const [key, messages] of state.chats.entries()) {
       if (!key.startsWith(`${id}::`) || messages.length === 0) continue;
@@ -506,11 +545,13 @@ export const mockClient: ApiClient = {
 
   async clearChat(id: string, problemNo: number | null = null) {
     await sleep(LATENCY_MS);
+    requireAuth();
     state.chats.delete(threadKey(id, problemNo));
   },
 
   async createNote(name: string, parentId: string | null) {
     await sleep(LATENCY_MS);
+    requireAuth();
     const trimmed = name.trim();
     if (trimmed === '') throw new ApiError('invalid_name', '노트 이름을 입력하세요.', null, 400);
     let section: Section = 'note';
@@ -537,6 +578,7 @@ export const mockClient: ApiClient = {
 
   async getNote(id: string): Promise<NoteDetail> {
     await sleep(LATENCY_MS);
+    requireAuth();
     const node = findNode(id);
     const items = state.noteItems.get(id) ?? [];
     return { node: { ...node }, items: items.map((item) => ({ ...item })) };
@@ -549,6 +591,7 @@ export const mockClient: ApiClient = {
     memo: string | null = null,
   ): Promise<AddNoteItemsResult> {
     await sleep(LATENCY_MS);
+    requireAuth();
     findNode(noteId);
     const source = state.nodes.find((node) => node.id === sourceNodeId);
     const sourceName = source?.name ?? '(알 수 없는 시험지)';
@@ -582,6 +625,7 @@ export const mockClient: ApiClient = {
 
   async deleteNoteItem(noteId: string, itemId: string) {
     await sleep(LATENCY_MS);
+    requireAuth();
     const items = state.noteItems.get(noteId) ?? [];
     state.noteItems.set(
       noteId,
@@ -592,14 +636,17 @@ export const mockClient: ApiClient = {
   noteCropUrl(_noteId: string, itemId: string) {
     // 목에서는 항목 id 뒤 숫자를 번호처럼 써서 플레이스홀더를 만든다.
     const match = /(\d+)/.exec(itemId);
-    return mockCropUrl(match ? Number(match[1]) % 22 || 1 : 1);
+    // data: URI 라 withAccess 는 그대로 돌려준다(쿼리 미부착).
+    return withAccess(mockCropUrl(match ? Number(match[1]) % 22 || 1 : 1));
   },
 
   solve(id: string, body: SolveRequest, signal?: AbortSignal) {
+    requireAuth();
     return streamFrom(solveScript(id, body), signal);
   },
 
   chat(id: string, body: ChatRequest, signal?: AbortSignal) {
+    requireAuth();
     const key = threadKey(id, body.problem_no ?? null);
     const history = state.chats.get(key) ?? [];
     history.push({ role: 'user', content: body.message, created_at: nowIso() });
