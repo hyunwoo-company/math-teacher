@@ -176,9 +176,22 @@ def content_rect(page: fitz.Page) -> fitz.Rect:
             bottom.y0 - _RULE_INSET_PT,
         )
 
+    # 괘선이 없어 물리적 경계를 못 찾은 폴백. 상/하 여백은 머리말·꼬리말을
+    # 크롭 밖으로 밀어내려는 휴리스틱일 뿐이다.
+    #
+    # 상단 6% 는 과하다. 2단 조판 시험지는 각 칼럼 맨 위 문제가 인쇄 여백 바로
+    # 아래(841pt 페이지에서 y0≈47pt, 약 5.6%)에서 시작하는데, 6%(≈50.5pt) 컷오프가
+    # 이 정상 문제 앵커를 머리말로 오판해 통째로 버렸다(홀수 문제 누락 버그).
+    # 3%(≈25pt, A4 기준 약 0.35인치) 로 낮추면 이런 상단 시작 문제를 살리면서도,
+    # 페이지 최상단 밴드의 진짜 머리말은 계속 배제한다. 문제 번호 오탐은 어차피
+    # ANCHOR_RE(`\d{1,2}\.` 형태) 와 _longest_increasing(번호 단조증가) 필터가 잡는다.
+    #
+    # 하단은 6% 를 유지한다. 시험지 꼬리말(가운데 정렬 페이지 번호 "- N -")이
+    # 하단에서 약 2.4%(841pt 페이지에서 y≈811pt) 지점에 오는 사례가 있어, 하단을
+    # 3% 로 낮추면 이 꼬리말이 마지막 문제 크롭·본문에 딸려 들어가 회귀가 난다.
     return fitz.Rect(
         page_rect.x0 + page_rect.width * 0.04,
-        page_rect.y0 + page_rect.height * 0.06,
+        page_rect.y0 + page_rect.height * 0.03,
         page_rect.x1 - page_rect.width * 0.04,
         page_rect.y1 - page_rect.height * 0.06,
     )
