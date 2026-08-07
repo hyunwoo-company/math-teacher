@@ -136,6 +136,7 @@ export function plainPreview(source: string): string {
     .find((line) => line !== '');
   if (!firstLine) return '';
   return firstLine
+    .replace(/^#{1,6}\s*/, '')
     .replace(/\*\*/g, '')
     .replace(/`/g, '')
     .replace(/\\\[|\\\]|\\\(|\\\)/g, '')
@@ -177,4 +178,152 @@ export function splitInline(source: string): InlineToken[] {
     tokens.push({ kind: 'plain', value: source.slice(last) });
   }
   return tokens;
+}
+
+/* ── 블록 레벨(제목/목록/문단) 파싱 ─────────────────────────────── */
+
+export type Block =
+  | { kind: 'heading'; level: number; content: string }
+  | { kind: 'paragraph'; content: string }
+  | { kind: 'ul'; items: string[] }
+  | { kind: 'ol'; items: string[] }
+  // 디스플레이 수식 패스스루. 여러 줄에 걸친 수식을 통째로 splitMath 로 넘긴다.
+  | { kind: 'math'; content: string };
+
+// 디스플레이 수식만 블록 경계를 무시해야 하므로 따로 추린다($$…$$, \[…\]).
+const DISPLAY_DELIMITERS: readonly Delimiter[] = DELIMITERS.filter(
+  (delimiter) => delimiter.display,
+);
+
+interface RawRegion {
+  kind: 'text' | 'math';
+  value: string;
+}
+
+/**
+ * 디스플레이 수식 구간을 먼저 떼어낸다.
+ * 이 구간은 줄 단위 블록 파싱에서 제외해, 수식 내부 개행이 제목/목록/문단
+ * 경계로 오인되는 것을 막는다. 닫는 구분자를 못 찾으면 리터럴 텍스트로 둔다.
+ */
+function scanDisplayMath(source: string): RawRegion[] {
+  const regions: RawRegion[] = [];
+  let text = '';
+  let i = 0;
+
+  const flush = () => {
+    if (text !== '') {
+      regions.push({ kind: 'text', value: text });
+      text = '';
+    }
+  };
+
+  while (i < source.length) {
+    const char = source[i];
+
+    // 이스케이프(`\$`, `\\`)는 두 글자를 그대로 보존해 구분자 오탐을 막는다.
+    if (char === '\\' && (source[i + 1] === '$' || source[i + 1] === '\\')) {
+      text += char + source[i + 1];
+      i += 2;
+      continue;
+    }
+
+    const delimiter = DISPLAY_DELIMITERS.find((candidate) =>
+      source.startsWith(candidate.open, i),
+    );
+    if (delimiter) {
+      const bodyStart = i + delimiter.open.length;
+      const closeIndex = source.indexOf(delimiter.close, bodyStart);
+      if (closeIndex !== -1 && looksLikeMath(source.slice(bodyStart, closeIndex))) {
+        flush();
+        const end = closeIndex + delimiter.close.length;
+        regions.push({ kind: 'math', value: source.slice(i, end) });
+        i = end;
+        continue;
+      }
+    }
+
+    text += char;
+    i += 1;
+  }
+
+  flush();
+  return regions;
+}
+
+// 최대 3칸 들여쓰기까지는 마크다운으로 인정한다.
+const HEADING_RE = /^ {0,3}(#{1,6})\s+(.+?)\s*$/;
+const UL_RE = /^ {0,3}[-*]\s+(.+?)\s*$/;
+const OL_RE = /^ {0,3}\d+\.\s+(.+?)\s*$/;
+
+type ListBlock = Extract<Block, { kind: 'ul' | 'ol' }>;
+
+/** 디스플레이 수식이 제거된 텍스트 구간을 줄 단위로 블록으로 분류한다. */
+function parseTextRegion(text: string, blocks: Block[]): void {
+  let paragraph: string[] = [];
+  let list: ListBlock | null = null;
+
+  const flushParagraph = () => {
+    const content = paragraph.join('\n');
+    if (content.trim() !== '') blocks.push({ kind: 'paragraph', content });
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (list) {
+      blocks.push(list);
+      list = null;
+    }
+  };
+
+  for (const line of text.split('\n')) {
+    const heading = HEADING_RE.exec(line);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      blocks.push({ kind: 'heading', level: heading[1]!.length, content: heading[2]! });
+      continue;
+    }
+
+    const ul = UL_RE.exec(line);
+    if (ul) {
+      flushParagraph();
+      if (list?.kind === 'ul') list.items.push(ul[1]!);
+      else {
+        flushList();
+        list = { kind: 'ul', items: [ul[1]!] };
+      }
+      continue;
+    }
+
+    const ol = OL_RE.exec(line);
+    if (ol) {
+      flushParagraph();
+      if (list?.kind === 'ol') list.items.push(ol[1]!);
+      else {
+        flushList();
+        list = { kind: 'ol', items: [ol[1]!] };
+      }
+      continue;
+    }
+
+    // 문단 줄 또는 빈 줄
+    flushList();
+    if (line.trim() === '') flushParagraph();
+    else paragraph.push(line);
+  }
+
+  flushParagraph();
+  flushList();
+}
+
+/**
+ * 원문을 블록(제목/목록/문단/디스플레이 수식)으로 나눈다.
+ * 각 블록의 텍스트는 이후 `splitMath` + 인라인 처리를 그대로 통과한다.
+ */
+export function parseBlocks(source: string): Block[] {
+  const blocks: Block[] = [];
+  for (const region of scanDisplayMath(source)) {
+    if (region.kind === 'math') blocks.push({ kind: 'math', content: region.value });
+    else parseTextRegion(region.value, blocks);
+  }
+  return blocks;
 }

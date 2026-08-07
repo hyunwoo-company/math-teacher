@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { hasMath, plainPreview, renderMathToHtml, splitInline, splitMath } from '@/lib/math-text';
+import {
+  hasMath,
+  parseBlocks,
+  plainPreview,
+  renderMathToHtml,
+  splitInline,
+  splitMath,
+} from '@/lib/math-text';
 
 describe('splitMath', () => {
   it('인라인 \\(...\\) 을 수식으로 분리한다', () => {
@@ -90,5 +97,56 @@ describe('splitInline', () => {
 
   it('마크업이 없으면 그대로 둔다', () => {
     expect(splitInline('평범한 문장')).toEqual([{ kind: 'plain', value: '평범한 문장' }]);
+  });
+});
+
+describe('parseBlocks', () => {
+  it('## 제목을 h2 헤딩으로 분류한다', () => {
+    expect(parseBlocks('## 정답')).toEqual([{ kind: 'heading', level: 2, content: '정답' }]);
+  });
+
+  it('### 제목은 레벨 3', () => {
+    expect(parseBlocks('### 핵심 개념')).toEqual([
+      { kind: 'heading', level: 3, content: '핵심 개념' },
+    ]);
+  });
+
+  it('연속된 - 항목을 하나의 ul 로 묶는다', () => {
+    expect(parseBlocks('- a\n- b')).toEqual([{ kind: 'ul', items: ['a', 'b'] }]);
+  });
+
+  it('연속된 1. 항목을 하나의 ol 로 묶는다', () => {
+    expect(parseBlocks('1. a\n2. b')).toEqual([{ kind: 'ol', items: ['a', 'b'] }]);
+  });
+
+  it('그 외 줄은 문단이고 연속 줄은 개행을 유지한다', () => {
+    expect(parseBlocks('첫 줄\n둘째 줄')).toEqual([
+      { kind: 'paragraph', content: '첫 줄\n둘째 줄' },
+    ]);
+  });
+
+  it('빈 줄은 문단을 나눈다', () => {
+    expect(parseBlocks('앞 문단\n\n뒤 문단')).toEqual([
+      { kind: 'paragraph', content: '앞 문단' },
+      { kind: 'paragraph', content: '뒤 문단' },
+    ]);
+  });
+
+  it('여러 줄에 걸친 디스플레이 수식을 통째로 math 블록으로 보호한다', () => {
+    expect(parseBlocks('$$\n\\frac{a}{b}\n$$')).toEqual([
+      { kind: 'math', content: '$$\n\\frac{a}{b}\n$$' },
+    ]);
+  });
+
+  it('제목·목록과 섞인 디스플레이 수식도 경계를 침범하지 않는다', () => {
+    expect(parseBlocks('## 정답\n$$\\frac{a}{b}$$\n- 하나\n- 둘')).toEqual([
+      { kind: 'heading', level: 2, content: '정답' },
+      { kind: 'math', content: '$$\\frac{a}{b}$$' },
+      { kind: 'ul', items: ['하나', '둘'] },
+    ]);
+  });
+
+  it('닫히지 않은 디스플레이 구분자는 리터럴 문단으로 둔다', () => {
+    expect(parseBlocks('$$ 열기만 함')).toEqual([{ kind: 'paragraph', content: '$$ 열기만 함' }]);
   });
 });

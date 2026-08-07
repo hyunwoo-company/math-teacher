@@ -1,35 +1,86 @@
-import { Fragment, useMemo } from 'react';
-import { renderMathToHtml, splitInline, splitMath } from '@/lib/math-text';
+import { Fragment, useMemo, type ReactNode } from 'react';
+import { parseBlocks, renderMathToHtml, splitInline, splitMath, type Block } from '@/lib/math-text';
 
 interface MathTextProps {
-  /** AI 응답 원문. 수식 구분자를 포함할 수 있다. */
+  /** AI 응답 원문. 수식 구분자와 블록 마크다운(제목/목록)을 포함할 수 있다. */
   children: string;
   className?: string;
 }
 
 /**
  * 수식이 섞인 텍스트를 렌더한다.
- * 텍스트 구간은 개행을 유지하고, 수식 구간만 KaTeX HTML 로 바꾼다.
+ * 블록(제목/목록/문단/디스플레이 수식)으로 나눈 뒤, 각 블록의 텍스트는
+ * 인라인 수식·굵게·코드까지 그대로 통과시킨다.
  */
 export function MathText({ children, className }: MathTextProps) {
-  const segments = useMemo(() => {
-    const parsed = splitMath(children);
-    // 블록 수식은 그 자체로 위아래 여백을 가진다. 인접한 개행까지 그대로 두면
-    // 빈 줄이 하나 더 들어간 것처럼 보이므로 한 개만 흡수한다.
-    return parsed.map((segment, index) => {
-      if (segment.kind !== 'text') return segment;
-      const previous = parsed[index - 1];
-      const next = parsed[index + 1];
-      let value = segment.value;
-      if (previous?.kind === 'math' && previous.display) value = value.replace(/^\n/, '');
-      if (next?.kind === 'math' && next.display) value = value.replace(/\n$/, '');
-      return { ...segment, value };
-    });
-  }, [children]);
+  const blocks = useMemo(() => parseBlocks(children), [children]);
+  return <div className={className}>{blocks.map((block, index) => renderBlock(block, index))}</div>;
+}
 
+const HEADING_TAGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const;
+
+function headingClassName(level: number): string {
+  switch (level) {
+    case 1:
+      return 'mt-4 mb-1 text-lg font-semibold text-slate-900 first:mt-0';
+    case 2:
+      return 'mt-3 mb-1 text-base font-semibold text-slate-900 first:mt-0';
+    case 3:
+      return 'mt-3 mb-1 text-sm font-semibold text-slate-900 first:mt-0';
+    default:
+      return 'mt-2 mb-1 text-sm font-medium text-slate-700 first:mt-0';
+  }
+}
+
+function renderBlock(block: Block, key: number): ReactNode {
+  switch (block.kind) {
+    case 'heading': {
+      const Tag = HEADING_TAGS[block.level - 1] ?? 'h6';
+      return (
+        <Tag key={key} className={headingClassName(block.level)}>
+          <RichContent source={block.content} />
+        </Tag>
+      );
+    }
+    case 'ul':
+      return (
+        <ul key={key} className="my-2 list-disc space-y-1 pl-5 marker:text-slate-400">
+          {block.items.map((item, index) => (
+            <li key={index}>
+              <RichContent source={item} />
+            </li>
+          ))}
+        </ul>
+      );
+    case 'ol':
+      return (
+        <ol key={key} className="my-2 list-decimal space-y-1 pl-5 marker:text-slate-400">
+          {block.items.map((item, index) => (
+            <li key={index}>
+              <RichContent source={item} />
+            </li>
+          ))}
+        </ol>
+      );
+    case 'math':
+      // 디스플레이 수식 블록. RichContent 가 KaTeX display 래퍼를 만든다.
+      return <RichContent key={key} source={block.content} />;
+    case 'paragraph':
+      return (
+        <p key={key} className="mt-2 whitespace-pre-wrap leading-relaxed first:mt-0">
+          <RichContent source={block.content} />
+        </p>
+      );
+    default:
+      return null;
+  }
+}
+
+/** 한 블록의 텍스트를 인라인 수식/굵게/코드까지 렌더한다. */
+function RichContent({ source }: { source: string }) {
   return (
-    <div className={className}>
-      {segments.map((segment, index) => {
+    <>
+      {splitMath(source).map((segment, index) => {
         if (segment.kind === 'text') {
           return <Fragment key={index}>{renderInline(segment.value)}</Fragment>;
         }
@@ -45,7 +96,7 @@ export function MathText({ children, className }: MathTextProps) {
           <span key={index} dangerouslySetInnerHTML={{ __html: html }} />
         );
       })}
-    </div>
+    </>
   );
 }
 

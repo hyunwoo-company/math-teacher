@@ -52,4 +52,57 @@ describe('MathText', () => {
   it('깨진 수식이 들어와도 렌더가 죽지 않는다', () => {
     expect(() => render(<MathText>{'\\(\\frac{\\)'}</MathText>)).not.toThrow();
   });
+
+  it('## 제목을 h2 로 렌더한다', () => {
+    const { container } = render(<MathText>{'## 정답'}</MathText>);
+    const h2 = container.querySelector('h2');
+    expect(h2).not.toBeNull();
+    expect(h2?.textContent).toBe('정답');
+  });
+
+  it('### 제목을 h3 로 렌더한다', () => {
+    const { container } = render(<MathText>{'### 핵심 개념'}</MathText>);
+    const h3 = container.querySelector('h3');
+    expect(h3).not.toBeNull();
+    expect(h3?.textContent).toBe('핵심 개념');
+  });
+
+  it('- 목록을 ul 과 li 로 렌더한다', () => {
+    const { container } = render(<MathText>{'- 하나\n- 둘'}</MathText>);
+    const items = container.querySelectorAll('ul > li');
+    expect(items.length).toBe(2);
+    expect(items[0]?.textContent).toBe('하나');
+    expect(items[1]?.textContent).toBe('둘');
+  });
+
+  it('1. 목록을 ol 과 li 로 렌더한다', () => {
+    const { container } = render(<MathText>{'1. 처음\n2. 다음'}</MathText>);
+    const items = container.querySelectorAll('ol > li');
+    expect(items.length).toBe(2);
+    expect(items[1]?.textContent).toBe('다음');
+  });
+
+  it('제목 안의 인라인 수식을 KaTeX 로 렌더한다', () => {
+    const { container } = render(<MathText>{'## $x^2$ 정리'}</MathText>);
+    const h2 = container.querySelector('h2');
+    expect(h2).not.toBeNull();
+    expect(h2?.querySelector('.katex')).not.toBeNull();
+    expect(h2?.textContent).toContain('정리');
+  });
+
+  it('목록 항목 안의 굵게와 인라인 수식을 렌더한다', () => {
+    const { container } = render(<MathText>{'- **핵심** \\(y=2\\)'}</MathText>);
+    const li = container.querySelector('ul > li');
+    expect(li).not.toBeNull();
+    expect(li?.querySelector('strong')?.textContent).toBe('핵심');
+    expect(li?.querySelector('.katex')).not.toBeNull();
+  });
+
+  it('제목·목록과 섞인 디스플레이 수식도 깨지지 않고 렌더한다', () => {
+    const { container } = render(<MathText>{'## 정답\n$$\\frac{a}{b}$$\n- 하나\n- 둘'}</MathText>);
+    expect(container.querySelector('h2')?.textContent).toBe('정답');
+    expect(container.querySelector('.katex-display')).not.toBeNull();
+    expect(container.querySelector('.mfrac')).not.toBeNull();
+    expect(container.querySelectorAll('ul > li').length).toBe(2);
+  });
 });
