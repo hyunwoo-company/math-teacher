@@ -49,15 +49,38 @@ def test_flash_omits_effort() -> None:
     assert "json" in args
 
 
-def test_pro_includes_effort_clamped() -> None:
+def test_gemini_pro_omits_effort() -> None:
+    # gemini-3.1-pro-low/high 는 effort 가 모델명에 내장돼 있어 --effort 를 붙이면
+    # agy 가 "conflicts with --effort" 로 거부한다 → 절대 붙이지 않는다.
+    for model in ("gemini-3.1-pro-low", "gemini-3.1-pro-high"):
+        args = build_agy_args(
+            agy_path=Path("agy.exe"),
+            model=model,
+            effort="medium",
+            prompt="풀이해줘",
+        )
+        assert "--effort" not in args, model
+        assert model in args
+
+
+def test_claude_includes_effort_clamped() -> None:
     args = build_agy_args(
         agy_path=Path("agy.exe"),
-        model="gemini-3.1-pro-high",
+        model="claude-sonnet-4-6",
         effort="max",  # agy 는 low|medium|high 만 → high 로 클램프
         prompt="풀이해줘",
     )
     assert "--effort" in args
     assert args[args.index("--effort") + 1] == "high"
+
+
+def test_gemini_pro_keeps_long_timeout() -> None:
+    # effort=False 로 바뀌어도 pro 는 느리므로 타임아웃은 flash 보다 길어야 한다.
+    from providers.agy import _FLASH_TIMEOUT_SECONDS, _timeout_for
+
+    assert _timeout_for("gemini-3.1-pro-low") > _FLASH_TIMEOUT_SECONDS
+    assert _timeout_for("gemini-3.1-pro-high") > _FLASH_TIMEOUT_SECONDS
+    assert _timeout_for("gemini-3-flash") == _FLASH_TIMEOUT_SECONDS
 
 
 def test_build_args_rejects_unknown_model() -> None:

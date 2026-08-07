@@ -44,13 +44,17 @@ from providers.base import (
     flatten_history,
 )
 
-# 화이트리스트. 값의 `effort` 는 그 모델이 `--effort` 를 받는지 여부다.
-# 여기 없는 모델 요청은 거부한다(400 은 ai_service.resolve_model 에서 낸다).
+# 화이트리스트. 여기 없는 모델 요청은 거부한다(400 은 ai_service.resolve_model 에서 낸다).
+#   effort=True → 이 모델은 `--effort low|medium|high` 플래그를 받는다.
+#   slow=True   → 응답이 느린 모델이라 타임아웃을 길게 잡는다.
+# ⚠️ gemini-3.1-pro-low/high 는 effort 가 모델명(low/high)에 이미 박혀 있어
+#    `--effort` 를 함께 주면 agy 가 "conflicts with --effort" 로 거부한다.
+#    그래서 effort=False(플래그 안 붙임). 단 pro 는 느리므로 slow=True.
 AGY_MODELS: Final[dict[str, dict[str, bool]]] = {
-    "gemini-3-flash": {"effort": False},
-    "gemini-3.1-pro-low": {"effort": True},
-    "gemini-3.1-pro-high": {"effort": True},
-    "claude-sonnet-4-6": {"effort": True},
+    "gemini-3-flash": {"effort": False, "slow": False},
+    "gemini-3.1-pro-low": {"effort": False, "slow": True},
+    "gemini-3.1-pro-high": {"effort": False, "slow": True},
+    "claude-sonnet-4-6": {"effort": True, "slow": True},
 }
 
 DEFAULT_MODEL: Final[str] = "gemini-3-flash"
@@ -151,8 +155,8 @@ def availability() -> dict[str, object]:
 
 
 def _timeout_for(model: str) -> float:
-    """모델별 타임아웃(초). effort 지원 모델(pro/claude)은 더 길게 잡는다."""
-    if AGY_MODELS.get(model, {}).get("effort"):
+    """모델별 타임아웃(초). 느린 모델(pro/claude)은 더 길게 잡는다."""
+    if AGY_MODELS.get(model, {}).get("slow"):
         return _PRO_TIMEOUT_SECONDS
     return _FLASH_TIMEOUT_SECONDS
 
@@ -162,7 +166,8 @@ def build_agy_args(
 ) -> list[str]:
     """Agy 실행 인자 배열을 만든다.
 
-    flash 는 `--effort` 를 거부하므로 붙이지 않는다. 지원 모델에만 조건부로 붙인다.
+    flash 와 gemini-3.1-pro-low/high 는 `--effort` 를 거부(전자는 미지원, 후자는
+    모델명에 effort 내장)하므로 붙이지 않는다. `spec["effort"]` 가 True 인 모델에만 붙인다.
 
     Raises:
         ProviderError: 화이트리스트에 없는 모델일 때.
