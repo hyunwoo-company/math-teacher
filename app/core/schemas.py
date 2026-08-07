@@ -300,3 +300,24 @@ class NoteItemsResult(BaseModel):
 
     added: list[int]
     skipped: list[int]
+
+
+class UsageWindow(BaseModel):
+    """한 시간 창의 토큰 합계와 호출(usage 있는 행) 수."""
+
+    tokens: int
+    calls: int
+
+
+class UsageWindows(BaseModel):
+    """사용량 바가 쓰는 세 시간 창(최근 24시간 / 7일 / 전체)."""
+
+    last_24h: UsageWindow
+    last_7_days: UsageWindow
+    total: UsageWindow
+
+
+class UsageSummaryResponse(BaseModel):
+    """`GET /api/usage/summary` 응답."""
+
+    windows: UsageWindows

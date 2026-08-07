@@ -69,6 +69,7 @@ from schemas import (
     SubscriptionInfo,
     SubscriptionProviderInfo,
     TreeResponse,
+    UsageSummaryResponse,
 )
 
 # 프론트엔드(Next.js dev) 와 Tauri 로컬 웹뷰에서 호출한다.
@@ -611,6 +612,18 @@ def read_note_item_crop(note_id: NodeId, item_id: NodeId) -> FileResponse:
     return FileResponse(
         service.note_crop_path(note_id, item_id), media_type="image/png"
     )
+
+
+# --------------------------------------------------------------- 사용량
+@app.get(
+    "/api/usage/summary",
+    response_model=UsageSummaryResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def read_usage_summary() -> UsageSummaryResponse:
+    """토큰 사용량 집계(사용량 바용). 최근 24시간 / 7일 / 전체 창의 토큰·호출 수."""
+    summary = await run_in_threadpool(service.usage_summary)
+    return UsageSummaryResponse.model_validate(summary)
 
 
 @app.get("/api/health", response_model=OkResponse, status_code=status.HTTP_200_OK)

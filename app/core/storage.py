@@ -206,6 +206,106 @@ def _dumps(value: dict[str, Any] | None) -> str | None:
     return None if value is None else json.dumps(value, ensure_ascii=False)
 
 
+# ---------------------------------------------------------------- usage 집계
+# `total_tokens` 가 없을 때 더할 토큰 필드. agy 형(input/output/thinking/
+# cache_read)과 Anthropic 형(cache_creation_input/cache_read_input)을 모두 포함한다.
+_TOKEN_FIELDS: Final[tuple[str, ...]] = (
+    "input_tokens",
+    "output_tokens",
+    "thinking_tokens",
+    "cache_read_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _as_int(value: Any) -> int:
+    """토큰 값을 방어적으로 int 로 바꾼다(숫자/숫자문자열이 아니면 0)."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _usage_tokens(usage: dict[str, Any]) -> int:
+    """Usage dict 한 건의 토큰 수.
+
+    `total_tokens` 가 숫자로 있으면 그 값을, 없으면 알려진 토큰 필드의 합을 쓴다.
+    """
+    total = usage.get("total_tokens")
+    if isinstance(total, bool):
+        pass
+    elif isinstance(total, (int, float)):
+        return int(total)
+    elif isinstance(total, str):
+        try:
+            return int(float(total))
+        except ValueError:
+            pass
+    return sum(_as_int(usage.get(field)) for field in _TOKEN_FIELDS)
+
+
+def _parse_created_at(raw: str | None) -> datetime | None:
+    """`created_at`(KST ISO-8601, `now_iso()`) 을 tz-aware datetime 으로.
+
+    파싱 불가/빈 값이면 None. 과거 데이터가 오프셋 없이 저장돼 있으면 KST 로 본다.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=KST)
+    return parsed
+
+
+def usage_summary(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """풀이+채팅의 토큰 사용량을 시간 창별로 집계한다.
+
+    `solutions` 와 `chat_messages` 의 `usage_json`(NULL 아닌 행)을 모두 읽어
+    행별 토큰 수(`_usage_tokens`)를 더하고, usage 가 있는 행 수를 센다. 시간 창은
+    `created_at` 기준으로 최근 24시간 / 7일 / 전체(제한 없음)로 나눈다.
+    """
+    now = datetime.now(KST)
+    cutoff_24h = now - timedelta(hours=24)
+    cutoff_7d = now - timedelta(days=7)
+    windows: dict[str, dict[str, int]] = {
+        "last_24h": {"tokens": 0, "calls": 0},
+        "last_7_days": {"tokens": 0, "calls": 0},
+        "total": {"tokens": 0, "calls": 0},
+    }
+    rows = conn.execute(
+        "SELECT usage_json, created_at FROM solutions WHERE usage_json IS NOT NULL"
+        " UNION ALL"
+        " SELECT usage_json, created_at FROM chat_messages WHERE usage_json IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        usage = _loads(row["usage_json"])
+        if usage is None:
+            continue
+        tokens = _usage_tokens(usage)
+        created = _parse_created_at(row["created_at"])
+        windows["total"]["tokens"] += tokens
+        windows["total"]["calls"] += 1
+        if created is not None and created >= cutoff_7d:
+            windows["last_7_days"]["tokens"] += tokens
+            windows["last_7_days"]["calls"] += 1
+        if created is not None and created >= cutoff_24h:
+            windows["last_24h"]["tokens"] += tokens
+            windows["last_24h"]["calls"] += 1
+    return windows
+
+
 # ---------------------------------------------------------------- nodes
 def _node_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     node: dict[str, Any] = {

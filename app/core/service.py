@@ -437,6 +437,14 @@ def clear_chat(node_id: str, problem_no: int | None = None) -> None:
         storage.clear_chat_thread(conn, node_id, problem_no=problem_no)
 
 
+# --------------------------------------------------------------- 사용량
+def usage_summary() -> dict[str, dict[str, dict[str, int]]]:
+    """풀이+채팅 토큰 사용량을 시간 창(24시간/7일/전체)별로 집계한다."""
+    with storage.transaction() as conn:
+        windows = storage.usage_summary(conn)
+    return {"windows": windows}
+
+
 # ------------------------------------------------------------- 오답노트
 def create_note(name: str, parent_id: str | None) -> dict[str, Any]:
     """오답노트(section='note' 인 파일형 노드)를 만든다.
