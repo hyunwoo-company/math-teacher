@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -71,12 +72,19 @@ from schemas import (
 )
 
 # 프론트엔드(Next.js dev) 와 Tauri 로컬 웹뷰에서 호출한다.
-ALLOWED_ORIGINS: Final[list[str]] = [
+# 로컬/데스크톱 기본 origin. 배포 시 Vercel 도메인은 env 로 추가한다:
+#   MATH_TEACHER_CORS_ORIGINS="https://math-teacher.vercel.app,https://..."
+_DEFAULT_ORIGINS: Final[list[str]] = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:1420",
     "http://127.0.0.1:1420",
     "tauri://localhost",
+]
+ALLOWED_ORIGINS: Final[list[str]] = _DEFAULT_ORIGINS + [
+    origin.strip()
+    for origin in os.environ.get("MATH_TEACHER_CORS_ORIGINS", "").split(",")
+    if origin.strip()
 ]
 
 _ERRORS: Final[dict[int | str, dict[str, Any]]] = {
