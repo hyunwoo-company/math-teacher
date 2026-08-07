@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import { MathText } from '@/components/MathText';
 import { plainPreview } from '@/lib/math-text';
 import { ProblemCrop } from '@/components/center/ProblemCrop';
+import { CopyButton } from '@/components/ui/CopyButton';
 import { EmptyState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { costAmounts, formatDateTime, formatInt, formatKrw, formatUsd, totalTokens } from '@/lib/format';
 import { useWorkspace, type SolutionEntry } from '@/store/workspace';
@@ -238,14 +239,18 @@ function SolutionRow({
             ) : null}
             {entry?.createdAt ? <span>{formatDateTime(entry.createdAt)}</span> : null}
             {status === 'done' ? (
-              <button
-                type="button"
-                onClick={onSolveOne}
-                disabled={disabled}
-                className="ml-auto rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-              >
-                다시 풀기
-              </button>
+              <div className="ml-auto flex items-center gap-2">
+                {/* 복사는 렌더된 텍스트가 아니라 마크다운 원문(entry.text)을 넣는다. */}
+                {entry?.text ? <CopyButton text={entry.text} label="복사" /> : null}
+                <button
+                  type="button"
+                  onClick={onSolveOne}
+                  disabled={disabled}
+                  className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  다시 풀기
+                </button>
+              </div>
             ) : null}
           </div>
         </div>

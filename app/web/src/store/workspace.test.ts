@@ -22,6 +22,8 @@ function totalTokensOf(usage: { input_tokens?: number; output_tokens?: number } 
 function reset() {
   useWorkspace.setState(initial, true);
   resetMockState();
+  // 새로고침 복원(loadTree → restoreLastOpen)이 prefs 를 읽으므로 테스트 간 격리한다.
+  window.localStorage.clear();
 }
 
 async function selectMockFile() {

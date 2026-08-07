@@ -32,6 +32,7 @@ export function Workspace() {
   const hydratePrefs = useWorkspace((state) => state.hydratePrefs);
   const loadEnv = useWorkspace((state) => state.loadEnv);
   const loadTree = useWorkspace((state) => state.loadTree);
+  const loadUsageSummary = useWorkspace((state) => state.loadUsageSummary);
   const logout = useWorkspace((state) => state.logout);
   const setRightWidth = useWorkspace((state) => state.setRightWidth);
   const dismissToast = useWorkspace((state) => state.dismissToast);
@@ -49,9 +50,13 @@ export function Workspace() {
     //  store.login 이 트리를 불러온다.)
     void (async () => {
       await loadEnv();
-      if (useWorkspace.getState().accessOk) void loadTree();
+      if (useWorkspace.getState().accessOk) {
+        void loadTree();
+        // agy 쿼터 사용량 요약을 초기 진입에 한 번 불러온다(실패는 조용히 무시).
+        void loadUsageSummary();
+      }
     })();
-  }, [hydratePrefs, loadEnv, loadTree]);
+  }, [hydratePrefs, loadEnv, loadTree, loadUsageSummary]);
 
   useEffect(() => {
     if (!toast) return;

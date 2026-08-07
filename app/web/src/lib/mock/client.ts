@@ -45,6 +45,7 @@ import type {
   TreeNode,
   TreeResponse,
   Usage,
+  UsageSummaryResponse,
 } from '@/types/api';
 
 /** 문항별 스레드 키. null = 시험지 전역. */
@@ -336,6 +337,31 @@ export const mockClient: ApiClient = {
   async getEnv() {
     await sleep(LATENCY_MS);
     return { ...state.env, models: [...state.env.models] };
+  },
+
+  async getUsageSummary(): Promise<UsageSummaryResponse> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    // 목에는 시간창 개념이 없으므로 저장된 풀이/채팅 usage 를 합쳐 스텁을 만든다.
+    let tokens = 0;
+    let calls = 0;
+    const addUsage = (usage: Usage | null | undefined) => {
+      if (!usage) return;
+      tokens +=
+        (usage.input_tokens ?? 0) +
+        (usage.output_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0);
+      calls += 1;
+    };
+    for (const fileSolutions of state.solutions.values()) {
+      for (const solution of fileSolutions.values()) addUsage(solution.usage);
+    }
+    for (const messages of state.chats.values()) {
+      for (const message of messages) addUsage(message.usage);
+    }
+    const window = { tokens, calls };
+    return { windows: { last_24h: window, last_7_days: window, total: window } };
   },
 
   async login(password: string) {

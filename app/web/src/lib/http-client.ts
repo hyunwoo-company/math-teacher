@@ -26,6 +26,7 @@ import type {
   ThreadsResponse,
   TreeNode,
   TreeResponse,
+  UsageSummaryResponse,
 } from '@/types/api';
 
 /** 브라우저에 보관한 API 키(웹 모드). 서버에 저장하지 않는다. */
@@ -158,6 +159,10 @@ async function* openStream(
 export const httpClient: ApiClient = {
   getEnv() {
     return requestJson<EnvResponse>('/api/env');
+  },
+
+  getUsageSummary() {
+    return requestJson<UsageSummaryResponse>('/api/usage/summary');
   },
 
   async login(password: string) {

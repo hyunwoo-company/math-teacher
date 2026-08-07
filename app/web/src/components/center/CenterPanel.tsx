@@ -6,6 +6,7 @@ import { PdfViewer } from '@/components/center/PdfViewer';
 import { SolutionsTab } from '@/components/center/SolutionsTab';
 import { NoteView } from '@/components/center/NoteView';
 import { AddToNoteButton } from '@/components/center/AddToNoteButton';
+import { DownloadPdfButton } from '@/components/center/DownloadPdfButton';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { formatDate } from '@/lib/format';
 import { nodePath } from '@/lib/tree';
@@ -90,9 +91,12 @@ export function CenterPanel() {
               </InlineBadge>
             </>
           ) : null}
-          <span className="ml-auto shrink-0 text-[11px] text-slate-400">
-            등록 {formatDate(node.created_at)}
-          </span>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            {node.file ? (
+              <DownloadPdfButton url={api.fileRawUrl(node.id)} fileName={node.name} />
+            ) : null}
+            <span className="text-[11px] text-slate-400">등록 {formatDate(node.created_at)}</span>
+          </div>
         </div>
         <p className="mt-0.5 truncate text-[11px] text-slate-400">{path.join(' / ')}</p>
       </header>

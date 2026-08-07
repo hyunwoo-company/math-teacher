@@ -367,14 +367,14 @@ describe('워크스페이스 화면 (목 모드)', () => {
 
     await user.click(await screen.findByRole('button', { name: '7' }));
 
-    // 스레드 배너가 7번 문제 대화로 전환된다(계약 6-B).
-    expect(await screen.findByText('7번 문제 대화')).toBeInTheDocument();
-    expect(screen.getByText('문제 이미지·기존 풀이가 함께 전달됩니다')).toBeInTheDocument();
+    // 스레드 바가 7번 문제 대화로 전환된다(계약 6-B).
+    expect(await screen.findByText(/7번 문제 대화/)).toBeInTheDocument();
+    expect(screen.getByText(/문제 이미지와 기존 풀이가 함께 전달됩니다/)).toBeInTheDocument();
     expect(useWorkspace.getState().selectedProblemNo).toBe(7);
     await waitFor(() => expect(useWorkspace.getState().activeThreadNo).toBe(7));
 
-    // "전체 대화로" 버튼으로 전역 스레드로 돌아간다.
-    await user.click(screen.getByRole('button', { name: '전체 대화로' }));
+    // 전역 스레드 칩으로 전체 대화로 돌아간다.
+    await user.click(screen.getByTitle('전체 대화(전역 스레드)로 전환'));
     await waitFor(() => expect(useWorkspace.getState().selectedProblemNo).toBeNull());
     await waitFor(() => expect(useWorkspace.getState().activeThreadNo).toBeNull());
   });

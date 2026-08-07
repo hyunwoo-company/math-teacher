@@ -17,10 +17,16 @@ import type {
   ThreadsResponse,
   TreeNode,
   TreeResponse,
+  UsageSummaryResponse,
 } from '@/types/api';
 
 export interface ApiClient {
   getEnv(): Promise<EnvResponse>;
+  /**
+   * agy 쿼터 기반 사용량 요약(계약: `GET /api/usage/summary`).
+   * 아직 배포 안 됐을 수 있는 신규 엔드포인트다 — 호출부가 실패를 조용히 흡수한다.
+   */
+  getUsageSummary(): Promise<UsageSummaryResponse>;
   /**
    * 접속 비밀번호 검증(계약: `POST /api/login {password}`).
    * 맞으면 resolve, 틀리면 401 ApiError 로 reject.

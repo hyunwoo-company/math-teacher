@@ -5,7 +5,9 @@ import clsx from 'clsx';
 import { MathText } from '@/components/MathText';
 import { ApiCostNotice } from '@/components/ai/ApiCostNotice';
 import { SubscriptionNotice } from '@/components/ai/SubscriptionNotice';
+import { ThreadBar } from '@/components/ai/ThreadBar';
 import { UsageFooter } from '@/components/ai/UsageFooter';
+import { UsageStatusBar } from '@/components/ai/UsageStatusBar';
 import { ConfirmDialog } from '@/components/ui/Dialog';
 import { EmptyState, InlineBadge, LoadingState, Spinner } from '@/components/ui/Feedback';
 import { costAmounts, effortLabel, formatInt, formatKrw, formatUsd, totalTokens } from '@/lib/format';
@@ -51,8 +53,6 @@ export function AiPanel() {
   const sendChat = useWorkspace((state) => state.sendChat);
   const abortChat = useWorkspace((state) => state.abortChat);
   const clearChat = useWorkspace((state) => state.clearChat);
-  const selectProblem = useWorkspace((state) => state.selectProblem);
-  const openThread = useWorkspace((state) => state.openThread);
   const confirmNotePrompt = useWorkspace((state) => state.confirmNotePrompt);
   const cancelNotePrompt = useWorkspace((state) => state.cancelNotePrompt);
 
@@ -244,30 +244,8 @@ export function AiPanel() {
         ) : null}
       </header>
 
-      {/* 현재 스레드 표시(계약 6-B). 문항 스레드면 그 번호, 아니면 전역. */}
-      {selectedFileId ? (
-        <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-3 py-1.5 text-[12px] text-slate-600">
-          {activeThreadNo != null ? (
-            <>
-              <span className="font-medium text-blue-800">{activeThreadNo}번 문제 대화</span>
-              <span className="text-blue-600">문제 이미지·기존 풀이가 함께 전달됩니다</span>
-              <button
-                type="button"
-                onClick={() => {
-                  selectProblem(null);
-                  void openThread(null);
-                }}
-                className="ml-auto rounded px-1 text-blue-600 hover:bg-blue-100"
-                title="전체 대화(전역 스레드)로 전환"
-              >
-                전체 대화로
-              </button>
-            </>
-          ) : (
-            <span className="text-slate-500">전체 대화 (문제를 클릭하면 그 문제 스레드가 열립니다)</span>
-          )}
-        </div>
-      ) : null}
+      {/* 스레드 목록/전환/삭제 (계약 6-B). */}
+      <ThreadBar />
 
       <div
         ref={listRef}
@@ -445,6 +423,7 @@ export function AiPanel() {
         ) : null}
       </div>
 
+      <UsageStatusBar />
       <UsageFooter />
 
       {/* 계약 6-A: 학생 오답노트가 없을 때 임의 생성하지 않고 물어본다. */}

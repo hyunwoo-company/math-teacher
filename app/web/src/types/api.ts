@@ -234,6 +234,27 @@ export interface ChatHistoryResponse {
   messages: ChatMessage[];
 }
 
+/* ── 사용량 요약 (agy 쿼터 기반) ─────────────────────────────────── */
+
+/** 한 시간창의 사용량. agy 는 쿼터 기반이라 금액이 아니라 토큰/호출 수로 센다. */
+export interface UsageWindow {
+  tokens: number;
+  calls: number;
+}
+
+/**
+ * `GET /api/usage/summary`.
+ * 아직 배포되지 않았을 수 있는 신규 엔드포인트다. 실패 시 세션 값만 표시하도록
+ * 호출부에서 조용히 폴백한다.
+ */
+export interface UsageSummaryResponse {
+  windows: {
+    last_24h: UsageWindow;
+    last_7_days: UsageWindow;
+    total: UsageWindow;
+  };
+}
+
 /** 모든 에러 응답의 공통 모양. */
 export interface ApiErrorBody {
   error_code: string;

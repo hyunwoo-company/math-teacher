@@ -9,3 +9,5 @@ next-env.d.ts
 
 # 빌드 시 node_modules 에서 복사되는 pdf.js 런타임 에셋
 public/pdfjs/
+
+.vercel

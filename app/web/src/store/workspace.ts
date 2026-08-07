@@ -44,6 +44,7 @@ import {
   type Section,
   type TreeNode,
   type Usage,
+  type UsageSummaryResponse,
 } from '@/types/api';
 
 export type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -118,6 +119,10 @@ interface UiPrefs {
   effort?: Effort;
   provider?: ProviderChoice;
   rightWidth?: number;
+  /** 마지막으로 열어 본 시험지 파일 id(새로고침 복원용). null = 없음. */
+  lastFileId?: string | null;
+  /** 마지막으로 보던 스레드의 problem_no(null = 전역 스레드). */
+  lastThreadNo?: number | null;
 }
 
 export const RIGHT_MIN = 320;
@@ -210,6 +215,11 @@ interface WorkspaceState {
 
   /* 사용량 누적 */
   totals: SessionTotals;
+  /**
+   * agy 쿼터 기반 사용량 요약(최근 24h/7일/누적). 신규 엔드포인트라 아직 없을 수 있어
+   * null 이면 상태 바가 세션 값만 표시한다(화면이 깨지지 않게).
+   */
+  usageSummary: UsageSummaryResponse | null;
 
   /* UI */
   rightWidth: number;
@@ -232,6 +242,11 @@ interface WorkspaceState {
 
   setSection: (section: Section) => Promise<void>;
   loadTree: (section?: Section) => Promise<void>;
+  /**
+   * 새로고침 복원: prefs.lastFileId 가 트리에 실제 존재하면 그 파일을 자동으로 열고
+   * prefs.lastThreadNo 스레드를 복원한다. 이미 다른 파일을 열었으면(경합) 아무것도 안 한다.
+   */
+  restoreLastOpen: () => Promise<void>;
   toggleExpanded: (id: string) => void;
   focusNode: (id: string | null) => void;
   setExpanded: (id: string, value: boolean) => void;
@@ -255,6 +270,11 @@ interface WorkspaceState {
   /* 스레드 */
   openThread: (problemNo: number | null) => Promise<void>;
   loadThreads: () => Promise<void>;
+  /** 스레드(문항별 또는 전역) 하나를 삭제한다. 활성 스레드였으면 화면도 비운다. */
+  deleteThread: (problemNo: number | null) => Promise<void>;
+
+  /** agy 쿼터 사용량 요약을 새로 조회한다. 실패는 조용히 무시(세션 값만 표시). */
+  loadUsageSummary: () => Promise<void>;
 
   /* 오답노트 담기 */
   addProblemsToNote: (
@@ -339,6 +359,15 @@ function writePrefs(prefs: UiPrefs): void {
   } catch {
     // 저장 실패는 무시(프라이빗 모드 등).
   }
+}
+
+/**
+ * prefs 를 **머지**로 저장한다. 항상 기존 값을 읽어 부분 필드만 갱신하므로
+ * 서로 다른 저장부(model/effort/provider/rightWidth/lastFileId/lastThreadNo)가
+ * 서로를 지우지 않는다.
+ */
+function persistPrefs(partial: UiPrefs): void {
+  writePrefs({ ...readPrefs(), ...partial });
 }
 
 /**
@@ -466,6 +495,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   provider: 'subscription',
 
   totals: emptyTotals,
+  usageSummary: null,
 
   rightWidth: RIGHT_DEFAULT,
   toast: null,
@@ -554,6 +584,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
 
   logout() {
     writeStoredPassword(null);
+    // 복원 대상도 비운다(다음 로그인 때 이전 파일을 자동으로 열지 않게).
+    persistPrefs({ lastFileId: null, lastThreadNo: null });
     // 게이트 뒤에 남은 민감한 화면 상태를 비운다. (게이트는 전체화면으로 덮이지만 안전하게)
     set({
       accessOk: false,
@@ -635,10 +667,40 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         }
         return { nodes, treeStatus: 'ready', expanded };
       });
+      // 시험지 트리를 처음 그린 직후, 마지막으로 보던 파일/스레드를 자동 복원한다.
+      if (target === 'exam') void get().restoreLastOpen();
     } catch (error) {
       if (get().section !== target) return;
       set({ treeStatus: 'error', treeError: toUserMessage(error) });
     }
+  },
+
+  async restoreLastOpen() {
+    // 이미 파일/노트를 열었으면(사용자가 먼저 클릭) 덮어쓰지 않는다(경합 방지).
+    if (get().selectedFileId != null || get().openKind !== 'none') return;
+    const prefs = readPrefs();
+    const fileId = prefs.lastFileId ?? null;
+    if (!fileId) return;
+
+    // 트리에 시험지 파일로 실제 존재해야 연다. 삭제됐으면 stale prefs 를 정리하고 중단.
+    const node = get().nodes.find((candidate) => candidate.id === fileId);
+    if (!node || node.type !== 'file' || (node.section ?? 'exam') !== 'exam') {
+      persistPrefs({ lastFileId: null, lastThreadNo: null });
+      return;
+    }
+
+    await get().selectFile(fileId);
+    // 그 사이 사용자가 다른 파일을 열었으면 스레드 복원은 생략(selectFile 이 이미 무시됨).
+    if (get().selectedFileId !== fileId) return;
+
+    const threadNo = prefs.lastThreadNo ?? null;
+    if (threadNo == null) return; // 전역 스레드는 selectFile 이 이미 열었다.
+
+    // 그 스레드가 아직 남아 있으면 복원하고, 없으면 전역(null)으로 폴백한다.
+    await get().loadThreads();
+    if (get().selectedFileId !== fileId) return;
+    const exists = get().threads.some((thread) => thread.problem_no === threadNo);
+    await get().openThread(exists ? threadNo : null);
   },
 
   focusNode(id: string | null) {
@@ -766,6 +828,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
           messages: [],
           solve: emptySolve,
         });
+        // 삭제된 파일을 복원하지 않도록 stale prefs 를 정리한다.
+        persistPrefs({ lastFileId: null, lastThreadNo: null });
       }
       const { selectedNoteId } = get();
       if (selectedNoteId && removed.has(selectedNoteId)) {
@@ -847,6 +911,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       activeThreadNo: null,
       threadTruncatedBefore: 0,
     });
+    // 새로고침 복원용: 마지막으로 연 파일을 기록한다. 초기 스레드는 전역(null).
+    persistPrefs({ lastFileId: id, lastThreadNo: null });
 
     try {
       const detail = await api.getFile(id);
@@ -924,6 +990,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       fileStatus: 'idle',
       selectedProblemNo: null,
     });
+    // 노트를 열면 시험지 선택이 해제되므로 복원 대상도 비운다.
+    persistPrefs({ lastFileId: null, lastThreadNo: null });
 
     try {
       const detail = await api.getNote(id);
@@ -985,6 +1053,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   async openThread(problemNo: number | null) {
     const fileId = get().selectedFileId;
     if (!fileId) return;
+    // 새로고침 복원용: 마지막으로 보던 스레드를 기록한다(전환 의도이므로 early-return 전에).
+    persistPrefs({ lastThreadNo: problemNo });
     if (get().activeThreadNo === problemNo && get().chatStatus === 'ready') return;
 
     get().abortChat();
@@ -1015,6 +1085,33 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       set({ threads });
     } catch {
       // 스레드 목록 실패는 화면을 막지 않는다.
+    }
+  },
+
+  async deleteThread(problemNo: number | null) {
+    const { selectedFileId, activeThreadNo } = get();
+    if (!selectedFileId) return;
+    try {
+      await api.clearChat(selectedFileId, problemNo);
+      set((state) => ({
+        threads: state.threads.filter((thread) => thread.problem_no !== problemNo),
+      }));
+      // 지금 보고 있던 스레드를 지웠으면 화면도 비운다(전송 흐름은 그대로 유지).
+      if (activeThreadNo === problemNo) {
+        set({ messages: [], threadTruncatedBefore: 0 });
+      }
+      void get().loadThreads();
+    } catch (error) {
+      get().showToast({ kind: 'error', message: toUserMessage(error) });
+    }
+  },
+
+  async loadUsageSummary() {
+    try {
+      const summary = await api.getUsageSummary();
+      set({ usageSummary: summary });
+    } catch {
+      // 신규 엔드포인트(미배포)일 수 있다. 조용히 무시하고 세션 값만 보여준다.
     }
   },
 
@@ -1194,6 +1291,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         solve: { ...state.solve, running: false, currentNo: null },
         solutions: settleRunning(state.solutions),
       }));
+      // 풀이가 끝났으니 쿼터 사용량 요약을 갱신한다(실패는 조용히 무시).
+      void get().loadUsageSummary();
     }
   },
 
@@ -1355,6 +1454,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       }));
       // 스레드 목록(턴 수/시간) 갱신.
       void get().loadThreads();
+      // 채팅이 끝났으니 쿼터 사용량 요약도 갱신한다(실패는 조용히 무시).
+      void get().loadUsageSummary();
     }
   },
 
@@ -1478,14 +1579,12 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
 
   setModel(model: string) {
     set({ model });
-    const { effort, provider, rightWidth } = get();
-    writePrefs({ model, effort, provider, rightWidth });
+    persistPrefs({ model });
   },
 
   setEffort(effort: Effort) {
     set({ effort });
-    const { model, provider, rightWidth } = get();
-    writePrefs({ model, effort, provider, rightWidth });
+    persistPrefs({ effort });
   },
 
   setProvider(provider: ProviderChoice) {
@@ -1499,15 +1598,13 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       }
     }
     set({ provider, model });
-    const { effort, rightWidth } = get();
-    writePrefs({ model, effort, provider, rightWidth });
+    persistPrefs({ model, provider });
   },
 
   setRightWidth(width: number) {
     const clamped = clampWidth(width);
     set({ rightWidth: clamped });
-    const { model, effort, provider } = get();
-    writePrefs({ model, effort, provider, rightWidth: clamped });
+    persistPrefs({ rightWidth: clamped });
   },
 
   showToast(toast: ToastMessage) {
