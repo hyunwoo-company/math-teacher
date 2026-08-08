@@ -1,19 +1,20 @@
 /**
- * "변형 문제 만들기" UI 통합 테스트(목 모드).
+ * "변형 문제 만들기" 탭 UI 통합 테스트(목 모드).
  *
  * 풀이 탭(SolutionsTab)과 오답노트(NoteView) 양쪽에서
- * 3개 모드 선택 -> 스트리밍 결과 표시 -> 복사 가능까지 실제 렌더로 확인한다.
+ * 탭(mode) 전환 -> mode 별 1회 생성/캐시 -> 복사/다시 생성까지 실제 렌더로 확인한다.
  */
 
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { SolutionsTab } from '@/components/center/SolutionsTab';
 import { NoteView } from '@/components/center/NoteView';
+import { api } from '@/lib/api';
 import { resetMockState } from '@/lib/mock/client';
 import { MOCK_FILE_ID, MOCK_NOTE_ID } from '@/lib/mock/data';
 import { useWorkspace, __internal } from '@/store/workspace';
-import type { NoteItem, TreeNode } from '@/types/api';
+import type { NoteItem, TreeNode, VariantMode } from '@/types/api';
 
 const initial = useWorkspace.getState();
 
@@ -28,6 +29,15 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+function modeDone(no: number, mode: VariantMode): boolean {
+  const key = __internal.variantKey(MOCK_FILE_ID, no);
+  return useWorkspace.getState().variants[key]?.[mode]?.status === 'done';
+}
+
 describe('풀이 탭의 변형 문제 만들기', () => {
   async function openProblemOne() {
     const user = userEvent.setup();
@@ -36,43 +46,71 @@ describe('풀이 탭의 변형 문제 만들기', () => {
     await useWorkspace.getState().selectFile(MOCK_FILE_ID);
     render(<SolutionsTab />);
     await user.click(await screen.findByRole('button', { name: '1번 문제 풀이 펼치기' }));
+    // 변형 패널은 접힘이 기본. 명시적으로 열어야 탭이 나오고 첫 탭이 생성된다.
+    await user.click(await screen.findByRole('button', { name: '변형 문제 만들기' }));
     return user;
   }
 
-  it('컨트롤과 3개 모드 버튼이 보인다', async () => {
+  it('탭 바 3개가 보이고, 패널이 열리면 첫 탭(숫자)만 자동 생성된다', async () => {
+    const spy = vi.spyOn(api, 'generateVariant');
     await openProblemOne();
+
     expect(screen.getByText('변형 문제 만들기')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '숫자 변형' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '조건 변형' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '숫자·조건 변형' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '숫자 변형' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '조건 변형' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '숫자·조건 변형' })).toBeInTheDocument();
+
+    // 첫 탭(숫자)만 자동 생성된다.
+    await waitFor(() => expect(modeDone(1, 'number')).toBe(true), { timeout: 20_000 });
+    const numberCalls = spy.mock.calls.filter((call) => call[2] === 'number');
+    expect(numberCalls).toHaveLength(1);
+    expect(spy.mock.calls.some((call) => call[2] === 'condition')).toBe(false);
+    expect(spy.mock.calls.some((call) => call[2] === 'number_condition')).toBe(false);
   }, 30_000);
 
-  it('3개 모드를 차례로 생성하면 결과가 스트리밍되고 각각 복사 버튼이 붙는다', async () => {
+  it('처음 여는 탭만 생성하고, 이미 생성된 탭 전환은 재생성하지 않는다(캐시)', async () => {
+    const spy = vi.spyOn(api, 'generateVariant');
     const user = await openProblemOne();
-    const key = __internal.variantKey(MOCK_FILE_ID, 1);
 
-    for (const [index, label] of ['숫자 변형', '조건 변형', '숫자·조건 변형'].entries()) {
-      await user.click(screen.getByRole('button', { name: label }));
-      await waitFor(
-        () => {
-          const list = useWorkspace.getState().variants[key] ?? [];
-          expect(list).toHaveLength(index + 1);
-          expect(list[index]?.status).toBe('done');
-        },
-        { timeout: 20_000 },
-      );
-    }
+    await waitFor(() => expect(modeDone(1, 'number')).toBe(true), { timeout: 20_000 });
 
-    // 3개 결과 모두 화면에 렌더되고(계약 마크다운의 '정답' 헤딩), 원문 복사 버튼이 있다.
-    expect(screen.getAllByText('정답')).toHaveLength(3);
-    expect(screen.getAllByRole('button', { name: '복사' })).toHaveLength(3);
-    // KaTeX 수식이 실제로 렌더됐다.
+    // 조건 탭으로 전환하면 그때 처음 생성된다(lazy).
+    await user.click(screen.getByRole('tab', { name: '조건 변형' }));
+    await waitFor(() => expect(modeDone(1, 'condition')).toBe(true), { timeout: 20_000 });
+    expect(spy.mock.calls.filter((call) => call[2] === 'condition')).toHaveLength(1);
+
+    // 다시 숫자 탭으로 돌아가도 재생성하지 않고 캐시를 보여준다.
+    await user.click(screen.getByRole('tab', { name: '숫자 변형' }));
+    await user.click(screen.getByRole('tab', { name: '조건 변형' }));
+    expect(spy.mock.calls.filter((call) => call[2] === 'number')).toHaveLength(1);
+    expect(spy.mock.calls.filter((call) => call[2] === 'condition')).toHaveLength(1);
+  }, 45_000);
+
+  it('활성 탭 결과에 복사 2종과 "다시 생성"이 있고, 다시 생성은 재호출한다', async () => {
+    const spy = vi.spyOn(api, 'generateVariant');
+    const user = await openProblemOne();
+
+    await waitFor(() => expect(modeDone(1, 'number')).toBe(true), { timeout: 20_000 });
+
+    // 계약 마크다운의 '정답' 헤딩이 렌더되고, KaTeX 수식이 실제로 렌더됐다.
+    expect(screen.getByText('정답')).toBeInTheDocument();
     expect(document.querySelector('.katex')).not.toBeNull();
-  }, 60_000);
+
+    expect(screen.getByRole('button', { name: '복사' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '복사(한글·워드용)' })).toBeInTheDocument();
+
+    const before = spy.mock.calls.filter((call) => call[2] === 'number').length;
+    await user.click(screen.getByRole('button', { name: '다시 생성' }));
+    await waitFor(
+      () => expect(spy.mock.calls.filter((call) => call[2] === 'number')).toHaveLength(before + 1),
+      { timeout: 20_000 },
+    );
+    await waitFor(() => expect(modeDone(1, 'number')).toBe(true), { timeout: 20_000 });
+  }, 45_000);
 });
 
 describe('오답노트의 변형 문제 만들기', () => {
-  it('원본이 살아 있는 항목에서 변형을 생성하고 복사할 수 있다', async () => {
+  it('탭 방식으로 mode 별 변형을 생성하고 복사할 수 있다', async () => {
     const user = userEvent.setup();
     await useWorkspace.getState().loadEnv();
     await useWorkspace.getState().loadTree('note');
@@ -82,13 +120,14 @@ describe('오답노트의 변형 문제 만들기', () => {
     render(<NoteView />);
     expect(await screen.findByText('3번')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: '조건 변형' }));
+    // 변형 패널을 명시적으로 연다(접힘이 기본).
+    await user.click(await screen.findByRole('button', { name: '변형 문제 만들기' }));
+    // 패널이 열리면 첫 탭(숫자)이 자동 생성된다.
+    await waitFor(() => expect(modeDone(3, 'number')).toBe(true), { timeout: 20_000 });
 
-    const key = __internal.variantKey(MOCK_FILE_ID, 3);
-    await waitFor(
-      () => expect(useWorkspace.getState().variants[key]?.[0]?.status).toBe('done'),
-      { timeout: 20_000 },
-    );
+    // 조건 탭으로 전환하면 그 mode 가 생성된다.
+    await user.click(screen.getByRole('tab', { name: '조건 변형' }));
+    await waitFor(() => expect(modeDone(3, 'condition')).toBe(true), { timeout: 20_000 });
 
     expect(screen.getByText('정답')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '복사' })).toBeInTheDocument();

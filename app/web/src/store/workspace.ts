@@ -94,24 +94,28 @@ export interface ChatEntry {
   savedAsSolution?: boolean;
 }
 
+/** 변형 탭(mode)별 생성 상태. */
+export type VariantStatus = 'idle' | 'streaming' | 'done' | 'error';
+
 /**
- * 한 번의 변형 문제 생성 결과. 한 문항에서 여러 번 생성할 수 있으므로
- * `variants[key]` 에 배열로 쌓인다(key = `${fileId}::${no}`).
+ * 한 문항의 특정 mode 변형 결과. mode 당 1개만 캐시한다.
+ * `variants[key][mode]` 에 저장된다(key = `${fileId}::${no}`).
+ * 한 번 done 이 되면 명시적 재생성(force) 전까지 재호출하지 않는다.
  */
 export interface VariantEntry {
-  /** 생성 인스턴스별 고유 id. */
-  id: string;
   mode: VariantMode;
   /** 확정 본문(done 이후). 스트리밍 중에는 빈 문자열. */
   text: string;
   /** 스트리밍 중 누적되는 부분 텍스트. */
   streamingText: string;
-  status: 'running' | 'done' | 'error';
+  status: VariantStatus;
   usage: Usage | null;
   cost: Cost | null;
   error: string | null;
-  createdAt: string;
 }
+
+/** 한 문항의 mode 별 변형 캐시. */
+export type VariantByMode = Partial<Record<VariantMode, VariantEntry>>;
 
 export interface SolveProgress {
   running: boolean;
@@ -230,11 +234,11 @@ interface WorkspaceState {
   solve: SolveProgress;
 
   /**
-   * 변형 문제 생성 결과. key = `${fileId}::${no}`.
+   * 변형 문제 생성 결과. key = `${fileId}::${no}`, 그 아래 mode 별 1개.
    * 시험지 풀이 탭과 오답노트가 같은 문항(file_id+problem_no)을 참조하므로
-   * 이 키 하나로 두 화면이 상태를 공유한다.
+   * 이 키 하나로 두 화면이 상태(캐시)를 공유한다.
    */
-  variants: Record<string, VariantEntry[]>;
+  variants: Record<string, VariantByMode>;
 
   /* 채팅 */
   messages: ChatEntry[];
@@ -334,9 +338,16 @@ interface WorkspaceState {
 
   /**
    * 그 문항의 동일 유형 변형 문제를 스트리밍으로 생성한다.
-   * 결과는 `variants[`${fileId}::${no}`]` 에 새 항목으로 추가된다(여러 번 호출 가능).
+   * mode 별로 1개만 캐시한다: 이미 done 이면 재호출하지 않는다(no-op).
+   * `opts.force` 가 true 면 done 이어도 다시 생성한다("다시 생성").
+   * 스트리밍 중에는 force 여부와 무관하게 항상 no-op(연타/중복 방지).
    */
-  generateVariant: (fileId: string, no: number, mode: VariantMode) => Promise<void>;
+  generateVariant: (
+    fileId: string,
+    no: number,
+    mode: VariantMode,
+    opts?: { force?: boolean },
+  ) => Promise<void>;
 
   sendChat: (message: string) => Promise<void>;
   handleNoteAddIntent: (
@@ -360,9 +371,8 @@ let solveController: AbortController | null = null;
 let chatController: AbortController | null = null;
 let chatSeq = 0;
 
-/** 변형 생성 스트림 컨트롤러(생성 인스턴스 id → controller). 직렬화 대상 아님. */
+/** 변형 생성 스트림 컨트롤러(`${key}::${mode}` → controller). 직렬화 대상 아님. */
 const variantControllers = new Map<string, AbortController>();
-let variantSeq = 0;
 
 /** 변형 결과 저장 키: 시험지 문항(file_id + problem_no) 단위. */
 function variantKey(fileId: string, no: number): string {
@@ -1423,27 +1433,31 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     }));
   },
 
-  async generateVariant(fileId: string, no: number, mode: VariantMode) {
-    const { model, effort, provider } = get();
+  async generateVariant(fileId: string, no: number, mode: VariantMode, opts = {}) {
+    const { force = false } = opts;
     const key = variantKey(fileId, no);
-    variantSeq += 1;
-    const entryId = `variant-${variantSeq}`;
-    const controller = new AbortController();
-    variantControllers.set(entryId, controller);
+    const existing = get().variants[key]?.[mode];
 
-    const newEntry: VariantEntry = {
-      id: entryId,
-      mode,
-      text: '',
-      streamingText: '',
-      status: 'running',
-      usage: null,
-      cost: null,
-      error: null,
-      createdAt: new Date().toISOString(),
-    };
+    // 캐시 규칙: 스트리밍 중이면 언제나 no-op(중복 실행 방지),
+    // 이미 done 이면 force 일 때만 재생성. idle/error 는 최초 생성으로 진행한다.
+    if (existing?.status === 'streaming') return;
+    if (existing?.status === 'done' && !force) return;
+
+    const { model, effort, provider } = get();
+    const controllerKey = `${key}::${mode}`;
+    const controller = new AbortController();
+    variantControllers.set(controllerKey, controller);
+
     set((state) => ({
-      variants: { ...state.variants, [key]: [...(state.variants[key] ?? []), newEntry] },
+      variants: setVariant(state.variants, key, mode, {
+        mode,
+        text: '',
+        streamingText: '',
+        status: 'streaming',
+        usage: null,
+        cost: null,
+        error: null,
+      }),
     }));
 
     try {
@@ -1458,16 +1472,16 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         switch (event.type) {
           case 'delta':
             set((state) => ({
-              variants: patchVariant(state.variants, key, entryId, (entry) => ({
+              variants: patchVariant(state.variants, key, mode, (entry) => ({
                 ...entry,
-                status: 'running',
+                status: 'streaming',
                 streamingText: entry.streamingText + event.text,
               })),
             }));
             break;
           case 'done':
             set((state) => ({
-              variants: patchVariant(state.variants, key, entryId, (entry) => ({
+              variants: patchVariant(state.variants, key, mode, (entry) => ({
                 ...entry,
                 status: 'done',
                 text: event.solution || entry.streamingText,
@@ -1481,7 +1495,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
             break;
           case 'error':
             set((state) => ({
-              variants: patchVariant(state.variants, key, entryId, (entry) => ({
+              variants: patchVariant(state.variants, key, mode, (entry) => ({
                 ...entry,
                 status: 'error',
                 error: event.message,
@@ -1496,7 +1510,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       if (!isAbortError(error)) {
         const message = toUserMessage(error);
         set((state) => ({
-          variants: patchVariant(state.variants, key, entryId, (entry) => ({
+          variants: patchVariant(state.variants, key, mode, (entry) => ({
             ...entry,
             status: 'error',
             error: message,
@@ -1504,9 +1518,11 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         }));
       }
     } finally {
-      variantControllers.delete(entryId);
-      // 스트림이 done 없이 끊겼으면(중단/네트워크) running 을 정리한다.
-      set((state) => ({ variants: settleVariant(state.variants, key, entryId) }));
+      if (variantControllers.get(controllerKey) === controller) {
+        variantControllers.delete(controllerKey);
+      }
+      // 스트림이 done 없이 끊겼으면(중단/네트워크) streaming 을 정리한다.
+      set((state) => ({ variants: settleVariant(state.variants, key, mode) }));
       // 변형 생성도 쿼터를 소비하므로 사용량 요약을 갱신한다(실패는 조용히 무시).
       void get().loadUsageSummary();
     }
@@ -1857,33 +1873,39 @@ function patchEntry(
   return { ...solutions, [no]: update(current) };
 }
 
-function patchVariant(
-  variants: Record<string, VariantEntry[]>,
+/** 한 문항(key)의 특정 mode 항목을 통째로 설정한다. */
+function setVariant(
+  variants: Record<string, VariantByMode>,
   key: string,
-  entryId: string,
-  update: (entry: VariantEntry) => VariantEntry,
-): Record<string, VariantEntry[]> {
-  const list = variants[key] ?? [];
-  return { ...variants, [key]: list.map((entry) => (entry.id === entryId ? update(entry) : entry)) };
+  mode: VariantMode,
+  entry: VariantEntry,
+): Record<string, VariantByMode> {
+  return { ...variants, [key]: { ...variants[key], [mode]: entry } };
 }
 
-/** 스트림이 done 없이 끝났을 때 그 인스턴스의 running 상태를 정리한다. */
-function settleVariant(
-  variants: Record<string, VariantEntry[]>,
+function patchVariant(
+  variants: Record<string, VariantByMode>,
   key: string,
-  entryId: string,
-): Record<string, VariantEntry[]> {
-  const list = variants[key];
-  if (!list) return variants;
-  let changed = false;
-  const next = list.map((entry) => {
-    if (entry.id !== entryId || entry.status !== 'running') return entry;
-    changed = true;
-    return entry.streamingText
-      ? { ...entry, status: 'done' as const, text: entry.streamingText, streamingText: '' }
-      : { ...entry, status: 'error' as const, error: entry.error ?? '중단했습니다.' };
-  });
-  return changed ? { ...variants, [key]: next } : variants;
+  mode: VariantMode,
+  update: (entry: VariantEntry) => VariantEntry,
+): Record<string, VariantByMode> {
+  const current = variants[key]?.[mode];
+  if (!current) return variants;
+  return { ...variants, [key]: { ...variants[key], [mode]: update(current) } };
+}
+
+/** 스트림이 done 없이 끝났을 때 그 mode 의 streaming 상태를 정리한다. */
+function settleVariant(
+  variants: Record<string, VariantByMode>,
+  key: string,
+  mode: VariantMode,
+): Record<string, VariantByMode> {
+  const current = variants[key]?.[mode];
+  if (!current || current.status !== 'streaming') return variants;
+  const next: VariantEntry = current.streamingText
+    ? { ...current, status: 'done', text: current.streamingText, streamingText: '' }
+    : { ...current, status: 'error', error: current.error ?? '중단했습니다.' };
+  return { ...variants, [key]: { ...variants[key], [mode]: next } };
 }
 
 function resetTargets(
@@ -1945,6 +1967,7 @@ export const __internal = {
   settleRunning,
   accumulate,
   emptyEntry,
+  setVariant,
   patchVariant,
   settleVariant,
   variantKey,

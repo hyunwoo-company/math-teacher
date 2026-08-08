@@ -12,5 +12,5 @@ export const VARIANT_MODE_LABEL: Record<VariantMode, string> = {
   number_condition: '숫자·조건 변형',
 };
 
-/** 버튼 그룹 렌더 순서. */
-export const VARIANT_MODES: readonly VariantMode[] = ['number', 'condition', 'number_condition'];
+/** 탭 렌더 순서. 첫 항목(`VARIANT_MODES[0]`)이 기본/자동 생성 탭이다. */
+export const VARIANT_MODES = ['number', 'condition', 'number_condition'] as const satisfies readonly VariantMode[];
