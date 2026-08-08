@@ -201,6 +201,22 @@ class SolveRequest(BaseModel):
     effort: Effort = DEFAULT_EFFORT
 
 
+VariantKind = Literal["number", "condition", "number_condition"]
+
+
+class VariantRequest(BaseModel):
+    """`POST /api/files/{id}/problems/{no}/variant` 요청.
+
+    `mode` 는 무엇을 바꿀지다: `number`=수치만, `condition`=조건(설정·상황)만,
+    `number_condition`=둘 다. 값이 셋 중 하나가 아니면 422 로 거부된다.
+    """
+
+    mode: VariantKind
+    provider: ProviderName = "auto"
+    model: str | None = None
+    effort: Effort = DEFAULT_EFFORT
+
+
 class ChatRequest(BaseModel):
     """채팅 요청. `problem_no` 가 있으면 그 문항을 컨텍스트로 건다."""
 

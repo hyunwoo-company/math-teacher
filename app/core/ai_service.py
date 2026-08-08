@@ -18,6 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 
 import config
 import pricing
+import prompts
 import service
 import sse
 import storage
@@ -181,6 +182,28 @@ def load_solve_targets(
     return mode, targets
 
 
+def load_variant_target(node_id: str, no: int) -> tuple[Mode, dict[str, Any]]:
+    """변형 소스 문항 1건을 읽어온다 (블로킹).
+
+    풀이(`load_solve_targets`)와 달리 경로 파라미터 `{no}` 를 쓰는 엔드포인트라
+    없는 문항은 404 로 알린다(크롭·풀이 저장 엔드포인트와 동일한 규칙).
+
+    Raises:
+        ApiError: 파일이 없을 때(404) 또는 문항 번호가 없을 때(404).
+    """
+    with storage.transaction() as conn:
+        service.require_file_node(conn, node_id)
+        meta = storage.get_file(conn, node_id)
+        problem = storage.get_problem(conn, node_id, no)
+    if problem is None:
+        raise not_found(
+            f"{no}번 문항이 없습니다.",
+            "문제 목록을 새로고침해 번호를 확인하세요.",
+        )
+    mode: Mode = "image" if (meta or {}).get("mode") == "image" else "text"
+    return mode, problem
+
+
 def _read_crop_b64(problem: dict[str, Any]) -> str | None:
     """크롭 PNG 를 base64 로 읽는다 (블로킹). 없으면 None."""
     path = config.data_dir() / str(problem["crop_path"])
@@ -331,6 +354,85 @@ def _save_solution(
             cost=cost,
             truncated=truncated,
         )
+
+
+# ---------------------------------------------------------------- variant
+async def variant_stream(
+    *,
+    node_id: str,
+    provider: Provider,
+    mode: Mode,
+    problem: dict[str, Any],
+    kind: str,
+    model: str,
+    effort: Effort,
+) -> AsyncIterator[str]:
+    """소스 문항을 바탕으로 동일 유형·유사 난이도의 변형 문제를 SSE 로 흘린다.
+
+    풀이(`solve_stream`)와 같은 문항 단위 이벤트 계약(delta / done / error)을
+    쓰되, v1 은 **생성·스트리밍만** 하고 결과를 저장하지 않는다. `kind` 는 변형
+    종류(`number`/`condition`/`number_condition`)로, 프롬프트에 그대로 반영된다.
+    """
+    no = int(problem["no"])
+    text = str(problem.get("text") or "")
+    try:
+        try:
+            image_b64 = (
+                await run_in_threadpool(_read_crop_b64, problem)
+                if mode == "image"
+                else None
+            )
+            async for chunk in provider.solve_problem(
+                no=no,
+                mode=mode,
+                text=text,
+                image_b64=image_b64,
+                model=model,
+                effort=effort,
+                max_tokens=config.DEFAULT_MAX_TOKENS,
+                system=prompts.VARIANT_SYSTEM_PROMPT,
+                instruction=prompts.variant_user_text(
+                    no, mode=mode, text=text, kind=kind
+                ),
+            ):
+                if chunk["type"] == "delta":
+                    yield sse.event("delta", {"no": no, "text": chunk["text"]})
+                    continue
+                yield sse.event(
+                    "done",
+                    {
+                        "no": no,
+                        "solution": chunk["text"],
+                        "usage": chunk["usage"],
+                        "cost": chunk["cost"],
+                        "truncated": chunk["truncated"],
+                    },
+                )
+        except ProviderError as exc:
+            logger.warning("변형 생성 실패 (no=%s): %s", no, exc.message)
+            yield sse.event(
+                "error",
+                {
+                    "no": no,
+                    "error_code": exc.error_code,
+                    "message": exc.message,
+                    "hint": exc.hint,
+                },
+            )
+        except Exception as exc:
+            logger.exception("변형 생성 중 예상치 못한 오류 (no=%s)", no)
+            yield sse.event(
+                "error",
+                {
+                    "no": no,
+                    "error_code": "internal_error",
+                    "message": "변형 문제 생성 중 서버 오류가 발생했습니다.",
+                    "hint": f"{type(exc).__name__}: {exc}",
+                },
+            )
+    except (anyio.get_cancelled_exc_class(), GeneratorExit):
+        logger.info("SSE 연결이 끊겼습니다 (variant, node_id=%s)", node_id)
+        raise
 
 
 # ------------------------------------------------------------------- chat

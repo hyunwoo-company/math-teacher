@@ -78,6 +78,7 @@ from schemas import (
     SubscriptionProviderInfo,
     TreeResponse,
     UsageSummaryResponse,
+    VariantRequest,
 )
 
 # 프론트엔드(Next.js dev) 와 Tauri 로컬 웹뷰에서 호출한다.
@@ -456,6 +457,42 @@ async def solve_file(
         provider=provider,
         mode=mode,
         targets=targets,
+        model=model,
+        effort=payload.effort,
+    )
+    return StreamingResponse(
+        stream, media_type=sse.SSE_MEDIA_TYPE, headers=sse.SSE_HEADERS
+    )
+
+
+@app.post(
+    "/api/files/{node_id}/problems/{no}/variant",
+    response_class=StreamingResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def generate_variant(
+    node_id: NodeId,
+    no: Annotated[int, Path(ge=1)],
+    payload: VariantRequest,
+    x_api_key: ApiKeyHeader = None,
+) -> StreamingResponse:
+    """해당 문항을 소스로 동일 유형·유사 난이도의 변형 문제를 생성해 SSE 로 흘린다.
+
+    `mode` 로 무엇을 바꿀지 고른다(number=수치만/condition=조건만/number_condition=둘 다).
+    출력은 `## 문제 / ## 정답 / ## 풀이` 마크다운이며, v1 은 저장하지 않는다.
+    """
+    provider = ai_service.resolve_provider(payload.provider, _api_key(x_api_key))
+    model = ai_service.resolve_model(payload.model, provider.name)
+    mode, problem = await run_in_threadpool(
+        ai_service.load_variant_target, node_id, no
+    )
+    stream = ai_service.variant_stream(
+        node_id=node_id,
+        provider=provider,
+        mode=mode,
+        problem=problem,
+        kind=payload.mode,
         model=model,
         effort=payload.effort,
     )
