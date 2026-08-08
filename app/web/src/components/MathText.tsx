@@ -76,52 +76,69 @@ function renderBlock(block: Block, key: number): ReactNode {
   }
 }
 
-/** 한 블록의 텍스트를 인라인 수식/굵게/코드까지 렌더한다. */
+/**
+ * 한 블록의 텍스트를 인라인 수식/굵게/코드까지 렌더한다.
+ *
+ * 인라인(굵게/코드) 분리를 수식 분리보다 **바깥 레벨**로 둔다. 그래야
+ * `**높이 $y$ 의 최댓값**` 처럼 굵게 범위가 인라인 수식을 감싸도 `**` 짝이
+ * 서로 다른 수식 세그먼트로 갈라지지 않는다. 각 인라인 토큰(굵게/코드/일반)의
+ * 내부 텍스트를 다시 `splitMath` 로 나눠 그 안의 수식만 KaTeX 로 렌더한다.
+ */
 function RichContent({ source }: { source: string }) {
   return (
     <>
-      {splitMath(source).map((segment, index) => {
-        if (segment.kind === 'text') {
-          return <Fragment key={index}>{renderInline(segment.value)}</Fragment>;
+      {splitInline(source).map((token, index) => {
+        switch (token.kind) {
+          case 'bold':
+            return (
+              <strong key={index} className="font-semibold text-slate-900">
+                {renderTextWithMath(token.value, false)}
+              </strong>
+            );
+          case 'code':
+            return (
+              <code
+                key={index}
+                className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.85em]"
+              >
+                {renderTextWithMath(token.value, false)}
+              </code>
+            );
+          default:
+            return <Fragment key={index}>{renderTextWithMath(token.value, true)}</Fragment>;
         }
-        const html = renderMathToHtml(segment.value, segment.display);
-        return segment.display ? (
-          <div
-            key={index}
-            className="my-2 overflow-x-auto text-center"
-            // KaTeX 가 생성한 HTML. 입력은 escape 되고 trust:false 이므로 태그 주입은 막힌다.
-            dangerouslySetInnerHTML={{ __html: html }}
-          />
-        ) : (
-          <span key={index} dangerouslySetInnerHTML={{ __html: html }} />
-        );
       })}
     </>
   );
 }
 
-function renderInline(value: string) {
-  return splitInline(value).map((token, index) => {
-    switch (token.kind) {
-      case 'bold':
-        return (
-          <strong key={index} className="font-semibold text-slate-900">
-            {token.value}
-          </strong>
-        );
-      case 'code':
-        return (
-          <code key={index} className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.85em]">
-            {token.value}
-          </code>
-        );
-      default:
-        // 개행을 살린다(부모에 whitespace-pre-wrap 적용).
-        return (
-          <span key={index} className="whitespace-pre-wrap">
-            {token.value}
-          </span>
-        );
+/**
+ * 텍스트를 수식/일반 세그먼트로 나눠 렌더한다.
+ * `wrapPlain` 이 참이면 일반 텍스트를 `whitespace-pre-wrap` span 으로 감싸 개행을
+ * 살린다(문단용). 굵게/코드 안에서는 텍스트 노드를 strong/code 의 직계 자식으로
+ * 두어야 하므로 감싸지 않는다.
+ */
+function renderTextWithMath(source: string, wrapPlain: boolean): ReactNode[] {
+  return splitMath(source).map((segment, index) => {
+    if (segment.kind === 'text') {
+      return wrapPlain ? (
+        <span key={index} className="whitespace-pre-wrap">
+          {segment.value}
+        </span>
+      ) : (
+        <Fragment key={index}>{segment.value}</Fragment>
+      );
     }
+    const html = renderMathToHtml(segment.value, segment.display);
+    return segment.display ? (
+      <div
+        key={index}
+        className="my-2 overflow-x-auto text-center"
+        // KaTeX 가 생성한 HTML. 입력은 escape 되고 trust:false 이므로 태그 주입은 막힌다.
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    ) : (
+      <span key={index} dangerouslySetInnerHTML={{ __html: html }} />
+    );
   });
 }

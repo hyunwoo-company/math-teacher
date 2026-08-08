@@ -3,6 +3,7 @@
 import clsx from 'clsx';
 import { MathText } from '@/components/MathText';
 import { CopyButton } from '@/components/ui/CopyButton';
+import { toPlainText } from '@/lib/to-plain-text';
 import { InlineBadge, Spinner } from '@/components/ui/Feedback';
 import { VARIANT_MODE_LABEL, VARIANT_MODES } from '@/lib/variant';
 import { useWorkspace, type VariantEntry } from '@/store/workspace';
@@ -79,7 +80,14 @@ function VariantCard({ entry }: { entry: VariantEntry }) {
         ) : null}
         {/* 복사는 렌더된 텍스트가 아니라 마크다운 원문(entry.text)을 넣는다. */}
         {entry.status === 'done' && entry.text ? (
-          <CopyButton text={entry.text} label="복사" className="ml-auto" />
+          <div className="ml-auto flex items-center gap-1.5">
+            <CopyButton text={entry.text} label="복사" />
+            <CopyButton
+              text={toPlainText(entry.text)}
+              label="복사(한글·워드용)"
+              title="한글·워드용 텍스트로 복사"
+            />
+          </div>
         ) : null}
       </div>
 

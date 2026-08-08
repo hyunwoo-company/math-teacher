@@ -7,6 +7,7 @@ import { plainPreview } from '@/lib/math-text';
 import { ProblemCrop } from '@/components/center/ProblemCrop';
 import { VariantPanel } from '@/components/center/VariantPanel';
 import { CopyButton } from '@/components/ui/CopyButton';
+import { toPlainText } from '@/lib/to-plain-text';
 import { EmptyState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { costAmounts, formatDateTime, formatInt, formatKrw, formatUsd, totalTokens } from '@/lib/format';
 import { useWorkspace, type SolutionEntry } from '@/store/workspace';
@@ -242,7 +243,16 @@ function SolutionRow({
             {status === 'done' ? (
               <div className="ml-auto flex items-center gap-2">
                 {/* 복사는 렌더된 텍스트가 아니라 마크다운 원문(entry.text)을 넣는다. */}
-                {entry?.text ? <CopyButton text={entry.text} label="복사" /> : null}
+                {entry?.text ? (
+                  <>
+                    <CopyButton text={entry.text} label="복사" />
+                    <CopyButton
+                      text={toPlainText(entry.text)}
+                      label="복사(한글·워드용)"
+                      title="한글·워드용 텍스트로 복사"
+                    />
+                  </>
+                ) : null}
                 <button
                   type="button"
                   onClick={onSolveOne}

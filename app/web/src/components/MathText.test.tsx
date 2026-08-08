@@ -105,4 +105,40 @@ describe('MathText', () => {
     expect(container.querySelector('.mfrac')).not.toBeNull();
     expect(container.querySelectorAll('ul > li').length).toBe(2);
   });
+
+  it('굵게 범위가 인라인 수식을 감싸도 <strong> 안에 KaTeX 가 들어간다', () => {
+    const { container } = render(
+      <MathText>
+        {'**4단계: 높이 $y$의 최댓값을 구하고 삼각형 $PAB$의 넓이를 계산합니다.**'}
+      </MathText>,
+    );
+    const strong = container.querySelector('strong');
+    expect(strong).not.toBeNull();
+    // ** 마커가 리터럴로 노출되지 않는다.
+    expect(container.textContent).not.toContain('**');
+    // 굵게 안의 인라인 수식이 KaTeX 로 렌더된다(두 개: y, PAB).
+    expect(strong?.querySelectorAll('.katex').length).toBeGreaterThanOrEqual(2);
+    expect(strong?.textContent).toContain('4단계');
+  });
+
+  it('코드 범위가 인라인 수식을 감싸도 <code> 안에 KaTeX 가 들어간다', () => {
+    const { container } = render(<MathText>{'`값 $x^2$ 확인`'}</MathText>);
+    const code = container.querySelector('code');
+    expect(code).not.toBeNull();
+    expect(container.textContent).not.toContain('`');
+    expect(code?.querySelector('.katex')).not.toBeNull();
+  });
+
+  it('수식 없는 굵게는 여전히 STRONG 텍스트 노드로 렌더한다', () => {
+    render(<MathText>{'**핵심 정리**'}</MathText>);
+    expect(screen.getByText('핵심 정리').tagName).toBe('STRONG');
+  });
+
+  it('제목 안에서 굵게가 인라인 수식을 감싸도 렌더한다', () => {
+    const { container } = render(<MathText>{'## **넓이 $S$ 계산**'}</MathText>);
+    const strong = container.querySelector('h2 strong');
+    expect(strong).not.toBeNull();
+    expect(strong?.querySelector('.katex')).not.toBeNull();
+    expect(container.textContent).not.toContain('**');
+  });
 });

@@ -43,7 +43,9 @@ export function CopyButton({ text, label = '복사', className, title }: CopyBut
     <button
       type="button"
       onClick={() => void onCopy()}
-      aria-label={title ?? (label === '' ? '복사' : undefined)}
+      // 라벨 텍스트가 있으면 그것이 접근성 이름이 된다(aria-label 로 덮지 않는다).
+      // 아이콘만 쓰는 경우에만 title 또는 기본값으로 접근성 이름을 준다.
+      aria-label={label === '' ? (title ?? '복사') : undefined}
       title={title ?? '풀이 원문 복사'}
       className={clsx(
         'inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] font-medium transition-colors',

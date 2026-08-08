@@ -9,7 +9,9 @@ import { ConversationList } from '@/components/ai/ConversationList';
 import { UsageFooter } from '@/components/ai/UsageFooter';
 import { UsageStatusBar } from '@/components/ai/UsageStatusBar';
 import { ConfirmDialog } from '@/components/ui/Dialog';
+import { CopyButton } from '@/components/ui/CopyButton';
 import { EmptyState, InlineBadge, LoadingState, Spinner } from '@/components/ui/Feedback';
+import { toPlainText } from '@/lib/to-plain-text';
 import { costAmounts, effortLabel, formatInt, formatKrw, formatUsd, totalTokens } from '@/lib/format';
 import { detectProblemNo } from '@/lib/mention';
 import { modelsForProvider } from '@/lib/provider-config';
@@ -368,6 +370,17 @@ export function AiPanel() {
                               : `${message.problemNo}번 풀이로 저장`}
                           </button>
                         )
+                      ) : null}
+                      {/* 답변 복사: 마크다운 원문 + 한글·워드용 유니코드 평문. */}
+                      {message.content ? (
+                        <div className="ml-auto flex items-center gap-1.5">
+                          <CopyButton text={message.content} label="복사" />
+                          <CopyButton
+                            text={toPlainText(message.content)}
+                            label="복사(한글·워드용)"
+                            title="한글·워드용 텍스트로 복사"
+                          />
+                        </div>
                       ) : null}
                     </div>
                   ) : null}
