@@ -180,6 +180,7 @@ describe('오답노트의 변형 문제 만들기', () => {
       source_name: '삭제된 시험지',
       problem_no: 5,
       crop_url: '',
+      text: null,
       memo: null,
       created_at: new Date().toISOString(),
       source_available: false,

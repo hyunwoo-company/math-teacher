@@ -288,6 +288,14 @@ export function mockCropUrl(no: number): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
+/**
+ * 목 문제 본문(오답노트 카드 우측 텍스트용). 실제 백엔드가 정리해 주는 파싱
+ * 텍스트를 흉내낸다. inline `\(...\)` 수식을 포함한다.
+ */
+export function mockProblemText(no: number): string {
+  return `이차함수 \\(f(x) = x^2 - ${no}x + ${no + 1}\\) 의 그래프가 x축과 만나는 점의 개수를 구하시오.`;
+}
+
 /** 목 풀이 본문. inline `\(...\)` 과 display `\[...\]` 를 모두 포함한다. */
 export function mockSolutionText(no: number): string {
   return [

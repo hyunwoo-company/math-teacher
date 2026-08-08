@@ -22,6 +22,7 @@ import {
   makeMockProblems,
   mockChatReply,
   mockCropUrl,
+  mockProblemText,
   mockSolutionText,
   mockVariantText,
 } from '@/lib/mock/data';
@@ -592,7 +593,7 @@ export const mockClient: ApiClient = {
       const next = items.map((item) => {
         if (item.source_node_id != null && doomed.has(item.source_node_id)) {
           changed = true;
-          return { ...item, source_node_id: null, source_available: false };
+          return { ...item, source_node_id: null, source_available: false, text: null };
         }
         return item;
       });
@@ -857,6 +858,7 @@ export const mockClient: ApiClient = {
         source_name: sourceName,
         problem_no: no,
         crop_url: mockCropUrl(no),
+        text: source != null ? mockProblemText(no) : null,
         memo,
         created_at: nowIso(),
         source_available: source != null,

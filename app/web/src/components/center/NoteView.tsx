@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import { api } from '@/lib/api';
 import { VariantPanel } from '@/components/center/VariantPanel';
 import { InlineSolutionPanel } from '@/components/center/InlineSolutionPanel';
+import { MathText } from '@/components/MathText';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { ConfirmDialog } from '@/components/ui/Dialog';
 import { formatDate } from '@/lib/format';
@@ -75,7 +76,7 @@ export function NoteView() {
             icon="📝"
           />
         ) : (
-          <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <ul className="flex flex-col gap-3">
             {items.map((item) => (
               <NoteItemCard
                 key={item.id}
@@ -148,37 +149,81 @@ function NoteItemCard({
   }, [zoomed]);
 
   return (
-    <li className="flex flex-col gap-2 rounded border border-slate-200 bg-white p-2">
-      <div className="flex items-center gap-1.5">
-        <span className="text-[13px] font-semibold text-slate-800">{item.problem_no}번</span>
-        {item.source_available ? null : <InlineBadge tone="amber">원본 삭제됨</InlineBadge>}
-        <span className="ml-auto min-w-0 truncate text-[12px] text-slate-500" title={item.source_name}>
+    <li className="flex flex-col gap-2 rounded border border-slate-200 bg-white p-3">
+      {/* 상단: 출처 · 문제번호 + 액션(원본 바로가기 · 빼기). */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span
+          className="min-w-0 truncate text-[12px] text-slate-500"
+          title={item.source_name}
+        >
           {item.source_name}
         </span>
+        <span aria-hidden className="text-slate-300">
+          ·
+        </span>
+        <span className="text-[13px] font-semibold text-slate-800">{item.problem_no}번</span>
+        {item.source_available ? null : <InlineBadge tone="amber">원본 삭제됨</InlineBadge>}
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onOpenSource}
+            disabled={!onOpenSource}
+            title={onOpenSource ? '원본 시험지의 이 문항으로 이동' : '원본 시험지가 삭제되었습니다'}
+            className={clsx(
+              'rounded border px-2 py-0.5 text-[11px]',
+              onOpenSource
+                ? 'border-blue-300 bg-white text-blue-700 hover:bg-blue-50'
+                : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400',
+            )}
+          >
+            원본 바로가기
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            className="rounded border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-50"
+          >
+            빼기
+          </button>
+        </div>
       </div>
 
-      {/* 문제 이미지: 카드 폭에 맞춰 크게(자연 비율). 클릭하면 라이트박스로 확대. */}
-      {imgFailed ? (
-        <div className="flex h-40 w-full items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[11px] text-slate-400">
-          미리보기 없음
+      {/* 하단: 좌=크롭 이미지, 우=문제 텍스트. 좁은 화면에선 세로로 쌓인다. */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,44%)_1fr]">
+        <div className="min-w-0">
+          {imgFailed ? (
+            <div className="flex h-40 w-full items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[11px] text-slate-400">
+              미리보기 없음
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setZoomed(true)}
+              title="클릭하면 문제를 크게 봅니다"
+              className="block w-full cursor-zoom-in overflow-hidden rounded border border-slate-200 bg-white p-0"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={cropUrl}
+                alt={`${item.source_name} ${item.problem_no}번`}
+                loading="lazy"
+                onError={() => setImgFailed(true)}
+                className="block h-auto w-full max-h-[50vh] rounded object-contain"
+              />
+            </button>
+          )}
         </div>
-      ) : (
-        <button
-          type="button"
-          onClick={() => setZoomed(true)}
-          title="클릭하면 문제를 크게 봅니다"
-          className="block w-full cursor-zoom-in overflow-hidden rounded border border-slate-200 bg-white p-0"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={cropUrl}
-            alt={`${item.source_name} ${item.problem_no}번`}
-            loading="lazy"
-            onError={() => setImgFailed(true)}
-            className="block h-auto w-full max-h-[60vh] rounded object-contain"
-          />
-        </button>
-      )}
+
+        <div className="min-w-0">
+          {item.text ? (
+            <MathText className="text-[13px] leading-relaxed text-slate-700">
+              {item.text}
+            </MathText>
+          ) : (
+            <p className="text-[12px] italic text-slate-400">본문 미리보기 없음</p>
+          )}
+        </div>
+      </div>
 
       {zoomed && !imgFailed ? (
         <div
@@ -212,30 +257,6 @@ function NoteItemCard({
       ) : null}
 
       {item.memo ? <p className="line-clamp-2 text-[12px] text-slate-600">{item.memo}</p> : null}
-
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onOpenSource}
-          disabled={!onOpenSource}
-          title={onOpenSource ? '원본 시험지의 이 문항으로 이동' : '원본 시험지가 삭제되었습니다'}
-          className={clsx(
-            'rounded border px-2 py-0.5 text-[11px]',
-            onOpenSource
-              ? 'border-blue-300 bg-white text-blue-700 hover:bg-blue-50'
-              : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400',
-          )}
-        >
-          원본 바로가기
-        </button>
-        <button
-          type="button"
-          onClick={onDelete}
-          className="ml-auto rounded border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-50"
-        >
-          빼기
-        </button>
-      </div>
 
       {/* 원본 시험지가 살아 있는 항목만 그 문항(file_id + problem_no)으로 풀이/변형한다. */}
       {item.source_available && item.source_node_id ? (

@@ -187,6 +187,11 @@ export interface NoteItem {
   problem_no: number;
   /** 크롭 스냅샷 PNG URL (백엔드가 절대/상대 경로로 준다). */
   crop_url: string;
+  /**
+   * 원본 시험지가 살아 있을 때 그 문항의 정리된 파싱 텍스트(PUA·제어문자 제거).
+   * 원본이 삭제됐거나 본문을 못 뽑았으면 null.
+   */
+  text: string | null;
   memo: string | null;
   created_at: string;
   /** 원본 시험지가 아직 살아 있는지. false 면 바로가기 비활성 + "원본 삭제됨". */
