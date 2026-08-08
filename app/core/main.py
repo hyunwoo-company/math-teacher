@@ -70,6 +70,8 @@ from schemas import (
     ProviderModelInfo,
     ProvidersInfo,
     Section,
+    SolutionContentSave,
+    SolutionOut,
     SolutionsResponse,
     SolveRequest,
     SubscriptionInfo,
@@ -471,6 +473,31 @@ async def solve_file(
 def read_solutions(node_id: NodeId) -> SolutionsResponse:
     """저장된 풀이 목록."""
     return SolutionsResponse.model_validate({"solutions": service.solutions(node_id)})
+
+
+@app.post(
+    "/api/files/{node_id}/problems/{no}/solution",
+    response_model=SolutionOut,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def save_problem_solution(
+    node_id: NodeId,
+    no: Annotated[int, Path(ge=1)],
+    payload: SolutionContentSave,
+) -> SolutionOut:
+    """대화 답변 등 주어진 내용을 그 문항의 풀이로 저장한다(upsert).
+
+    "풀이" 탭에 완료로 반영하기 위한 용도. 이미 풀이가 있으면 덮어쓴다.
+    """
+    saved = await run_in_threadpool(
+        service.save_solution_content,
+        node_id,
+        no,
+        content=payload.content,
+        usage=payload.usage,
+    )
+    return SolutionOut.model_validate(saved)
 
 
 # ------------------------------------------------------------------- 채팅

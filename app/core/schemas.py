@@ -228,6 +228,18 @@ class SolutionsResponse(BaseModel):
     solutions: list[SolutionOut]
 
 
+class SolutionContentSave(BaseModel):
+    """`POST /api/files/{id}/problems/{no}/solution` 요청.
+
+    대화(채팅) 답변 등 이미 만들어진 풀이 내용을 그 문항의 풀이로 저장(upsert)한다.
+    `source` 는 어디서 온 내용인지(예: "chat") 표시용이며 저장 대상은 아니다.
+    """
+
+    content: Annotated[str, Field(min_length=1)]
+    usage: dict[str, Any] | None = None
+    source: Annotated[str | None, Field(max_length=64)] = None
+
+
 class ChatMessageOut(BaseModel):
     """채팅 메시지 1건. `problem_no=null` 이면 시험지 전역 스레드."""
 

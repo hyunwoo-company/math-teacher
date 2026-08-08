@@ -406,6 +406,42 @@ def solutions(node_id: str) -> list[dict[str, Any]]:
         return storage.list_solutions(conn, node_id)
 
 
+def save_solution_content(
+    node_id: str,
+    no: int,
+    *,
+    content: str,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """주어진 내용을 그 문항의 풀이로 저장(upsert)하고 저장된 풀이를 돌려준다.
+
+    대화 답변을 "풀이" 탭에 완료로 반영할 때 쓴다. 이미 풀이가 있으면 덮어쓴다
+    (기존 solve 저장과 동일한 upsert). agy 사용이라 `cost` 는 저장하지 않는다.
+
+    Raises:
+        ApiError: 파일이 아니거나 없을 때(400/404), 문항 번호가 없을 때(404).
+    """
+    with storage.transaction() as conn:
+        require_file_node(conn, node_id)
+        if storage.get_problem(conn, node_id, no) is None:
+            raise not_found(
+                f"{no}번 문항이 없습니다.",
+                "문제 목록을 새로고침해 번호를 확인하세요.",
+            )
+        storage.upsert_solution(
+            conn,
+            node_id=node_id,
+            no=no,
+            solution=content,
+            usage=usage,
+            cost=None,
+            truncated=False,
+        )
+        saved = storage.get_solution(conn, node_id, no)
+    assert saved is not None  # 방금 upsert 했으므로 반드시 존재.
+    return saved
+
+
 def chat_history(node_id: str, problem_no: int | None = None) -> dict[str, Any]:
     """한 스레드의 채팅 이력.
 
