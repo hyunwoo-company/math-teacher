@@ -125,6 +125,25 @@ function jsonBody(value: unknown): RequestInit {
   };
 }
 
+/**
+ * `Content-Disposition` 헤더에서 파일명을 뽑는다.
+ * RFC5987(`filename*=UTF-8''<pct>`)를 우선하고, 없으면 일반 `filename="..."` 를 쓴다.
+ * 교차 오리진에서 헤더가 노출되지 않으면 null 을 돌려준다(호출부가 대체 이름 사용).
+ */
+function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null;
+  const star = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(header);
+  if (star?.[1]) {
+    try {
+      return decodeURIComponent(star[1].trim().replace(/^"|"$/g, ''));
+    } catch {
+      // 디코드 실패 시 아래 일반 filename 으로 폴백한다.
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header);
+  return plain?.[1]?.trim() ?? null;
+}
+
 /** SSE 스트림을 열고 StreamEvent 로 변환해 넘긴다. */
 async function* openStream(
   path: string,
@@ -252,6 +271,29 @@ export const httpClient: ApiClient = {
   cropUrl(id: string, no: number) {
     // 크롭 <img src> 도 헤더를 못 붙이므로 ?access= 로 인증(있을 때만).
     return withAccess(url(`/api/files/${encodeURIComponent(id)}/problems/${no}/crop`));
+  },
+
+  async exportProblemsDocx(id: string): Promise<{ blob: Blob; filename: string | null }> {
+    // 바이너리 다운로드. fetch 로 받으므로 헤더 인증(authHeaders)과 ?access= 를 함께 건다
+    // (백엔드는 이 경로에 두 방식 모두 허용). 파일명은 서버 Content-Disposition 우선.
+    const path = `/api/files/${encodeURIComponent(id)}/export.docx`;
+    let response: Response;
+    try {
+      response = await fetch(withAccess(url(path)), {
+        cache: 'no-store',
+        headers: authHeaders(),
+      });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw networkError(error);
+    }
+    if (!response.ok) {
+      handleUnauthorized(path, response.status);
+      throw await errorFromResponse(response);
+    }
+    const blob = await response.blob();
+    const filename = filenameFromDisposition(response.headers.get('Content-Disposition'));
+    return { blob, filename };
   },
 
   getSolutions(id: string) {

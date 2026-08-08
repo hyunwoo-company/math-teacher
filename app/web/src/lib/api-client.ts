@@ -55,6 +55,12 @@ export interface ApiClient {
   fileRawUrl(id: string): string;
   /** 문제 크롭 PNG URL. */
   cropUrl(id: string, no: number): string;
+  /**
+   * '문제만' 담은 시험지 DOCX 를 내려받는다(계약: `GET /api/files/{id}/export.docx`).
+   * 크롭 이미지만 담고 풀이/변형/정답은 넣지 않는다. 파일명은 서버 Content-Disposition
+   * 을 우선하고, 없으면(교차 오리진 등) 호출부가 `<시험지명>_문제.docx` 로 정한다.
+   */
+  exportProblemsDocx(id: string): Promise<{ blob: Blob; filename: string | null }>;
 
   getSolutions(id: string): Promise<SolutionsResponse>;
   /**

@@ -57,6 +57,10 @@ import type {
   VariantMode,
 } from '@/types/api';
 
+/** DOCX(Word) MIME. '문제만' 내보내기 목 blob 에 쓴다. */
+const DOCX_MEDIA_TYPE =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
 /** 문항별 스레드 키. null = 시험지 전역. */
 function threadKey(fileId: string, problemNo: number | null): string {
   return `${fileId}::${problemNo ?? 'global'}`;
@@ -646,6 +650,15 @@ export const mockClient: ApiClient = {
   cropUrl(_id: string, no: number) {
     // 목 크롭은 data: URI 라 withAccess 가 쿼리를 붙이지 않고 그대로 돌려준다(깨짐 방지).
     return withAccess(mockCropUrl(no));
+  },
+
+  async exportProblemsDocx(id: string): Promise<{ blob: Blob; filename: string | null }> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    const node = findNode(id);
+    // 목은 실제 DOCX 를 만들지 않는다. 다운로드 흐름(blob→a[download]) 확인용 더미 blob.
+    const blob = new Blob([`mock docx: ${node.name}`], { type: DOCX_MEDIA_TYPE });
+    return { blob, filename: null };
   },
 
   async getSolutions(id: string): Promise<SolutionsResponse> {

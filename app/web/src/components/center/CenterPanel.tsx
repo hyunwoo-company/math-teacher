@@ -7,6 +7,7 @@ import { SolutionsTab } from '@/components/center/SolutionsTab';
 import { NoteView } from '@/components/center/NoteView';
 import { AddToNoteButton } from '@/components/center/AddToNoteButton';
 import { DownloadPdfButton } from '@/components/center/DownloadPdfButton';
+import { DownloadDocxButton } from '@/components/center/DownloadDocxButton';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { formatDate } from '@/lib/format';
 import { nodePath } from '@/lib/tree';
@@ -93,7 +94,10 @@ export function CenterPanel() {
           ) : null}
           <div className="ml-auto flex shrink-0 items-center gap-2">
             {node.file ? (
-              <DownloadPdfButton url={api.fileRawUrl(node.id)} fileName={node.name} />
+              <>
+                <DownloadPdfButton url={api.fileRawUrl(node.id)} fileName={node.name} />
+                <DownloadDocxButton fileId={node.id} fileName={node.name} />
+              </>
             ) : null}
             <span className="text-[11px] text-slate-400">등록 {formatDate(node.created_at)}</span>
           </div>
