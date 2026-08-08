@@ -21,7 +21,7 @@ import pricing
 import service
 import sse
 import storage
-from errors import ApiError, bad_request
+from errors import ApiError, bad_request, not_found
 from providers import agy as agy_provider
 from providers import apikey as apikey_provider
 from providers import subscription as subscription_provider
@@ -346,6 +346,49 @@ class ChatContext(NamedTuple):
     truncated_before: int
 
 
+def _problem_context_parts(
+    *,
+    node_name: str,
+    mode: str,
+    problem: dict[str, Any],
+    solution: dict[str, Any] | None,
+) -> list[TextPart | ImagePart]:
+    """특정 문항을 컨텍스트로 거는 블록(크롭 이미지 + 설명 텍스트)."""
+    parts: list[TextPart | ImagePart] = []
+    image_b64 = _read_crop_b64(problem)
+    if image_b64:
+        parts.append(ImagePart(b64=image_b64))
+    context_lines = [
+        f"# 컨텍스트: '{node_name}' 시험지의 {problem['no']}번 문항",
+        f"- 페이지: {problem['page']}쪽",
+    ]
+    if image_b64:
+        context_lines.append("- 위 이미지가 해당 문항의 크롭입니다.")
+    if mode == "text" and str(problem.get("text") or "").strip():
+        context_lines.append(f"- 추출된 문항 텍스트:\n{problem['text']}")
+    if solution and solution["solution"]:
+        context_lines.append(f"- 이미 작성된 풀이:\n{solution['solution']}")
+    else:
+        context_lines.append("- 아직 이 문항의 풀이는 작성되지 않았습니다.")
+    parts.append(TextPart(text="\n".join(context_lines)))
+    return parts
+
+
+def _file_summary_part(
+    *, node_name: str, mode: str, problems: Sequence[dict[str, Any]]
+) -> TextPart:
+    """시험지 전체를 컨텍스트로 거는 요약 블록."""
+    numbers = [problem_row["no"] for problem_row in problems]
+    summary = (
+        f"# 컨텍스트: '{node_name}' 시험지\n"
+        f"- 전체 {len(numbers)}문항"
+        + (f" (번호 {numbers[0]}~{numbers[-1]})" if numbers else "")
+        + f"\n- 추출 모드: {mode}\n"
+        "- 특정 문항에 대한 질문이면 학생에게 문항 번호를 물어보세요."
+    )
+    return TextPart(text=summary)
+
+
 def load_chat_context(
     node_id: str, message: str, problem_no: int | None
 ) -> ChatContext:
@@ -401,34 +444,20 @@ def load_chat_context(
     mode = (meta or {}).get("mode", "text")
 
     if problem is not None:
-        image_b64 = _read_crop_b64(problem)
-        if image_b64:
-            parts.append(ImagePart(b64=image_b64))
-        context_lines = [
-            f"# 컨텍스트: '{node['name']}' 시험지의 {problem['no']}번 문항",
-            f"- 페이지: {problem['page']}쪽",
-        ]
-        if image_b64:
-            context_lines.append("- 위 이미지가 해당 문항의 크롭입니다.")
-        if mode == "text" and str(problem.get("text") or "").strip():
-            context_lines.append(f"- 추출된 문항 텍스트:\n{problem['text']}")
-        if solution and solution["solution"]:
-            context_lines.append(
-                f"- 이미 작성된 풀이:\n{solution['solution']}"
+        parts.extend(
+            _problem_context_parts(
+                node_name=str(node["name"]),
+                mode=mode,
+                problem=problem,
+                solution=solution,
             )
-        else:
-            context_lines.append("- 아직 이 문항의 풀이는 작성되지 않았습니다.")
-        parts.append(TextPart(text="\n".join(context_lines)))
-    else:
-        numbers = [problem_row["no"] for problem_row in problems]
-        summary = (
-            f"# 컨텍스트: '{node['name']}' 시험지\n"
-            f"- 전체 {len(numbers)}문항"
-            + (f" (번호 {numbers[0]}~{numbers[-1]})" if numbers else "")
-            + f"\n- 추출 모드: {mode}\n"
-            "- 특정 문항에 대한 질문이면 학생에게 문항 번호를 물어보세요."
         )
-        parts.append(TextPart(text=summary))
+    else:
+        parts.append(
+            _file_summary_part(
+                node_name=str(node["name"]), mode=mode, problems=problems
+            )
+        )
 
     parts.append(TextPart(text=f"# 학생 질문\n{message}"))
     turns.append(Turn(role="user", parts=tuple(parts)))
@@ -539,4 +568,171 @@ async def chat_stream(
             )
     except (anyio.get_cancelled_exc_class(), GeneratorExit):
         logger.info("SSE 연결이 끊겼습니다 (chat, node_id=%s)", node_id)
+        raise
+
+
+# ------------------------------------------------------- 전역(자유) 대화
+def load_conversation_context(
+    conversation_id: str,
+    message: str,
+    *,
+    file_id: str | None,
+    problem_no: int | None,
+) -> ChatContext:
+    """전역 대화 턴을 만든다 (블로킹).
+
+    `chat_messages`(시험지 채팅)와 달리 이력은 `conversation_messages` 에서 읽는다.
+    `file_id` 가 있으면 그 시험지를(추가로 `problem_no` 가 있으면 그 문항을) 첨부
+    컨텍스트로 붙인다. 없으면 파일 무관 자유 대화다.
+
+    Raises:
+        ApiError: 대화가 없거나(404), 첨부한 파일/문항이 잘못됐을 때.
+    """
+    with storage.transaction() as conn:
+        if storage.get_conversation(conn, conversation_id) is None:
+            raise not_found(
+                f"대화를 찾을 수 없습니다. (id={conversation_id})",
+                "새로고침 후 다시 시도하세요. 이미 삭제된 대화일 수 있습니다.",
+            )
+        total_history = storage.count_conversation_messages(conn, conversation_id)
+        history = storage.list_conversation_messages(
+            conn, conversation_id, limit=config.CHAT_HISTORY_LIMIT
+        )
+        node: dict[str, Any] | None = None
+        meta: dict[str, Any] | None = None
+        problems: list[dict[str, Any]] = []
+        problem: dict[str, Any] | None = None
+        solution: dict[str, Any] | None = None
+        if file_id is not None:
+            node = service.require_file_node(conn, file_id)
+            meta = storage.get_file(conn, file_id)
+            problems = storage.list_problems(conn, file_id)
+            if problem_no is not None:
+                problem = storage.get_problem(conn, file_id, problem_no)
+                solution = storage.get_solution(conn, file_id, problem_no)
+
+    if file_id is not None and problem_no is not None and problem is None:
+        raise bad_request(
+            "problem_not_found",
+            f"{problem_no}번 문항이 없습니다.",
+            f"사용 가능한 번호: {[p['no'] for p in problems]}",
+        )
+
+    turns: list[Turn] = [
+        Turn(
+            role="user" if item["role"] == "user" else "assistant",
+            parts=(TextPart(text=str(item["content"])),),
+        )
+        for item in history
+    ]
+
+    parts: list[TextPart | ImagePart] = []
+    if node is not None:
+        mode = (meta or {}).get("mode", "text")
+        if problem is not None:
+            parts.extend(
+                _problem_context_parts(
+                    node_name=str(node["name"]),
+                    mode=mode,
+                    problem=problem,
+                    solution=solution,
+                )
+            )
+        else:
+            parts.append(
+                _file_summary_part(
+                    node_name=str(node["name"]), mode=mode, problems=problems
+                )
+            )
+
+    parts.append(TextPart(text=f"# 학생 질문\n{message}"))
+    turns.append(Turn(role="user", parts=tuple(parts)))
+    return ChatContext(
+        turns=turns,
+        truncated_before=max(0, total_history - len(history)),
+    )
+
+
+async def conversation_chat_stream(
+    *,
+    conversation_id: str,
+    provider: Provider,
+    turns: Sequence[Turn],
+    message: str,
+    model: str,
+    effort: Effort,
+    file_id: str | None = None,
+    problem_no: int | None = None,
+    truncated_before: int = 0,
+) -> AsyncIterator[str]:
+    """전역 대화 응답을 SSE 로 흘린다. 메시지는 `conversation_messages` 에 보관한다.
+
+    사용자 메시지를 먼저 저장하며(첫 메시지면 자동 제목 설정), 완료 시 assistant
+    메시지를 usage/cost 와 함께 저장하고 대화의 `updated_at` 을 갱신한다. SSE 이벤트
+    형식은 시험지 채팅(`chat_stream`)과 동일하다.
+    """
+    try:
+        await run_in_threadpool(
+            service.save_conversation_user_message,
+            conversation_id=conversation_id,
+            message=message,
+            file_id=file_id,
+            problem_no=problem_no,
+        )
+        try:
+            async for chunk in provider.chat(
+                turns=turns,
+                model=model,
+                effort=effort,
+                max_tokens=config.DEFAULT_MAX_TOKENS,
+            ):
+                if chunk["type"] == "delta":
+                    yield sse.event("delta", {"text": chunk["text"]})
+                    continue
+                await run_in_threadpool(
+                    service.save_conversation_assistant_message,
+                    conversation_id=conversation_id,
+                    content=chunk["text"],
+                    file_id=file_id,
+                    problem_no=problem_no,
+                    usage=chunk["usage"],
+                    cost=chunk["cost"],
+                )
+                yield sse.event(
+                    "done",
+                    {
+                        "content": chunk["text"],
+                        "file_id": file_id,
+                        "problem_no": problem_no,
+                        "usage": chunk["usage"],
+                        "cost": chunk["cost"],
+                        "truncated": chunk["truncated"],
+                        "history_truncated": truncated_before > 0,
+                        "truncated_before": truncated_before,
+                    },
+                )
+        except ProviderError as exc:
+            logger.warning("대화 실패: %s", exc.message)
+            yield sse.event(
+                "error",
+                {
+                    "error_code": exc.error_code,
+                    "message": exc.message,
+                    "hint": exc.hint,
+                },
+            )
+        except Exception as exc:
+            logger.exception("대화 중 예상치 못한 오류")
+            yield sse.event(
+                "error",
+                {
+                    "error_code": "internal_error",
+                    "message": "대화 중 서버 오류가 발생했습니다.",
+                    "hint": f"{type(exc).__name__}: {exc}",
+                },
+            )
+    except (anyio.get_cancelled_exc_class(), GeneratorExit):
+        logger.info(
+            "SSE 연결이 끊겼습니다 (conversation, id=%s)", conversation_id
+        )
         raise

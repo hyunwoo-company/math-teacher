@@ -437,6 +437,148 @@ def clear_chat(node_id: str, problem_no: int | None = None) -> None:
         storage.clear_chat_thread(conn, node_id, problem_no=problem_no)
 
 
+# --------------------------------------------------------- 전역(자유) 대화
+# ChatGPT 식 파일 무관 자유 대화. 시험지 채팅과 별도 테이블/엔드포인트다.
+DEFAULT_CONVERSATION_TITLE: Final[str] = "새 대화"
+
+
+def _auto_title(message: str) -> str:
+    """첫 사용자 메시지에서 뽑는 자동 제목(공백 정리 후 앞 30자)."""
+    cleaned = " ".join(message.split())
+    return cleaned[:30] if cleaned else DEFAULT_CONVERSATION_TITLE
+
+
+def _require_conversation(
+    conn: sqlite3.Connection, conversation_id: str
+) -> dict[str, Any]:
+    conversation = storage.get_conversation(conn, conversation_id)
+    if conversation is None:
+        raise not_found(
+            f"대화를 찾을 수 없습니다. (id={conversation_id})",
+            "새로고침 후 다시 시도하세요. 이미 삭제된 대화일 수 있습니다.",
+        )
+    return conversation
+
+
+def create_conversation(title: str | None) -> dict[str, Any]:
+    """새 대화를 만든다. `title` 이 비면 기본 제목("새 대화")을 쓴다."""
+    cleaned = (
+        _clean_name(title) if title and title.strip() else DEFAULT_CONVERSATION_TITLE
+    )
+    with storage.transaction() as conn:
+        conversation_id = storage.new_id()
+        storage.insert_conversation(
+            conn, conversation_id=conversation_id, title=cleaned
+        )
+        conversation = storage.get_conversation(conn, conversation_id)
+    assert conversation is not None
+    return conversation
+
+
+def list_conversations() -> list[dict[str, Any]]:
+    """대화 목록(updated_at 내림차순, 마지막 메시지 preview 포함)."""
+    with storage.transaction() as conn:
+        return storage.list_conversations(conn)
+
+
+def rename_conversation(conversation_id: str, title: str) -> dict[str, Any]:
+    """대화 이름을 바꾼다.
+
+    Raises:
+        ApiError: 대화가 없을 때(404) 또는 이름이 비었을 때(400).
+    """
+    cleaned = _clean_name(title)
+    with storage.transaction() as conn:
+        _require_conversation(conn, conversation_id)
+        storage.update_conversation_title(conn, conversation_id, cleaned)
+        conversation = storage.get_conversation(conn, conversation_id)
+    assert conversation is not None
+    return conversation
+
+
+def delete_conversation(conversation_id: str) -> None:
+    """대화와 딸린 메시지를 지운다.
+
+    Raises:
+        ApiError: 대화가 없을 때(404).
+    """
+    with storage.transaction() as conn:
+        _require_conversation(conn, conversation_id)
+        storage.delete_conversation(conn, conversation_id)
+
+
+def conversation_messages(conversation_id: str) -> list[dict[str, Any]]:
+    """대화 메시지 목록(시간순).
+
+    Raises:
+        ApiError: 대화가 없을 때(404).
+    """
+    with storage.transaction() as conn:
+        _require_conversation(conn, conversation_id)
+        return storage.list_conversation_messages(conn, conversation_id)
+
+
+def save_conversation_user_message(
+    *,
+    conversation_id: str,
+    message: str,
+    file_id: str | None = None,
+    problem_no: int | None = None,
+) -> None:
+    """사용자 메시지를 저장한다 (블로킹).
+
+    이번이 대화의 **첫 메시지**이고 제목이 아직 기본값("새 대화")이면 메시지
+    앞부분으로 제목을 자동 설정한다. 사용자 메시지 저장은 `updated_at` 도 갱신한다.
+    """
+    with storage.transaction() as conn:
+        conversation = storage.get_conversation(conn, conversation_id)
+        if conversation is None:
+            return
+        is_first = storage.count_conversation_messages(conn, conversation_id) == 0
+        storage.add_conversation_message(
+            conn,
+            message_id=storage.new_id(),
+            conversation_id=conversation_id,
+            role="user",
+            content=message,
+            file_id=file_id,
+            problem_no=problem_no,
+        )
+        if is_first and conversation["title"] == DEFAULT_CONVERSATION_TITLE:
+            storage.update_conversation_title(
+                conn, conversation_id, _auto_title(message)
+            )
+        else:
+            storage.touch_conversation(conn, conversation_id)
+
+
+def save_conversation_assistant_message(
+    *,
+    conversation_id: str,
+    content: str,
+    file_id: str | None = None,
+    problem_no: int | None = None,
+    usage: dict[str, Any] | None = None,
+    cost: dict[str, Any] | None = None,
+) -> None:
+    """AI(assistant) 메시지를 저장하고 `updated_at` 을 갱신한다 (블로킹)."""
+    with storage.transaction() as conn:
+        if storage.get_conversation(conn, conversation_id) is None:
+            return
+        storage.add_conversation_message(
+            conn,
+            message_id=storage.new_id(),
+            conversation_id=conversation_id,
+            role="assistant",
+            content=content,
+            file_id=file_id,
+            problem_no=problem_no,
+            usage=usage,
+            cost=cost,
+        )
+        storage.touch_conversation(conn, conversation_id)
+
+
 # --------------------------------------------------------------- 사용량
 def usage_summary() -> dict[str, dict[str, dict[str, int]]]:
     """풀이+채팅 토큰 사용량을 시간 창(24시간/7일/전체)별로 집계한다."""
@@ -630,19 +772,26 @@ __all__ = [
     "chat_history",
     "chat_threads",
     "clear_chat",
+    "conversation_messages",
+    "create_conversation",
     "create_folder",
     "create_note",
     "crop_path",
+    "delete_conversation",
     "delete_node",
     "delete_note_item",
     "file_detail",
+    "list_conversations",
     "list_tree",
     "note_crop_path",
     "note_detail",
     "raw_pdf_path",
     "register_pdf",
+    "rename_conversation",
     "require_file_node",
     "require_note_node",
+    "save_conversation_assistant_message",
+    "save_conversation_user_message",
     "solutions",
     "update_node",
     "validate_pdf",

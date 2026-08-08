@@ -48,6 +48,12 @@ from schemas import (
     ChatHistoryResponse,
     ChatRequest,
     ChatThreadsResponse,
+    ConversationChatRequest,
+    ConversationCreate,
+    ConversationMessagesResponse,
+    ConversationOut,
+    ConversationRename,
+    ConversationsResponse,
     EnvResponse,
     ErrorBody,
     FileDetailResponse,
@@ -540,6 +546,112 @@ def delete_chat(node_id: NodeId, problem_no: ProblemNoQuery = None) -> OkRespons
     """해당 스레드의 대화 이력만 지운다."""
     service.clear_chat(node_id, problem_no)
     return OkResponse()
+
+
+# ----------------------------------------------------------- 전역(자유) 대화
+@app.post(
+    "/api/conversations",
+    response_model=ConversationOut,
+    status_code=status.HTTP_201_CREATED,
+    responses=_ERRORS,
+)
+def create_conversation(payload: ConversationCreate) -> ConversationOut:
+    """ChatGPT 식 전역(파일 무관) 대화를 만든다. 제목 생략 시 "새 대화"."""
+    conversation = service.create_conversation(payload.title)
+    return ConversationOut.model_validate(conversation)
+
+
+@app.get(
+    "/api/conversations",
+    response_model=ConversationsResponse,
+    status_code=status.HTTP_200_OK,
+)
+def read_conversations() -> ConversationsResponse:
+    """대화 목록(최근 활동 순). 각 항목에 마지막 메시지 preview 를 담는다."""
+    return ConversationsResponse.model_validate(
+        {"conversations": service.list_conversations()}
+    )
+
+
+@app.patch(
+    "/api/conversations/{conversation_id}",
+    response_model=ConversationOut,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+def rename_conversation(
+    conversation_id: NodeId, payload: ConversationRename
+) -> ConversationOut:
+    """대화 이름을 바꾼다."""
+    conversation = service.rename_conversation(conversation_id, payload.title)
+    return ConversationOut.model_validate(conversation)
+
+
+@app.delete(
+    "/api/conversations/{conversation_id}",
+    response_model=OkResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+def delete_conversation(conversation_id: NodeId) -> OkResponse:
+    """대화를 삭제한다(딸린 메시지도 함께)."""
+    service.delete_conversation(conversation_id)
+    return OkResponse()
+
+
+@app.get(
+    "/api/conversations/{conversation_id}/messages",
+    response_model=ConversationMessagesResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+def read_conversation_messages(
+    conversation_id: NodeId,
+) -> ConversationMessagesResponse:
+    """대화 메시지 목록(시간순)."""
+    return ConversationMessagesResponse.model_validate(
+        {"messages": service.conversation_messages(conversation_id)}
+    )
+
+
+@app.post(
+    "/api/conversations/{conversation_id}/chat",
+    response_class=StreamingResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def chat_in_conversation(
+    conversation_id: NodeId,
+    payload: ConversationChatRequest,
+    x_api_key: ApiKeyHeader = None,
+) -> StreamingResponse:
+    """전역 대화에 메시지를 보낸다. SSE 스트리밍(이벤트 형식은 파일 채팅과 동일).
+
+    `file_id`(+선택 `problem_no`)를 주면 그 시험지/문항을 첨부 컨텍스트로 건다.
+    """
+    provider = ai_service.resolve_provider(payload.provider, _api_key(x_api_key))
+    model = ai_service.resolve_model(payload.model, provider.name)
+    context = await run_in_threadpool(
+        ai_service.load_conversation_context,
+        conversation_id,
+        payload.message,
+        file_id=payload.file_id,
+        problem_no=payload.problem_no,
+    )
+    stream = ai_service.conversation_chat_stream(
+        conversation_id=conversation_id,
+        provider=provider,
+        turns=context.turns,
+        message=payload.message,
+        model=model,
+        effort=payload.effort,
+        file_id=payload.file_id,
+        problem_no=payload.problem_no,
+        truncated_before=context.truncated_before,
+    )
+    return StreamingResponse(
+        stream, media_type=sse.SSE_MEDIA_TYPE, headers=sse.SSE_HEADERS
+    )
 
 
 # --------------------------------------------------------------- 오답노트

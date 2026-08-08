@@ -99,6 +99,28 @@ CREATE TABLE IF NOT EXISTS note_items (
 );
 CREATE INDEX IF NOT EXISTS idx_note_items_note ON note_items(note_node_id);
 CREATE INDEX IF NOT EXISTS idx_note_items_source ON note_items(source_node_id);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '새 대화',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    file_id TEXT NULL,
+    problem_no INTEGER NULL,
+    usage_json TEXT NULL,
+    cost_json TEXT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_conv_messages
+    ON conversation_messages(conversation_id, created_at, id);
 """
 
 # `SCHEMA` 뒤(= 컬럼 추가 뒤)에만 만들 수 있는 인덱스.
@@ -270,11 +292,12 @@ def _parse_created_at(raw: str | None) -> datetime | None:
 
 
 def usage_summary(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
-    """풀이+채팅의 토큰 사용량을 시간 창별로 집계한다.
+    """풀이+채팅+전역 대화의 토큰 사용량을 시간 창별로 집계한다.
 
-    `solutions` 와 `chat_messages` 의 `usage_json`(NULL 아닌 행)을 모두 읽어
-    행별 토큰 수(`_usage_tokens`)를 더하고, usage 가 있는 행 수를 센다. 시간 창은
-    `created_at` 기준으로 최근 24시간 / 7일 / 전체(제한 없음)로 나눈다.
+    `solutions` / `chat_messages` / `conversation_messages` 의
+    `usage_json`(NULL 아닌 행)을 모두 읽어 행별 토큰 수(`_usage_tokens`)를 더하고,
+    usage 가 있는 행 수를 센다. 시간 창은 `created_at` 기준으로 최근
+    24시간 / 7일 / 전체(제한 없음)로 나눈다.
     """
     now = datetime.now(KST)
     cutoff_24h = now - timedelta(hours=24)
@@ -288,6 +311,9 @@ def usage_summary(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
         "SELECT usage_json, created_at FROM solutions WHERE usage_json IS NOT NULL"
         " UNION ALL"
         " SELECT usage_json, created_at FROM chat_messages WHERE usage_json IS NOT NULL"
+        " UNION ALL"
+        " SELECT usage_json, created_at FROM conversation_messages"
+        " WHERE usage_json IS NOT NULL"
     ).fetchall()
     for row in rows:
         usage = _loads(row["usage_json"])
@@ -730,6 +756,179 @@ def clear_chat_thread(
         "DELETE FROM chat_messages WHERE node_id = ? AND problem_no IS ?",
         (node_id, problem_no),
     )
+
+
+# ---------------------------------------------------------- conversations
+# ChatGPT 식 전역(파일 무관) 자유 대화. 시험지 채팅(`chat_messages`)과 별도 테이블.
+# 메시지 순서는 `created_at, rowid`(= 삽입 순서) 로 판정한다 — id 가 랜덤 hex 라
+# id 정렬은 시간순이 아니기 때문이다.
+def _preview(content: str, *, limit: int = 60) -> str:
+    """대화 목록용 미리보기(공백 정리 후 앞 `limit` 자)."""
+    cleaned = " ".join(content.split())
+    return cleaned[:limit]
+
+
+def insert_conversation(
+    conn: sqlite3.Connection, *, conversation_id: str, title: str
+) -> None:
+    """대화를 추가한다. `created_at == updated_at`."""
+    stamp = now_iso()
+    conn.execute(
+        "INSERT INTO conversations (id, title, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?)",
+        (conversation_id, title, stamp, stamp),
+    )
+
+
+def get_conversation(
+    conn: sqlite3.Connection, conversation_id: str
+) -> dict[str, Any] | None:
+    """대화 1건(없으면 None). preview 없이 메타만."""
+    row = conn.execute(
+        "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?",
+        (conversation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "preview": None,
+    }
+
+
+def list_conversations(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """대화 목록. `updated_at` 내림차순(동률이면 최근 생성 먼저).
+
+    각 항목에 마지막 메시지 preview 를 포함한다(메시지가 없으면 None).
+    """
+    rows = conn.execute(
+        """
+        SELECT c.id, c.title, c.created_at, c.updated_at,
+               (SELECT m.content FROM conversation_messages m
+                 WHERE m.conversation_id = c.id
+                 ORDER BY m.created_at DESC, m.rowid DESC
+                 LIMIT 1) AS last_content
+          FROM conversations c
+         ORDER BY c.updated_at DESC, c.rowid DESC
+        """
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "preview": (
+                None if row["last_content"] is None else _preview(row["last_content"])
+            ),
+        }
+        for row in rows
+    ]
+
+
+def update_conversation_title(
+    conn: sqlite3.Connection, conversation_id: str, title: str
+) -> None:
+    """대화 제목을 바꾸고 `updated_at` 을 갱신한다."""
+    conn.execute(
+        "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+        (title, now_iso(), conversation_id),
+    )
+
+
+def touch_conversation(conn: sqlite3.Connection, conversation_id: str) -> None:
+    """대화의 `updated_at` 만 현재 시각으로 갱신한다."""
+    conn.execute(
+        "UPDATE conversations SET updated_at = ? WHERE id = ?",
+        (now_iso(), conversation_id),
+    )
+
+
+def delete_conversation(conn: sqlite3.Connection, conversation_id: str) -> None:
+    """대화와 딸린 메시지를 지운다.
+
+    FK(ON DELETE CASCADE)를 선언해 두었지만 이 코드베이스는 `PRAGMA foreign_keys`
+    를 켜지 않으므로(기존 `delete_nodes` 와 동일), 메시지를 먼저 명시적으로 지운다.
+    """
+    conn.execute(
+        "DELETE FROM conversation_messages WHERE conversation_id = ?",
+        (conversation_id,),
+    )
+    conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+
+
+def add_conversation_message(
+    conn: sqlite3.Connection,
+    *,
+    message_id: str,
+    conversation_id: str,
+    role: str,
+    content: str,
+    file_id: str | None = None,
+    problem_no: int | None = None,
+    usage: dict[str, Any] | None = None,
+    cost: dict[str, Any] | None = None,
+) -> None:
+    """대화 메시지를 추가한다."""
+    conn.execute(
+        """
+        INSERT INTO conversation_messages
+            (id, conversation_id, role, content, file_id, problem_no,
+             usage_json, cost_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            message_id,
+            conversation_id,
+            role,
+            content,
+            file_id,
+            problem_no,
+            _dumps(usage),
+            _dumps(cost),
+            now_iso(),
+        ),
+    )
+
+
+def _conversation_message_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "role": row["role"],
+        "content": row["content"],
+        "file_id": row["file_id"],
+        "problem_no": None if row["problem_no"] is None else int(row["problem_no"]),
+        "usage": _loads(row["usage_json"]),
+        "cost": _loads(row["cost_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def list_conversation_messages(
+    conn: sqlite3.Connection, conversation_id: str, *, limit: int | None = None
+) -> list[dict[str, Any]]:
+    """대화 메시지를 시간순(오래된 순)으로. `limit` 이 있으면 **최근 N개만**."""
+    rows = conn.execute(
+        "SELECT * FROM conversation_messages"
+        " WHERE conversation_id = ? ORDER BY created_at, rowid",
+        (conversation_id,),
+    ).fetchall()
+    if limit is not None:
+        rows = rows[-limit:]
+    return [_conversation_message_to_dict(row) for row in rows]
+
+
+def count_conversation_messages(
+    conn: sqlite3.Connection, conversation_id: str
+) -> int:
+    """대화의 전체 메시지 수."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM conversation_messages WHERE conversation_id = ?",
+        (conversation_id,),
+    ).fetchone()
+    return 0 if row is None else int(row["n"])
 
 
 # ---------------------------------------------------------- note_items

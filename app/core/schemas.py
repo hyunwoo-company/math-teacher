@@ -263,6 +263,70 @@ class ChatThreadsResponse(BaseModel):
     threads: list[ChatThreadOut]
 
 
+class ConversationOut(BaseModel):
+    """전역(파일 무관) 자유 대화 1건. `preview` 는 마지막 메시지 앞부분."""
+
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    preview: str | None = None
+
+
+class ConversationsResponse(BaseModel):
+    """`GET /api/conversations` 응답 (updated_at 내림차순)."""
+
+    conversations: list[ConversationOut]
+
+
+class ConversationCreate(BaseModel):
+    """`POST /api/conversations` 요청. `title` 생략 시 서버가 기본값을 넣는다."""
+
+    title: NameStr | None = None
+
+
+class ConversationRename(BaseModel):
+    """`PATCH /api/conversations/{id}` 요청 (이름 변경)."""
+
+    title: NameStr
+
+
+class ConversationMessageOut(BaseModel):
+    """전역 대화 메시지 1건.
+
+    `file_id` / `problem_no` 는 그 메시지가 특정 시험지·문항을 첨부 컨텍스트로
+    걸었을 때만 채워진다(자유 대화면 둘 다 null).
+    """
+
+    role: Literal["user", "assistant"]
+    content: str
+    file_id: str | None = None
+    problem_no: int | None = None
+    created_at: str
+    usage: dict[str, Any] | None = None
+    cost: dict[str, Any] | None = None
+
+
+class ConversationMessagesResponse(BaseModel):
+    """`GET /api/conversations/{id}/messages` 응답 (시간순)."""
+
+    messages: list[ConversationMessageOut]
+
+
+class ConversationChatRequest(BaseModel):
+    """`POST /api/conversations/{id}/chat` 요청.
+
+    `file_id`(+선택 `problem_no`)를 주면 그 시험지/문항을 첨부 컨텍스트로 건다.
+    """
+
+    message: Annotated[str, Field(min_length=1, max_length=8000)]
+    file_id: str | None = None
+    problem_no: Annotated[int | None, Field(ge=1)] = None
+    provider: ProviderName = "auto"
+    model: str | None = None
+    effort: Effort = DEFAULT_EFFORT
+
+
 class NoteItemOut(BaseModel):
     """오답노트 항목 1건.
 
