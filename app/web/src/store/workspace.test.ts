@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { resetMockState } from '@/lib/mock/client';
 import { MOCK_FILE_ID, MOCK_PROBLEM_COUNT } from '@/lib/mock/data';
 import { buildTree } from '@/lib/tree';
-import { useWorkspace } from '@/store/workspace';
+import { LEFT_MAX, LEFT_MIN, useWorkspace } from '@/store/workspace';
 
 const initial = useWorkspace.getState();
 
@@ -314,5 +314,59 @@ describe('워크스페이스 스토어 (목 API)', () => {
     await useWorkspace.getState().startSolve(null);
     expect(useWorkspace.getState().toast?.message).toContain('파일을 선택');
     expect(useWorkspace.getState().solve.running).toBe(false);
+  });
+});
+
+describe('패널 레이아웃 prefs (좌측 너비 / 좌·우 접기)', () => {
+  beforeEach(() => {
+    reset();
+  });
+
+  it('setLeftWidth 는 값을 반영하고 prefs 로 저장한다', () => {
+    useWorkspace.getState().setLeftWidth(360);
+    expect(useWorkspace.getState().leftWidth).toBe(360);
+
+    const raw = window.localStorage.getItem('math-teacher.uiPrefs');
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw ?? '{}').leftWidth).toBe(360);
+  });
+
+  it('setLeftWidth 는 최소/최대 범위로 클램프한다', () => {
+    useWorkspace.getState().setLeftWidth(10);
+    expect(useWorkspace.getState().leftWidth).toBe(LEFT_MIN);
+
+    useWorkspace.getState().setLeftWidth(9999);
+    expect(useWorkspace.getState().leftWidth).toBe(LEFT_MAX);
+  });
+
+  it('좌/우 접기 토글은 상태를 뒤집고 prefs 로 저장한다', () => {
+    expect(useWorkspace.getState().leftCollapsed).toBe(false);
+    expect(useWorkspace.getState().rightCollapsed).toBe(false);
+
+    useWorkspace.getState().toggleLeftCollapsed();
+    useWorkspace.getState().toggleRightCollapsed();
+    expect(useWorkspace.getState().leftCollapsed).toBe(true);
+    expect(useWorkspace.getState().rightCollapsed).toBe(true);
+
+    const saved = JSON.parse(window.localStorage.getItem('math-teacher.uiPrefs') ?? '{}');
+    expect(saved.leftCollapsed).toBe(true);
+    expect(saved.rightCollapsed).toBe(true);
+
+    // 다시 누르면 펼침으로 복귀한다.
+    useWorkspace.getState().toggleLeftCollapsed();
+    expect(useWorkspace.getState().leftCollapsed).toBe(false);
+  });
+
+  it('hydratePrefs 는 저장된 leftWidth/접힘 상태를 복원한다', () => {
+    window.localStorage.setItem(
+      'math-teacher.uiPrefs',
+      JSON.stringify({ leftWidth: 340, leftCollapsed: true, rightCollapsed: true }),
+    );
+    useWorkspace.getState().hydratePrefs();
+
+    const { leftWidth, leftCollapsed, rightCollapsed } = useWorkspace.getState();
+    expect(leftWidth).toBe(340);
+    expect(leftCollapsed).toBe(true);
+    expect(rightCollapsed).toBe(true);
   });
 });

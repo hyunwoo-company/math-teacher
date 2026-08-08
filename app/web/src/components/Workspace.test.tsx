@@ -473,6 +473,49 @@ describe('워크스페이스 화면 (목 모드)', () => {
     );
   }, 30_000);
 
+  it('왼쪽 메뉴를 접으면 트리가 숨고, 재열기 버튼으로 다시 펼친다', async () => {
+    const user = await openWorkspace();
+
+    // 처음엔 트리가 보인다.
+    expect(screen.getByRole('tree', { name: '시험지 폴더 트리' })).toBeInTheDocument();
+
+    // 접기: 트리가 사라지고 접힘 상태가 저장된다.
+    await user.click(screen.getByRole('button', { name: '왼쪽 메뉴 접기' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('tree', { name: '시험지 폴더 트리' })).toBeNull(),
+    );
+    expect(useWorkspace.getState().leftCollapsed).toBe(true);
+
+    // 재열기 바가 남는다.
+    const reopen = screen.getByRole('button', { name: '왼쪽 메뉴 펼치기' });
+    expect(reopen).toHaveAttribute('aria-expanded', 'false');
+
+    // 펼치기: 트리가 다시 보인다.
+    await user.click(reopen);
+    expect(await screen.findByRole('tree', { name: '시험지 폴더 트리' })).toBeInTheDocument();
+    expect(useWorkspace.getState().leftCollapsed).toBe(false);
+  });
+
+  it('우측 프롬프트 패널을 접으면 숨고, 재열기 버튼으로 다시 펼친다', async () => {
+    const user = await openWorkspace();
+
+    // 우측 패널 내용(전체 문제풀이 버튼)이 보인다.
+    expect(screen.getByRole('button', { name: /전체 문제풀이/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '프롬프트 패널 접기' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /전체 문제풀이/ })).toBeNull(),
+    );
+    expect(useWorkspace.getState().rightCollapsed).toBe(true);
+
+    const reopen = screen.getByRole('button', { name: '프롬프트 패널 펼치기' });
+    expect(reopen).toHaveAttribute('aria-expanded', 'false');
+
+    await user.click(reopen);
+    expect(await screen.findByRole('button', { name: /전체 문제풀이/ })).toBeInTheDocument();
+    expect(useWorkspace.getState().rightCollapsed).toBe(false);
+  });
+
   it('컨텍스트 메뉴로 새 폴더를 만든다', async () => {
     const user = await openWorkspace();
 

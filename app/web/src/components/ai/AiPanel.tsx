@@ -27,7 +27,7 @@ const EXAMPLE_CHIPS = [
 ];
 
 /** 우측 패널: 전체 문제풀이 + 채팅. */
-export function AiPanel() {
+export function AiPanel({ onCollapse }: { onCollapse?: () => void }) {
   const env = useWorkspace((state) => state.env);
   const selectedFileId = useWorkspace((state) => state.selectedFileId);
   const fileDetail = useWorkspace((state) => state.fileDetail);
@@ -131,6 +131,18 @@ export function AiPanel() {
     <aside className="flex h-full min-w-0 flex-col bg-white">
       <header className="space-y-2 border-b border-slate-200 px-3 py-2">
         <div className="flex items-center gap-2">
+          {onCollapse ? (
+            <button
+              type="button"
+              onClick={onCollapse}
+              aria-expanded
+              aria-label="프롬프트 패널 접기"
+              title="프롬프트 패널 접기"
+              className="shrink-0 rounded px-1.5 py-1 text-[13px] leading-none text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+            >
+              ▸
+            </button>
+          ) : null}
           {solve.running ? (
             <button
               type="button"

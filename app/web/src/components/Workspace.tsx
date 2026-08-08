@@ -10,7 +10,7 @@ import { Onboarding } from '@/components/Onboarding';
 import { ErrorState, LoadingState } from '@/components/ui/Feedback';
 import { needsAccessGate } from '@/lib/access-gate';
 import { API_BASE, IS_MOCK } from '@/lib/config';
-import { RIGHT_MAX, RIGHT_MIN, useWorkspace } from '@/store/workspace';
+import { LEFT_MAX, LEFT_MIN, RIGHT_MAX, RIGHT_MIN, useWorkspace } from '@/store/workspace';
 
 /**
  * 앱 루트(클라이언트 경계).
@@ -27,6 +27,9 @@ export function Workspace() {
   const providerConfig = useWorkspace((state) => state.providerConfig);
   const accessOk = useWorkspace((state) => state.accessOk);
   const rightWidth = useWorkspace((state) => state.rightWidth);
+  const leftWidth = useWorkspace((state) => state.leftWidth);
+  const leftCollapsed = useWorkspace((state) => state.leftCollapsed);
+  const rightCollapsed = useWorkspace((state) => state.rightCollapsed);
   const toast = useWorkspace((state) => state.toast);
 
   const hydratePrefs = useWorkspace((state) => state.hydratePrefs);
@@ -36,9 +39,13 @@ export function Workspace() {
   const bootstrapConversations = useWorkspace((state) => state.bootstrapConversations);
   const logout = useWorkspace((state) => state.logout);
   const setRightWidth = useWorkspace((state) => state.setRightWidth);
+  const setLeftWidth = useWorkspace((state) => state.setLeftWidth);
+  const toggleLeftCollapsed = useWorkspace((state) => state.toggleLeftCollapsed);
+  const toggleRightCollapsed = useWorkspace((state) => state.toggleRightCollapsed);
   const dismissToast = useWorkspace((state) => state.dismissToast);
 
-  const [resizing, setResizing] = useState(false);
+  // 어느 쪽 구분선을 끌고 있는지. null = 드래그 중 아님.
+  const [resizing, setResizing] = useState<'left' | 'right' | null>(null);
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -69,14 +76,16 @@ export function Workspace() {
 
   const onPointerMove = useCallback(
     (event: PointerEvent) => {
-      setRightWidth(window.innerWidth - event.clientX);
+      // 좌측은 화면 왼쪽 기준(clientX), 우측은 오른쪽 기준(innerWidth - clientX).
+      if (resizing === 'left') setLeftWidth(event.clientX);
+      else if (resizing === 'right') setRightWidth(window.innerWidth - event.clientX);
     },
-    [setRightWidth],
+    [resizing, setLeftWidth, setRightWidth],
   );
 
   useEffect(() => {
     if (!resizing) return;
-    const stop = () => setResizing(false);
+    const stop = () => setResizing(null);
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', stop);
     window.addEventListener('pointercancel', stop);
@@ -172,34 +181,78 @@ export function Workspace() {
       ) : null}
 
       <div className="flex min-h-0 flex-1">
-        <FileTreePanel />
+        {leftCollapsed ? (
+          <ReopenRail
+            side="left"
+            label="왼쪽 메뉴 펼치기"
+            onExpand={toggleLeftCollapsed}
+          />
+        ) : (
+          <>
+            <div style={{ width: leftWidth }} className="min-w-0 shrink-0">
+              <FileTreePanel onCollapse={toggleLeftCollapsed} />
+            </div>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="왼쪽 메뉴 너비 조절"
+              aria-valuenow={leftWidth}
+              aria-valuemin={LEFT_MIN}
+              aria-valuemax={LEFT_MAX}
+              tabIndex={0}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                setResizing('left');
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowLeft') setLeftWidth(leftWidth - 16);
+                if (event.key === 'ArrowRight') setLeftWidth(leftWidth + 16);
+              }}
+              className={clsx(
+                'w-1 shrink-0 cursor-col-resize bg-slate-200 transition-colors hover:bg-blue-400',
+                resizing === 'left' && 'bg-blue-500',
+              )}
+            />
+          </>
+        )}
+
         <CenterPanel />
 
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="AI 패널 너비 조절"
-          aria-valuenow={rightWidth}
-          aria-valuemin={RIGHT_MIN}
-          aria-valuemax={RIGHT_MAX}
-          tabIndex={0}
-          onPointerDown={(event) => {
-            event.preventDefault();
-            setResizing(true);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'ArrowLeft') setRightWidth(rightWidth + 16);
-            if (event.key === 'ArrowRight') setRightWidth(rightWidth - 16);
-          }}
-          className={clsx(
-            'w-1 shrink-0 cursor-col-resize bg-slate-200 transition-colors hover:bg-blue-400',
-            resizing && 'bg-blue-500',
-          )}
-        />
+        {rightCollapsed ? (
+          <ReopenRail
+            side="right"
+            label="프롬프트 패널 펼치기"
+            onExpand={toggleRightCollapsed}
+          />
+        ) : (
+          <>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="AI 패널 너비 조절"
+              aria-valuenow={rightWidth}
+              aria-valuemin={RIGHT_MIN}
+              aria-valuemax={RIGHT_MAX}
+              tabIndex={0}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                setResizing('right');
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowLeft') setRightWidth(rightWidth + 16);
+                if (event.key === 'ArrowRight') setRightWidth(rightWidth - 16);
+              }}
+              className={clsx(
+                'w-1 shrink-0 cursor-col-resize bg-slate-200 transition-colors hover:bg-blue-400',
+                resizing === 'right' && 'bg-blue-500',
+              )}
+            />
 
-        <div style={{ width: rightWidth }} className="shrink-0 border-l border-slate-200">
-          <AiPanel />
-        </div>
+            <div style={{ width: rightWidth }} className="shrink-0 border-l border-slate-200">
+              <AiPanel onCollapse={toggleRightCollapsed} />
+            </div>
+          </>
+        )}
       </div>
 
       {toast ? (
@@ -230,5 +283,39 @@ export function Workspace() {
         </div>
       ) : null}
     </main>
+  );
+}
+
+/**
+ * 패널이 접혔을 때 가장자리에 남는 얇은 재열기 바.
+ * 좌측(◂→▸)/우측(◂) 방향 화살표로 다시 펼친다.
+ */
+function ReopenRail({
+  side,
+  label,
+  onExpand,
+}: {
+  side: 'left' | 'right';
+  label: string;
+  onExpand: () => void;
+}) {
+  return (
+    <div
+      className={clsx(
+        'flex w-7 shrink-0 flex-col items-center bg-slate-50 py-2',
+        side === 'left' ? 'border-r border-slate-200' : 'border-l border-slate-200',
+      )}
+    >
+      <button
+        type="button"
+        onClick={onExpand}
+        aria-expanded={false}
+        aria-label={label}
+        title={label}
+        className="rounded px-1 py-1 text-[13px] leading-none text-slate-500 hover:bg-slate-200 hover:text-slate-800"
+      >
+        {side === 'left' ? '▸' : '◂'}
+      </button>
+    </div>
   );
 }

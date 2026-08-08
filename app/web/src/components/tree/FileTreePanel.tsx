@@ -17,8 +17,8 @@ type DialogState =
   | { kind: 'rename'; id: string; current: string }
   | { kind: 'delete'; id: string };
 
-/** 좌측 280px 패널: [시험지]/[오답노트] 2섹션 트리. */
-export function FileTreePanel() {
+/** 좌측 패널: [시험지]/[오답노트] 2섹션 트리. 너비는 부모가 정하고 이 패널은 채운다. */
+export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const section = useWorkspace((state) => state.section);
   const nodes = useWorkspace((state) => state.nodes);
   const treeStatus = useWorkspace((state) => state.treeStatus);
@@ -135,7 +135,7 @@ export function FileTreePanel() {
       : null;
 
   return (
-    <aside className="flex h-full w-[280px] shrink-0 flex-col border-r border-slate-200 bg-white">
+    <aside className="flex h-full w-full min-w-0 flex-col border-r border-slate-200 bg-white">
       {/* 섹션 전환 탭 */}
       <div role="tablist" aria-label="좌측 섹션" className="flex border-b border-slate-200">
         <SectionTab active={section === 'exam'} onClick={() => void setSection('exam')}>
@@ -160,6 +160,18 @@ export function FileTreePanel() {
           >
             새로 고침
           </button>
+          {onCollapse ? (
+            <button
+              type="button"
+              onClick={onCollapse}
+              aria-expanded
+              aria-label="왼쪽 메뉴 접기"
+              title="왼쪽 메뉴 접기"
+              className="rounded px-1.5 py-0.5 text-[13px] leading-none text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+            >
+              ◂
+            </button>
+          ) : null}
         </div>
       </header>
 

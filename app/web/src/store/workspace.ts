@@ -149,6 +149,12 @@ interface UiPrefs {
   effort?: Effort;
   provider?: ProviderChoice;
   rightWidth?: number;
+  /** 좌측 파일 트리 패널 너비(px). */
+  leftWidth?: number;
+  /** 좌측 파일 트리 패널 접힘 여부. */
+  leftCollapsed?: boolean;
+  /** 우측 프롬프트 패널 접힘 여부. */
+  rightCollapsed?: boolean;
   /** 마지막으로 열어 본 시험지 파일 id(새로고침 복원용). null = 없음. */
   lastFileId?: string | null;
   /** 마지막으로 보던 전역 대화 id(새로고침 복원용). null = 없음(새 대화 초안). */
@@ -158,6 +164,10 @@ interface UiPrefs {
 export const RIGHT_MIN = 320;
 export const RIGHT_MAX = 720;
 export const RIGHT_DEFAULT = 400;
+
+export const LEFT_MIN = 200;
+export const LEFT_MAX = 480;
+export const LEFT_DEFAULT = 280;
 
 interface WorkspaceState {
   /* 환경 */
@@ -269,6 +279,9 @@ interface WorkspaceState {
 
   /* UI */
   rightWidth: number;
+  leftWidth: number;
+  leftCollapsed: boolean;
+  rightCollapsed: boolean;
   toast: ToastMessage | null;
 
   /* 액션 */
@@ -389,6 +402,9 @@ interface WorkspaceState {
   setEffort: (effort: Effort) => void;
   setProvider: (provider: ProviderChoice) => void;
   setRightWidth: (width: number) => void;
+  setLeftWidth: (width: number) => void;
+  toggleLeftCollapsed: () => void;
+  toggleRightCollapsed: () => void;
 
   showToast: (toast: ToastMessage) => void;
   dismissToast: () => void;
@@ -486,6 +502,10 @@ function normalizeProvider(
 
 function clampWidth(width: number): number {
   return Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, Math.round(width)));
+}
+
+function clampLeftWidth(width: number): number {
+  return Math.min(LEFT_MAX, Math.max(LEFT_MIN, Math.round(width)));
 }
 
 function emptyEntry(no: number): SolutionEntry {
@@ -601,6 +621,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   usageSummary: null,
 
   rightWidth: RIGHT_DEFAULT,
+  leftWidth: LEFT_DEFAULT,
+  leftCollapsed: false,
+  rightCollapsed: false,
   toast: null,
 
   hydratePrefs() {
@@ -614,6 +637,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         state.env?.subscription.available,
       ),
       rightWidth: prefs.rightWidth ? clampWidth(prefs.rightWidth) : state.rightWidth,
+      leftWidth: prefs.leftWidth ? clampLeftWidth(prefs.leftWidth) : state.leftWidth,
+      leftCollapsed: prefs.leftCollapsed ?? state.leftCollapsed,
+      rightCollapsed: prefs.rightCollapsed ?? state.rightCollapsed,
       hasLocalApiKey: readStoredApiKey() != null,
     }));
   },
@@ -2037,6 +2063,24 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     const clamped = clampWidth(width);
     set({ rightWidth: clamped });
     persistPrefs({ rightWidth: clamped });
+  },
+
+  setLeftWidth(width: number) {
+    const clamped = clampLeftWidth(width);
+    set({ leftWidth: clamped });
+    persistPrefs({ leftWidth: clamped });
+  },
+
+  toggleLeftCollapsed() {
+    const next = !get().leftCollapsed;
+    set({ leftCollapsed: next });
+    persistPrefs({ leftCollapsed: next });
+  },
+
+  toggleRightCollapsed() {
+    const next = !get().rightCollapsed;
+    set({ rightCollapsed: next });
+    persistPrefs({ rightCollapsed: next });
   },
 
   showToast(toast: ToastMessage) {
