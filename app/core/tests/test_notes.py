@@ -8,6 +8,11 @@ from conftest import make_folder, make_note, upload_test_pdf
 from fastapi.testclient import TestClient
 
 import config
+import service
+
+
+def _has_pua(text: str) -> bool:
+    return any(0xE000 <= ord(ch) <= 0xF8FF for ch in text)
 
 
 def _add_items(
@@ -160,6 +165,55 @@ def test_note_detail_exposes_crop_snapshot(client: TestClient) -> None:
     assert snapshot.read_bytes() == (
         config.crops_dir() / source_id / "q05.png"
     ).read_bytes()
+
+
+# ------------------------------------------------------- 표시용 텍스트 정리
+def test_clean_problem_text_strips_pua_control_and_leading_no() -> None:
+    raw = "3.  함수 f(x)\x00\x07 를\r\n 정의한다"
+    raw = raw + chr(0xE0FC) + chr(0xE035)  # PUA(수식편집기 흔적)도 섞는다.
+    assert _has_pua(raw)
+    cleaned = service._clean_problem_text(raw)
+    assert cleaned is not None
+    assert not _has_pua(cleaned)
+    assert "\x00" not in cleaned and "\x07" not in cleaned and "\r" not in cleaned
+    # 문두 번호("3.")는 제거된다.
+    assert not cleaned.startswith("3.")
+    assert cleaned.startswith("함수")
+    assert "정의한다" in cleaned
+
+
+def test_clean_problem_text_empty_returns_none() -> None:
+    assert service._clean_problem_text(None) is None
+    assert service._clean_problem_text("") is None
+    assert service._clean_problem_text("   \n\t ") is None
+    # PUA/제어문자만 있으면 정리 후 빈 문자열 → None.
+    assert service._clean_problem_text("") is None
+
+
+def test_note_item_includes_cleaned_text_when_source_alive(
+    client: TestClient,
+) -> None:
+    note_id = make_note(client, "노트")
+    source_id = upload_test_pdf(client)["node"]["id"]
+    _add_items(client, note_id, source_id, [1])
+
+    item = client.get(f"/api/notes/{note_id}").json()["items"][0]
+    assert "text" in item
+    assert item["text"] is not None  # 원본이 살아 있으므로 파싱 텍스트가 실린다.
+    # 이미지 모드 시험지라도 표시용 텍스트에는 PUA/제어문자가 남지 않는다.
+    assert not _has_pua(item["text"])
+    assert all(ch in ("\n", "\t") or ord(ch) >= 0x20 for ch in item["text"])
+
+
+def test_note_item_text_is_null_when_source_deleted(client: TestClient) -> None:
+    note_id = make_note(client, "노트")
+    source_id = upload_test_pdf(client)["node"]["id"]
+    _add_items(client, note_id, source_id, [1])
+    assert client.delete(f"/api/nodes/{source_id}").status_code == 200
+
+    item = client.get(f"/api/notes/{note_id}").json()["items"][0]
+    assert item["source_available"] is False
+    assert item["text"] is None
 
 
 def test_source_delete_preserves_note_items(client: TestClient) -> None:

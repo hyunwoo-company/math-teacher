@@ -367,6 +367,8 @@ class NoteItemOut(BaseModel):
     source_name: str
     problem_no: int
     crop_url: str | None = None
+    # 원본이 살아 있을 때 그 문항의 정리된 파싱 텍스트(PUA·제어문자 제거). 없으면 null.
+    text: str | None = None
     memo: str | None = None
     created_at: str
     source_available: bool

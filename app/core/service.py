@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import base64
+import re
 import shutil
 import sqlite3
+import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Final
@@ -647,7 +649,46 @@ def create_note(name: str, parent_id: str | None) -> dict[str, Any]:
     return node
 
 
-def _note_item_out(item: dict[str, Any], *, source_available: bool) -> dict[str, Any]:
+# 문두 번호("3." "12.")를 한 번만 벗겨낸다.
+_LEADING_NO_RE: Final[re.Pattern[str]] = re.compile(r"^\s*\d{1,2}\s*\.\s*")
+_PUA_START: Final[int] = 0xE000
+_PUA_END: Final[int] = 0xF8FF
+
+
+def _clean_problem_text(text: str | None) -> str | None:
+    """오답노트 표시용으로 파싱 텍스트를 정리한다.
+
+    이미지 모드 시험지는 수식이 PUA(U+E000–U+F8FF)로 깨져 들어와 그대로 두면
+    tofu(□) 로 보인다. PUA 와 제어/포맷 문자를 공백으로 치환하고 문두 번호를
+    제거한 뒤 공백을 정돈한다. 남는 내용이 없으면 None 을 돌려준다.
+
+    개행(``\\n``)/탭(``\\t``)은 문단 구조라 보존한다.
+    """
+    if not text:
+        return None
+    chars: list[str] = []
+    for ch in text:
+        if _PUA_START <= ord(ch) <= _PUA_END:
+            chars.append(" ")
+            continue
+        if ch in ("\n", "\t"):
+            chars.append(ch)
+            continue
+        if unicodedata.category(ch).startswith("C"):
+            # 그 밖의 제어/포맷/서로게이트 문자는 공백으로.
+            chars.append(" ")
+            continue
+        chars.append(ch)
+    cleaned = _LEADING_NO_RE.sub("", "".join(chars), count=1)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned or None
+
+
+def _note_item_out(
+    item: dict[str, Any], *, source_available: bool, text: str | None = None
+) -> dict[str, Any]:
     snapshot = str(item["crop_snapshot_path"] or "")
     has_snapshot = bool(snapshot) and (config.data_dir() / snapshot).is_file()
     return {
@@ -660,6 +701,7 @@ def _note_item_out(item: dict[str, Any], *, source_available: bool) -> dict[str,
             if has_snapshot
             else None
         ),
+        "text": text,
         "memo": item["memo"],
         "created_at": item["created_at"],
         "source_available": source_available,
@@ -679,11 +721,25 @@ def note_detail(note_id: str) -> dict[str, Any]:
             if item["source_node_id"] is not None
             and storage.get_node(conn, str(item["source_node_id"])) is not None
         }
+        # 원본이 살아 있는 항목만 그 문항의 파싱 텍스트를 조회·정리한다.
+        texts: dict[str, str | None] = {}
+        for item in items:
+            source_id = item["source_node_id"]
+            if source_id is None or str(source_id) not in alive:
+                continue
+            problem = storage.get_problem(
+                conn, str(source_id), int(item["problem_no"])
+            )
+            texts[str(item["id"])] = _clean_problem_text(
+                problem["text"] if problem else None
+            )
     return {
         "node": node,
         "items": [
             _note_item_out(
-                item, source_available=str(item["source_node_id"]) in alive
+                item,
+                source_available=str(item["source_node_id"]) in alive,
+                text=texts.get(str(item["id"])),
             )
             for item in items
         ],
