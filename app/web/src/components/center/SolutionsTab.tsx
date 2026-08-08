@@ -118,6 +118,7 @@ export function SolutionsTab() {
                 usdKrw={usdKrw}
                 onToggle={() => toggle(problem.no)}
                 onSolveOne={() => void startSolve([problem.no])}
+                onResolveOne={() => void startSolve([problem.no], { force: true })}
                 disabled={solve.running}
               />
             ))}
@@ -137,6 +138,7 @@ interface SolutionRowProps {
   usdKrw: number;
   onToggle: () => void;
   onSolveOne: () => void;
+  onResolveOne: () => void;
   disabled: boolean;
 }
 
@@ -149,6 +151,7 @@ function SolutionRow({
   usdKrw,
   onToggle,
   onSolveOne,
+  onResolveOne,
   disabled,
 }: SolutionRowProps) {
   const status = entry?.status ?? (problem.has_solution ? 'done' : 'empty');
@@ -255,7 +258,7 @@ function SolutionRow({
                 ) : null}
                 <button
                   type="button"
-                  onClick={onSolveOne}
+                  onClick={onResolveOne}
                   disabled={disabled}
                   className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                 >

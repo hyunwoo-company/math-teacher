@@ -240,6 +240,15 @@ interface WorkspaceState {
    */
   variants: Record<string, VariantByMode>;
 
+  /**
+   * 특정 문항(file_id + problem_no)의 저장 풀이/on-demand 풀이 캐시.
+   * key = `${fileId}::${no}`. 오답노트 인라인 "풀이 보기" 처럼 시험지가 열려 있지
+   * 않은 화면에서 그 문항의 풀이를 조회/생성/표시하는 데 쓴다.
+   * 파일별 `solutions` 맵과 달리 열린 파일과 무관하게 문항 단위로 캐시한다.
+   * done = 저장/생성 완료, running = 생성 중, empty = 조회했으나 저장분 없음.
+   */
+  problemSolutions: Record<string, SolutionEntry>;
+
   /* 채팅 */
   messages: ChatEntry[];
   chatStatus: LoadStatus;
@@ -333,8 +342,27 @@ interface WorkspaceState {
   confirmNotePrompt: () => Promise<void>;
   cancelNotePrompt: () => void;
 
-  startSolve: (problemNumbers: number[] | null) => Promise<void>;
+  /**
+   * 시험지 풀이를 스트리밍으로 시작한다.
+   * `opts.force` 가 아니면 이미 저장 풀이가 있는(status='done') 문항은 재호출하지
+   * 않는다(캐시 우선). 단일 문항 "다시 풀기" 처럼 명시적 재풀이는 force 로 부른다.
+   */
+  startSolve: (problemNumbers: number[] | null, opts?: { force?: boolean }) => Promise<void>;
   abortSolve: () => void;
+
+  /**
+   * 그 문항(file_id + problem_no)의 저장 풀이를 조회해 `problemSolutions` 에 채운다.
+   * 저장분이 있으면 그대로 표시용으로 캐시하고, 없으면 빈 상태로 둔다(풀이는 하지 않음).
+   * 이미 캐시(done/running/empty)가 있으면 재조회하지 않는다(오답노트 인라인 풀이용).
+   */
+  loadProblemSolution: (fileId: string, no: number) => Promise<void>;
+
+  /**
+   * 그 문항(file_id + problem_no)을 1회 풀어 `problemSolutions` 에 캐시한다.
+   * 이미 done(저장 풀이 존재)이면 `opts.force` 일 때만 재풀이한다. 스트리밍 중이면 no-op.
+   * 시험지가 열려 있지 않은 오답노트 인라인 "풀이 만들기" 에서 쓴다.
+   */
+  solveProblem: (fileId: string, no: number, opts?: { force?: boolean }) => Promise<void>;
 
   /**
    * 그 문항의 동일 유형 변형 문제를 스트리밍으로 생성한다.
@@ -373,6 +401,12 @@ let chatSeq = 0;
 
 /** 변형 생성 스트림 컨트롤러(`${key}::${mode}` → controller). 직렬화 대상 아님. */
 const variantControllers = new Map<string, AbortController>();
+
+/** 단일 문항 풀이 스트림 컨트롤러(`${fileId}::${no}` → controller). 직렬화 대상 아님. */
+const problemSolveControllers = new Map<string, AbortController>();
+
+/** 저장 풀이 조회 중복 방지용 진행 키 집합(`${fileId}::${no}`). 직렬화 대상 아님. */
+const problemSolutionLoading = new Set<string>();
 
 /** 변형 결과 저장 키: 시험지 문항(file_id + problem_no) 단위. */
 function variantKey(fileId: string, no: number): string {
@@ -551,6 +585,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   solutionsStatus: 'idle',
   solve: emptySolve,
   variants: {},
+  problemSolutions: {},
 
   messages: [],
   chatStatus: 'idle',
@@ -673,6 +708,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       chatTruncatedBefore: 0,
       solutions: {},
       variants: {},
+      problemSolutions: {},
     });
   },
 
@@ -1298,7 +1334,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     set({ activeTab: tab });
   },
 
-  async startSolve(problemNumbers: number[] | null) {
+  async startSolve(problemNumbers: number[] | null, opts = {}) {
+    const { force = false } = opts;
     const { selectedFileId, model, effort, provider, solve } = get();
     if (!selectedFileId) {
       get().showToast({ kind: 'error', message: '먼저 왼쪽에서 파일을 선택하세요.' });
@@ -1310,8 +1347,23 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     }
 
     const detail = get().fileDetail;
-    const targets =
+    const requested =
       problemNumbers ?? (detail ? detail.problems.map((problem) => problem.no) : null);
+    // 캐시 우선: force 가 아니면 이미 저장 풀이가 있는(done) 문항은 재호출하지 않는다.
+    const currentSolutions = get().solutions;
+    const targets =
+      force || requested == null
+        ? requested
+        : requested.filter((no) => currentSolutions[no]?.status !== 'done');
+
+    // 요청한 문항이 모두 이미 풀려 있으면(필터로 빈 목록) 재호출하지 않고 안내만 한다.
+    if (requested != null && (targets == null || targets.length === 0)) {
+      get().showToast({
+        kind: 'info',
+        message: '이미 풀이가 있습니다. 다시 풀려면 "다시 풀기" 를 눌러 주세요.',
+      });
+      return;
+    }
 
     // 뒤늦게 도착할 기존 풀이 응답이 스트리밍 결과를 덮어쓰지 못하게 한다.
     dataEpoch += 1;
@@ -1334,7 +1386,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     try {
       const stream = api.solve(
         selectedFileId,
-        { problem_numbers: problemNumbers, provider, model, effort },
+        { problem_numbers: targets, provider, model, effort },
         solveController.signal,
       );
 
@@ -1431,6 +1483,148 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       solve: { ...state.solve, running: false, aborted: true, currentNo: null },
       solutions: settleRunning(state.solutions),
     }));
+  },
+
+  async loadProblemSolution(fileId: string, no: number) {
+    const key = variantKey(fileId, no);
+    const existing = get().problemSolutions[key];
+    // 이미 조회를 마쳤거나(done/empty) 생성 중(running)이면 다시 조회하지 않는다.
+    // error 만 재조회 대상(사용자가 다시 열었을 때 복구 기회를 준다).
+    if (existing && existing.status !== 'error') return;
+    if (problemSolutionLoading.has(key)) return;
+    problemSolutionLoading.add(key);
+    try {
+      const { solutions } = await api.getSolutions(fileId);
+      const found = solutions.find((solution) => solution.no === no);
+      set((state) => ({
+        problemSolutions: {
+          ...state.problemSolutions,
+          [key]: found
+            ? {
+                no,
+                text: found.solution,
+                streamingText: '',
+                status: 'done',
+                usage: found.usage,
+                cost: found.cost,
+                truncated: found.truncated ?? false,
+                error: null,
+                createdAt: found.created_at,
+              }
+            : emptyEntry(no),
+        },
+      }));
+    } catch {
+      // 조회 실패는 error 로 남겨 재시도 여지를 준다(이미 다른 경로로 채워졌으면 보존).
+      set((state) => ({
+        problemSolutions: state.problemSolutions[key]
+          ? state.problemSolutions
+          : {
+              ...state.problemSolutions,
+              [key]: {
+                ...emptyEntry(no),
+                status: 'error',
+                error: '저장된 풀이를 불러오지 못했습니다.',
+              },
+            },
+      }));
+    } finally {
+      problemSolutionLoading.delete(key);
+    }
+  },
+
+  async solveProblem(fileId: string, no: number, opts = {}) {
+    const { force = false } = opts;
+    const key = variantKey(fileId, no);
+    const existing = get().problemSolutions[key];
+    // 캐시 규칙: 스트리밍 중이면 no-op(중복 실행 방지),
+    // 이미 done(저장 풀이 존재)이면 force 일 때만 재풀이한다.
+    if (existing?.status === 'running') return;
+    if (existing?.status === 'done' && !force) return;
+
+    const { model, effort, provider } = get();
+    const controller = new AbortController();
+    problemSolveControllers.set(key, controller);
+
+    set((state) => ({
+      problemSolutions: {
+        ...state.problemSolutions,
+        [key]: { ...emptyEntry(no), status: 'running' },
+      },
+    }));
+
+    try {
+      const stream = api.solve(
+        fileId,
+        { problem_numbers: [no], provider, model, effort },
+        controller.signal,
+      );
+      for await (const event of stream) {
+        switch (event.type) {
+          case 'delta':
+            if (event.no != null) {
+              set((state) => ({
+                problemSolutions: patchProblemSolution(state.problemSolutions, key, (entry) => ({
+                  ...entry,
+                  status: 'running',
+                  streamingText: entry.streamingText + event.text,
+                })),
+              }));
+            }
+            break;
+          case 'done':
+            if (event.no != null) {
+              set((state) => ({
+                problemSolutions: patchProblemSolution(state.problemSolutions, key, (entry) => ({
+                  ...entry,
+                  status: 'done',
+                  text: event.solution || entry.streamingText,
+                  streamingText: '',
+                  usage: event.usage,
+                  cost: event.cost,
+                  truncated: event.truncated,
+                  error: null,
+                  createdAt: new Date().toISOString(),
+                })),
+                totals: accumulate(state.totals, event.usage, event.cost),
+              }));
+            }
+            break;
+          case 'error':
+            if (event.no != null) {
+              set((state) => ({
+                problemSolutions: patchProblemSolution(state.problemSolutions, key, (entry) => ({
+                  ...entry,
+                  status: 'error',
+                  error: event.message,
+                })),
+              }));
+            }
+            break;
+          default:
+            break;
+        }
+      }
+    } catch (error) {
+      if (!isAbortError(error)) {
+        const message = toUserMessage(error);
+        set((state) => ({
+          problemSolutions: patchProblemSolution(state.problemSolutions, key, (entry) => ({
+            ...entry,
+            status: 'error',
+            error: message,
+          })),
+        }));
+      }
+    } finally {
+      if (problemSolveControllers.get(key) === controller) {
+        problemSolveControllers.delete(key);
+      }
+      // 스트림이 done 없이 끊겼으면(중단/네트워크) running 을 정리한다.
+      set((state) => ({ problemSolutions: settleProblemSolution(state.problemSolutions, key) }));
+      // 단일 문항 풀이도 쿼터를 소비하므로 사용량 요약을 갱신한다(실패는 조용히 무시).
+      void get().loadUsageSummary();
+    }
   },
 
   async generateVariant(fileId: string, no: number, mode: VariantMode, opts = {}) {
@@ -1892,6 +2086,36 @@ function patchVariant(
   const current = variants[key]?.[mode];
   if (!current) return variants;
   return { ...variants, [key]: { ...variants[key], [mode]: update(current) } };
+}
+
+/** `problemSolutions[key]` 항목을 갱신한다(없으면 그대로 둔다). */
+function patchProblemSolution(
+  map: Record<string, SolutionEntry>,
+  key: string,
+  update: (entry: SolutionEntry) => SolutionEntry,
+): Record<string, SolutionEntry> {
+  const current = map[key];
+  if (!current) return map;
+  return { ...map, [key]: update(current) };
+}
+
+/** 단일 문항 풀이 스트림이 done 없이 끊겼을 때 running 상태를 정리한다. */
+function settleProblemSolution(
+  map: Record<string, SolutionEntry>,
+  key: string,
+): Record<string, SolutionEntry> {
+  const current = map[key];
+  if (!current || current.status !== 'running') return map;
+  const next: SolutionEntry = current.streamingText
+    ? {
+        ...current,
+        status: 'done',
+        text: current.streamingText,
+        streamingText: '',
+        createdAt: current.createdAt ?? new Date().toISOString(),
+      }
+    : { ...current, status: 'empty' };
+  return { ...map, [key]: next };
 }
 
 /** 스트림이 done 없이 끝났을 때 그 mode 의 streaming 상태를 정리한다. */

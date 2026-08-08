@@ -4,6 +4,7 @@ import { useState } from 'react';
 import clsx from 'clsx';
 import { api } from '@/lib/api';
 import { VariantPanel } from '@/components/center/VariantPanel';
+import { InlineSolutionPanel } from '@/components/center/InlineSolutionPanel';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { ConfirmDialog } from '@/components/ui/Dialog';
 import { formatDate } from '@/lib/format';
@@ -133,23 +134,63 @@ function NoteItemCard({
   onDelete: () => void;
 }) {
   const [imgFailed, setImgFailed] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
+  const cropUrl = api.noteCropUrl(noteId, item.id);
   return (
     <li className="flex flex-col gap-2 rounded border border-slate-200 bg-white p-2">
       <div className="flex gap-3">
       {imgFailed ? (
-        <div className="flex h-24 w-20 shrink-0 items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[10px] text-slate-400">
+        <div className="flex h-32 w-24 shrink-0 items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[10px] text-slate-400">
           미리보기 없음
         </div>
       ) : (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={api.noteCropUrl(noteId, item.id)}
-          alt={`${item.source_name} ${item.problem_no}번`}
-          loading="lazy"
-          onError={() => setImgFailed(true)}
-          className="h-24 w-20 shrink-0 rounded border border-slate-200 bg-white object-contain"
-        />
+        <button
+          type="button"
+          onClick={() => setZoomed(true)}
+          title="클릭하면 문제를 크게 봅니다"
+          className="shrink-0 cursor-zoom-in rounded border border-slate-200 bg-white p-0"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={cropUrl}
+            alt={`${item.source_name} ${item.problem_no}번`}
+            loading="lazy"
+            onError={() => setImgFailed(true)}
+            className="h-32 w-24 rounded object-contain"
+          />
+        </button>
       )}
+
+      {zoomed && !imgFailed ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setZoomed(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${item.source_name} ${item.problem_no}번 문제 이미지`}
+            className="relative max-h-[90vh] max-w-[90vw] overflow-auto rounded-lg border border-slate-200 bg-white p-2 shadow-xl"
+          >
+            <button
+              type="button"
+              onClick={() => setZoomed(false)}
+              aria-label="닫기"
+              className="absolute right-2 top-2 rounded border border-slate-300 bg-white/90 px-2 py-0.5 text-[12px] text-slate-600 hover:bg-slate-50"
+            >
+              닫기
+            </button>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={cropUrl}
+              alt={`${item.source_name} ${item.problem_no}번`}
+              className="max-h-[86vh] max-w-[86vw] object-contain"
+            />
+          </div>
+        </div>
+      ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-1.5">
@@ -189,9 +230,16 @@ function NoteItemCard({
       </div>
       </div>
 
-      {/* 원본 시험지가 살아 있는 항목만 그 문항(file_id + problem_no)으로 변형 생성한다. */}
+      {/* 원본 시험지가 살아 있는 항목만 그 문항(file_id + problem_no)으로 풀이/변형한다. */}
       {item.source_available && item.source_node_id ? (
-        <VariantPanel fileId={item.source_node_id} no={item.problem_no} className="mt-0" />
+        <>
+          <InlineSolutionPanel
+            fileId={item.source_node_id}
+            no={item.problem_no}
+            className="mt-0"
+          />
+          <VariantPanel fileId={item.source_node_id} no={item.problem_no} className="mt-0" />
+        </>
       ) : null}
     </li>
   );
