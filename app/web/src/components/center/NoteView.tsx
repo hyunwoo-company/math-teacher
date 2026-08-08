@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import clsx from 'clsx';
 import { api } from '@/lib/api';
+import { VariantPanel } from '@/components/center/VariantPanel';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { ConfirmDialog } from '@/components/ui/Dialog';
 import { formatDate } from '@/lib/format';
@@ -133,7 +134,8 @@ function NoteItemCard({
 }) {
   const [imgFailed, setImgFailed] = useState(false);
   return (
-    <li className="flex gap-3 rounded border border-slate-200 bg-white p-2">
+    <li className="flex flex-col gap-2 rounded border border-slate-200 bg-white p-2">
+      <div className="flex gap-3">
       {imgFailed ? (
         <div className="flex h-24 w-20 shrink-0 items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[10px] text-slate-400">
           미리보기 없음
@@ -185,6 +187,12 @@ function NoteItemCard({
           </button>
         </div>
       </div>
+      </div>
+
+      {/* 원본 시험지가 살아 있는 항목만 그 문항(file_id + problem_no)으로 변형 생성한다. */}
+      {item.source_available && item.source_node_id ? (
+        <VariantPanel fileId={item.source_node_id} no={item.problem_no} className="mt-0" />
+      ) : null}
     </li>
   );
 }

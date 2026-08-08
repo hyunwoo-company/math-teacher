@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import { MathText } from '@/components/MathText';
 import { plainPreview } from '@/lib/math-text';
 import { ProblemCrop } from '@/components/center/ProblemCrop';
+import { VariantPanel } from '@/components/center/VariantPanel';
 import { CopyButton } from '@/components/ui/CopyButton';
 import { EmptyState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { costAmounts, formatDateTime, formatInt, formatKrw, formatUsd, totalTokens } from '@/lib/format';
@@ -253,6 +254,8 @@ function SolutionRow({
               </div>
             ) : null}
           </div>
+
+          <VariantPanel fileId={fileId} no={problem.no} />
         </div>
       ) : null}
     </li>

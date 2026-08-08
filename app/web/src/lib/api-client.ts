@@ -14,6 +14,7 @@ import type {
   EnvResponse,
   FileDetail,
   NoteDetail,
+  ProviderChoice,
   Section,
   Solution,
   SolutionsResponse,
@@ -24,6 +25,7 @@ import type {
   TreeResponse,
   Usage,
   UsageSummaryResponse,
+  VariantMode,
 } from '@/types/api';
 
 export interface ApiClient {
@@ -98,4 +100,17 @@ export interface ApiClient {
 
   solve(id: string, body: SolveRequest, signal?: AbortSignal): AsyncIterable<StreamEvent>;
   chat(id: string, body: ChatRequest, signal?: AbortSignal): AsyncIterable<StreamEvent>;
+
+  /**
+   * 동일 유형 변형 문제를 생성한다(계약:
+   * `POST /api/files/{fileId}/problems/{no}/variant`). solve/chat 과 동일한
+   * SSE(delta/done) 를 흘리며, done 본문(`solution`)에 최종 마크다운이 담긴다.
+   */
+  generateVariant(
+    fileId: string,
+    no: number,
+    mode: VariantMode,
+    opts?: { provider?: ProviderChoice; model?: string; effort?: string },
+    signal?: AbortSignal,
+  ): AsyncIterable<StreamEvent>;
 }

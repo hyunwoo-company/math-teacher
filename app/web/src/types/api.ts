@@ -323,6 +323,25 @@ export interface ChatRequest {
   problem_no?: number | null;
 }
 
+/**
+ * 변형 문제 생성 모드(곧 배포될 계약).
+ *  - number            : 숫자만 바꾼 동일 유형
+ *  - condition         : 조건(설정/상황)을 바꾼 동일 유형
+ *  - number_condition  : 숫자·조건 모두 바꾼 동일 유형
+ */
+export type VariantMode = 'number' | 'condition' | 'number_condition';
+
+/**
+ * `POST /api/files/{id}/problems/{no}/variant` 요청 본문(계약).
+ * provider/model/effort 는 서버 기본값을 쓸 수 있어 optional 이다.
+ */
+export interface VariantRequest {
+  mode: VariantMode;
+  provider?: ProviderChoice;
+  model?: string;
+  effort?: string;
+}
+
 /* ── SSE 이벤트 (5항) ────────────────────────────────────────────── */
 
 export interface SolveStartEvent {

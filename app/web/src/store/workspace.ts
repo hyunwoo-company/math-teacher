@@ -45,6 +45,7 @@ import {
   type TreeNode,
   type Usage,
   type UsageSummaryResponse,
+  type VariantMode,
 } from '@/types/api';
 
 export type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -91,6 +92,25 @@ export interface ChatEntry {
   savingSolution?: boolean;
   /** 이 답변을 그 문항 풀이로 저장 완료(피드백 표시용). */
   savedAsSolution?: boolean;
+}
+
+/**
+ * 한 번의 변형 문제 생성 결과. 한 문항에서 여러 번 생성할 수 있으므로
+ * `variants[key]` 에 배열로 쌓인다(key = `${fileId}::${no}`).
+ */
+export interface VariantEntry {
+  /** 생성 인스턴스별 고유 id. */
+  id: string;
+  mode: VariantMode;
+  /** 확정 본문(done 이후). 스트리밍 중에는 빈 문자열. */
+  text: string;
+  /** 스트리밍 중 누적되는 부분 텍스트. */
+  streamingText: string;
+  status: 'running' | 'done' | 'error';
+  usage: Usage | null;
+  cost: Cost | null;
+  error: string | null;
+  createdAt: string;
 }
 
 export interface SolveProgress {
@@ -209,6 +229,13 @@ interface WorkspaceState {
   solutionsStatus: LoadStatus;
   solve: SolveProgress;
 
+  /**
+   * 변형 문제 생성 결과. key = `${fileId}::${no}`.
+   * 시험지 풀이 탭과 오답노트가 같은 문항(file_id+problem_no)을 참조하므로
+   * 이 키 하나로 두 화면이 상태를 공유한다.
+   */
+  variants: Record<string, VariantEntry[]>;
+
   /* 채팅 */
   messages: ChatEntry[];
   chatStatus: LoadStatus;
@@ -305,6 +332,12 @@ interface WorkspaceState {
   startSolve: (problemNumbers: number[] | null) => Promise<void>;
   abortSolve: () => void;
 
+  /**
+   * 그 문항의 동일 유형 변형 문제를 스트리밍으로 생성한다.
+   * 결과는 `variants[`${fileId}::${no}`]` 에 새 항목으로 추가된다(여러 번 호출 가능).
+   */
+  generateVariant: (fileId: string, no: number, mode: VariantMode) => Promise<void>;
+
   sendChat: (message: string) => Promise<void>;
   handleNoteAddIntent: (
     intent: { problemNos: number[]; noteQuery: string | null },
@@ -326,6 +359,15 @@ interface WorkspaceState {
 let solveController: AbortController | null = null;
 let chatController: AbortController | null = null;
 let chatSeq = 0;
+
+/** 변형 생성 스트림 컨트롤러(생성 인스턴스 id → controller). 직렬화 대상 아님. */
+const variantControllers = new Map<string, AbortController>();
+let variantSeq = 0;
+
+/** 변형 결과 저장 키: 시험지 문항(file_id + problem_no) 단위. */
+function variantKey(fileId: string, no: number): string {
+  return `${fileId}::${no}`;
+}
 
 /**
  * 배경 로딩(기존 풀이 / 대화 이력) 유효성 토큰.
@@ -498,6 +540,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   solutions: {},
   solutionsStatus: 'idle',
   solve: emptySolve,
+  variants: {},
 
   messages: [],
   chatStatus: 'idle',
@@ -619,6 +662,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       activeConversationId: null,
       chatTruncatedBefore: 0,
       solutions: {},
+      variants: {},
     });
   },
 
@@ -1379,6 +1423,95 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     }));
   },
 
+  async generateVariant(fileId: string, no: number, mode: VariantMode) {
+    const { model, effort, provider } = get();
+    const key = variantKey(fileId, no);
+    variantSeq += 1;
+    const entryId = `variant-${variantSeq}`;
+    const controller = new AbortController();
+    variantControllers.set(entryId, controller);
+
+    const newEntry: VariantEntry = {
+      id: entryId,
+      mode,
+      text: '',
+      streamingText: '',
+      status: 'running',
+      usage: null,
+      cost: null,
+      error: null,
+      createdAt: new Date().toISOString(),
+    };
+    set((state) => ({
+      variants: { ...state.variants, [key]: [...(state.variants[key] ?? []), newEntry] },
+    }));
+
+    try {
+      const stream = api.generateVariant(
+        fileId,
+        no,
+        mode,
+        { provider, model, effort },
+        controller.signal,
+      );
+      for await (const event of stream) {
+        switch (event.type) {
+          case 'delta':
+            set((state) => ({
+              variants: patchVariant(state.variants, key, entryId, (entry) => ({
+                ...entry,
+                status: 'running',
+                streamingText: entry.streamingText + event.text,
+              })),
+            }));
+            break;
+          case 'done':
+            set((state) => ({
+              variants: patchVariant(state.variants, key, entryId, (entry) => ({
+                ...entry,
+                status: 'done',
+                text: event.solution || entry.streamingText,
+                streamingText: '',
+                usage: event.usage,
+                cost: event.cost,
+                error: null,
+              })),
+              totals: accumulate(state.totals, event.usage, event.cost),
+            }));
+            break;
+          case 'error':
+            set((state) => ({
+              variants: patchVariant(state.variants, key, entryId, (entry) => ({
+                ...entry,
+                status: 'error',
+                error: event.message,
+              })),
+            }));
+            break;
+          default:
+            break;
+        }
+      }
+    } catch (error) {
+      if (!isAbortError(error)) {
+        const message = toUserMessage(error);
+        set((state) => ({
+          variants: patchVariant(state.variants, key, entryId, (entry) => ({
+            ...entry,
+            status: 'error',
+            error: message,
+          })),
+        }));
+      }
+    } finally {
+      variantControllers.delete(entryId);
+      // 스트림이 done 없이 끊겼으면(중단/네트워크) running 을 정리한다.
+      set((state) => ({ variants: settleVariant(state.variants, key, entryId) }));
+      // 변형 생성도 쿼터를 소비하므로 사용량 요약을 갱신한다(실패는 조용히 무시).
+      void get().loadUsageSummary();
+    }
+  },
+
   async sendChat(message: string) {
     const trimmed = message.trim();
     if (trimmed === '') return;
@@ -1724,6 +1857,35 @@ function patchEntry(
   return { ...solutions, [no]: update(current) };
 }
 
+function patchVariant(
+  variants: Record<string, VariantEntry[]>,
+  key: string,
+  entryId: string,
+  update: (entry: VariantEntry) => VariantEntry,
+): Record<string, VariantEntry[]> {
+  const list = variants[key] ?? [];
+  return { ...variants, [key]: list.map((entry) => (entry.id === entryId ? update(entry) : entry)) };
+}
+
+/** 스트림이 done 없이 끝났을 때 그 인스턴스의 running 상태를 정리한다. */
+function settleVariant(
+  variants: Record<string, VariantEntry[]>,
+  key: string,
+  entryId: string,
+): Record<string, VariantEntry[]> {
+  const list = variants[key];
+  if (!list) return variants;
+  let changed = false;
+  const next = list.map((entry) => {
+    if (entry.id !== entryId || entry.status !== 'running') return entry;
+    changed = true;
+    return entry.streamingText
+      ? { ...entry, status: 'done' as const, text: entry.streamingText, streamingText: '' }
+      : { ...entry, status: 'error' as const, error: entry.error ?? '중단했습니다.' };
+  });
+  return changed ? { ...variants, [key]: next } : variants;
+}
+
 function resetTargets(
   solutions: Record<number, SolutionEntry>,
   targets: number[] | null,
@@ -1777,4 +1939,13 @@ function accumulate(totals: SessionTotals, usage: Usage | null, cost: Cost | nul
 }
 
 /* 테스트에서 쓰는 내부 헬퍼 노출 */
-export const __internal = { patchEntry, resetTargets, settleRunning, accumulate, emptyEntry };
+export const __internal = {
+  patchEntry,
+  resetTargets,
+  settleRunning,
+  accumulate,
+  emptyEntry,
+  patchVariant,
+  settleVariant,
+  variantKey,
+};

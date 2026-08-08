@@ -5,7 +5,8 @@
  * 구성: 2단 중첩 폴더 + PDF 파일 1개 + 문제 22개.
  */
 
-import type { EnvResponse, Problem, TreeNode } from '@/types/api';
+import { VARIANT_MODE_LABEL } from '@/lib/variant';
+import type { EnvResponse, Problem, TreeNode, VariantMode } from '@/types/api';
 
 /** 목 모드에서 PDF 뷰어가 열 파일. `public/mock/sample.pdf` (실제 시험지 사본). */
 export const MOCK_PDF_PATH = '/mock/sample.pdf';
@@ -301,6 +302,38 @@ export function mockSolutionText(no: number): string {
     '\\[ \\frac{a}{b} = \\frac{' + no + '}{' + (no + 1) + '} \\]',
     '',
     `따라서 \\(x^2 + 1 > 0\\) 이 항상 성립하고, 답은 **${(no % 5) + 1}번** 이다.`,
+  ].join('\n');
+}
+
+/**
+ * 목 변형 문제 본문. 계약대로 `## 문제 / ## 정답 / ## 풀이` 마크다운을 만들고
+ * mode 별로 내용이 달라지도록 한다. inline `\(...\)` 과 display `\[...\]` 를 모두 포함한다.
+ */
+export function mockVariantText(no: number, mode: VariantMode): string {
+  const label = VARIANT_MODE_LABEL[mode];
+  const base = no + 3;
+  const coefficient = mode === 'number' || mode === 'number_condition' ? base : no;
+  const conditionLine =
+    mode === 'condition' || mode === 'number_condition'
+      ? `단, 이번에는 \\(x \\ge 0\\) 인 범위에서만 생각한다(조건 변형).`
+      : `정의역은 실수 전체로 둔다.`;
+  const answer = ((coefficient % 5) + 1);
+  return [
+    `## 문제`,
+    `${no}번과 같은 유형의 **${label}** 문제입니다.`,
+    ``,
+    `이차함수 \\(f(x) = x^2 + ${coefficient}\\) 에 대하여 다음 물음에 답하시오. ${conditionLine}`,
+    `\\[ f(x) = x^2 + ${coefficient} \\]`,
+    ``,
+    `## 정답`,
+    `**${answer}번**`,
+    ``,
+    `## 풀이`,
+    `**1단계.** 판별식을 계산한다.`,
+    `\\[ D = 0^2 - 4 \\cdot 1 \\cdot ${coefficient} = -${4 * coefficient} \\]`,
+    `\\(D < 0\\) 이므로 실근이 없다.`,
+    ``,
+    `**2단계.** 따라서 \\(f(x) > 0\\) 이 항상 성립하고, 답은 **${answer}번** 이다.`,
   ].join('\n');
 }
 

@@ -23,6 +23,7 @@ import {
   mockChatReply,
   mockCropUrl,
   mockSolutionText,
+  mockVariantText,
 } from '@/lib/mock/data';
 import type { ApiClient } from '@/lib/api-client';
 import type {
@@ -41,6 +42,7 @@ import type {
   NoteDetail,
   NoteItem,
   Problem,
+  ProviderChoice,
   Section,
   Solution,
   SolutionsResponse,
@@ -51,6 +53,7 @@ import type {
   TreeResponse,
   Usage,
   UsageSummaryResponse,
+  VariantMode,
 } from '@/types/api';
 
 /** 문항별 스레드 키. null = 시험지 전역. */
@@ -406,6 +409,29 @@ async function* convChatScript(
       truncated_before: truncatedBefore,
     },
     delayMs: 40,
+  };
+}
+
+async function* variantScript(
+  no: number,
+  mode: VariantMode,
+  opts: { provider?: string; model?: string },
+): AsyncGenerator<MockSseEvent, void, void> {
+  const subscription = isSubscriptionCall(opts.provider ?? 'subscription');
+  const model = opts.model ?? 'claude-opus-5';
+  const text = mockVariantText(no, mode);
+
+  for (const piece of chunkText(text, 24)) {
+    yield { event: 'delta', data: { no, text: piece }, delayMs: 18 };
+  }
+
+  const usage = usageFor(no);
+  const cost = subscription ? null : costFor(model, usage);
+
+  yield {
+    event: 'done',
+    data: { no, solution: text, usage, cost, truncated: false },
+    delayMs: 30,
   };
 }
 
@@ -870,5 +896,18 @@ export const mockClient: ApiClient = {
     history.push({ role: 'user', content: body.message, created_at: nowIso() });
     state.chats.set(key, history);
     return streamFrom(chatScript(id, body), signal);
+  },
+
+  generateVariant(
+    fileId: string,
+    no: number,
+    mode: VariantMode,
+    opts?: { provider?: ProviderChoice; model?: string; effort?: string },
+    signal?: AbortSignal,
+  ) {
+    requireAuth();
+    // 원본 시험지가 존재하는지 확인한다(오답노트에서 원본이 지워진 항목 방어).
+    findNode(fileId);
+    return streamFrom(variantScript(no, mode, opts ?? {}), signal);
   },
 };

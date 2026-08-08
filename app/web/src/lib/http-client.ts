@@ -23,6 +23,7 @@ import type {
   EnvResponse,
   FileDetail,
   NoteDetail,
+  ProviderChoice,
   Section,
   Solution,
   SolutionsResponse,
@@ -33,6 +34,7 @@ import type {
   TreeResponse,
   Usage,
   UsageSummaryResponse,
+  VariantMode,
 } from '@/types/api';
 
 /** 브라우저에 보관한 API 키(웹 모드). 서버에 저장하지 않는다. */
@@ -361,5 +363,20 @@ export const httpClient: ApiClient = {
 
   chat(id: string, body: ChatRequest, signal?: AbortSignal) {
     return openStream(`/api/files/${encodeURIComponent(id)}/chat`, body, signal);
+  },
+
+  generateVariant(
+    fileId: string,
+    no: number,
+    mode: VariantMode,
+    opts?: { provider?: ProviderChoice; model?: string; effort?: string },
+    signal?: AbortSignal,
+  ) {
+    // provider/model/effort 는 undefined 면 JSON 에서 빠져 서버 기본값을 쓴다(계약).
+    return openStream(
+      `/api/files/${encodeURIComponent(fileId)}/problems/${no}/variant`,
+      { mode, provider: opts?.provider, model: opts?.model, effort: opts?.effort },
+      signal,
+    );
   },
 };
