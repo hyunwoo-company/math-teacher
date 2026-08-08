@@ -212,32 +212,32 @@ function NoteItemCard({
 
       {zoomed && !imgFailed ? (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${item.source_name} ${item.problem_no}번 문제 이미지`}
+          className="fixed inset-0 z-50 flex flex-col items-center gap-2 bg-slate-900/70 p-4"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) setZoomed(false);
           }}
         >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label={`${item.source_name} ${item.problem_no}번 문제 이미지`}
-            className="relative max-h-[92vh] max-w-[92vw] overflow-auto rounded-lg border border-slate-200 bg-white p-2 shadow-xl"
-          >
+          {/* 닫기는 이미지 위가 아니라 상단 바(어두운 여백)에 두어 문제를 가리지 않는다. */}
+          <div className="flex w-full shrink-0 justify-end">
             <button
               type="button"
               onClick={() => setZoomed(false)}
               aria-label="닫기"
-              className="absolute right-2 top-2 rounded border border-slate-300 bg-white/90 px-2 py-0.5 text-[12px] text-slate-600 hover:bg-slate-50"
+              className="rounded border border-white/50 bg-white/90 px-3 py-1 text-[12px] font-medium text-slate-700 hover:bg-white"
             >
               닫기
             </button>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={cropUrl}
-              alt={`${item.source_name} ${item.problem_no}번`}
-              className="block h-auto max-h-[88vh] w-auto max-w-[88vw] object-contain"
-            />
           </div>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={cropUrl}
+            alt={`${item.source_name} ${item.problem_no}번`}
+            onMouseDown={(event) => event.stopPropagation()}
+            className="min-h-0 w-auto max-w-full flex-1 rounded bg-white object-contain shadow-xl"
+          />
         </div>
       ) : null}
 
