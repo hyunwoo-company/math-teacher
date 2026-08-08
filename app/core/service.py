@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import config
+import docx_export
 import extractor
 import storage
 from errors import ApiError, bad_request, not_found
@@ -399,6 +400,54 @@ def crop_path(node_id: str, no: int) -> Path:
             "파일을 다시 업로드해 추출을 재실행하세요.",
         )
     return path
+
+
+def _display_exam_name(name: str) -> str:
+    """파일명에서 뒤쪽 `.pdf` 확장자를 한 번 벗겨낸 표시용 이름.
+
+    내보내기 파일명이 `[...].pdf_문제.docx` 처럼 되지 않게 한다.
+    """
+    stripped = name.strip()
+    if stripped.lower().endswith(".pdf"):
+        stripped = stripped[:-4].strip()
+    return stripped or name.strip()
+
+
+def problems_docx(node_id: str) -> tuple[bytes, str]:
+    """시험지 문항 크롭 이미지를 '문제만' 담은 DOCX 바이트와 표시용 이름을 돌려준다.
+
+    문항을 **번호 순서대로** 순회하며 크롭 PNG 를 삽입한다. 풀이/변형/정답은
+    넣지 않는다(문제만).
+
+    Returns:
+        (docx 바이트, 표시용 시험지 이름(뒤 `.pdf` 제거)).
+
+    Raises:
+        ApiError: 파일이 아니거나 없을 때(400/404), 내보낼 문항/이미지가 없을 때(400).
+    """
+    with storage.transaction() as conn:
+        node = require_file_node(conn, node_id)
+        problems = storage.list_problems(conn, node_id)
+    if not problems:
+        raise bad_request(
+            "no_problems",
+            "내보낼 문항이 없습니다.",
+            "문항이 추출된 시험지인지 확인하세요.",
+        )
+    images: list[tuple[int, Path]] = []
+    for problem in sorted(problems, key=lambda item: int(item["no"])):
+        crop = config.data_dir() / str(problem["crop_path"])
+        if crop.is_file():
+            images.append((int(problem["no"]), crop))
+    if not images:
+        raise bad_request(
+            "no_crops",
+            "내보낼 문항 이미지가 없습니다.",
+            "파일을 다시 업로드해 추출을 재실행하세요.",
+        )
+    display_name = _display_exam_name(str(node["name"]))
+    content = docx_export.build_problems_docx(display_name, images)
+    return content, display_name
 
 
 def solutions(node_id: str) -> list[dict[str, Any]]:
@@ -877,6 +926,7 @@ __all__ = [
     "list_tree",
     "note_crop_path",
     "note_detail",
+    "problems_docx",
     "raw_pdf_path",
     "register_pdf",
     "rename_conversation",

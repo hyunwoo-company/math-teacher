@@ -16,6 +16,7 @@ import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Final, Literal
+from urllib.parse import quote
 
 from fastapi import (
     Body,
@@ -31,7 +32,12 @@ from fastapi import (
 )
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 
 import ai_service
 import config
@@ -131,6 +137,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # 다운로드 파일명을 프런트가 읽을 수 있게 노출한다(교차 오리진 배포 대비).
+    expose_headers=["Content-Disposition"],
+)
+
+# DOCX(Word) MIME. '문제만' 내보내기 응답에 쓴다.
+DOCX_MEDIA_TYPE: Final[str] = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
 
 # 접속 비밀번호가 필요 없는 경로(게이트 표시 판단·헬스체크·로그인 자체).
@@ -140,12 +153,17 @@ _AUTH_EXEMPT: Final[frozenset[str]] = frozenset(
 
 
 def _is_binary_asset(path: str) -> bool:
-    """브라우저가 헤더 없이 직접 로드하는 바이너리 GET 경로인지.
+    """브라우저가 헤더 없이 직접 로드/다운로드하는 바이너리 GET 경로인지.
 
     `/api/files/{id}/raw`, `/api/files/{id}/problems/{no}/crop`,
-    `/api/notes/{id}/items/{item_id}/crop` 만 해당한다.
+    `/api/notes/{id}/items/{item_id}/crop`, `/api/files/{id}/export.docx` 가 해당한다.
+    이 경로들만 `?access=<비번>` 쿼리 인증을 허용한다(그 외는 헤더 전용).
     """
-    return path.endswith("/raw") or path.endswith("/crop")
+    return (
+        path.endswith("/raw")
+        or path.endswith("/crop")
+        or path.endswith("/export.docx")
+    )
 
 
 @app.middleware("http")
@@ -432,6 +450,37 @@ def read_file_raw(node_id: NodeId) -> FileResponse:
 def read_problem_crop(node_id: NodeId, no: Annotated[int, Path(ge=1)]) -> FileResponse:
     """문항별 크롭 PNG."""
     return FileResponse(service.crop_path(node_id, no), media_type="image/png")
+
+
+def _attachment_disposition(filename: str) -> str:
+    """RFC5987(UTF-8)로 인코딩한 첨부 `Content-Disposition` 헤더 값.
+
+    한글 파일명이 헤더에서 깨지지 않게 `filename*=UTF-8''<pct-encoded>` 형식을 쓴다.
+    """
+    encoded = quote(filename, safe="")
+    return f"attachment; filename*=UTF-8''{encoded}"
+
+
+@app.get(
+    "/api/files/{node_id}/export.docx",
+    response_class=Response,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def export_file_docx(node_id: NodeId) -> Response:
+    """문항 크롭 이미지만 담은 '문제' 시험지 DOCX 를 내려준다(풀이/변형/정답 제외).
+
+    브라우저가 직접 GET 으로 내려받는 바이너리 라우트라, 미들웨어에서 `?access=`
+    쿼리 인증도 허용한다(`_is_binary_asset`). 문항이 없으면 400 이다.
+    """
+    content, exam_name = await run_in_threadpool(service.problems_docx, node_id)
+    return Response(
+        content=content,
+        media_type=DOCX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": _attachment_disposition(f"{exam_name}_문제.docx")
+        },
+    )
 
 
 # ------------------------------------------------------------------- 풀이

@@ -3,6 +3,7 @@ uvicorn[standard]
 python-multipart
 pymupdf
 pillow
+python-docx
 anthropic
 # 구독 모드(데스크톱 전용). 웹 배포에서는 없어도 동작한다.
 claude-agent-sdk

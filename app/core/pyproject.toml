@@ -9,6 +9,7 @@ dependencies = [
     "python-multipart",
     "pymupdf",
     "pillow",
+    "python-docx",
     "anthropic",
     "claude-agent-sdk",
 ]
@@ -45,7 +46,7 @@ mypy_path = "."
 exclude = "(^|/)data/"
 
 [[tool.mypy.overrides]]
-module = ["fitz", "extractor", "pricing"]
+module = ["fitz", "extractor", "pricing", "docx", "docx.shared"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
