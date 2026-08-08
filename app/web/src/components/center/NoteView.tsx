@@ -5,7 +5,6 @@ import clsx from 'clsx';
 import { api } from '@/lib/api';
 import { VariantPanel } from '@/components/center/VariantPanel';
 import { InlineSolutionPanel } from '@/components/center/InlineSolutionPanel';
-import { MathText } from '@/components/MathText';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { ConfirmDialog } from '@/components/ui/Dialog';
 import { formatDate } from '@/lib/format';
@@ -76,7 +75,7 @@ export function NoteView() {
             icon="📝"
           />
         ) : (
-          <ul className="flex flex-col gap-3">
+          <ul className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {items.map((item) => (
               <NoteItemCard
                 key={item.id}
@@ -188,42 +187,28 @@ function NoteItemCard({
         </div>
       </div>
 
-      {/* 하단: 좌=크롭 이미지, 우=문제 텍스트. 좁은 화면에선 세로로 쌓인다. */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,44%)_1fr]">
-        <div className="min-w-0">
-          {imgFailed ? (
-            <div className="flex h-40 w-full items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[11px] text-slate-400">
-              미리보기 없음
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setZoomed(true)}
-              title="클릭하면 문제를 크게 봅니다"
-              className="block w-full cursor-zoom-in overflow-hidden rounded border border-slate-200 bg-white p-0"
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={cropUrl}
-                alt={`${item.source_name} ${item.problem_no}번`}
-                loading="lazy"
-                onError={() => setImgFailed(true)}
-                className="block h-auto w-full max-h-[50vh] rounded object-contain"
-              />
-            </button>
-          )}
+      {/* 문제 크롭 이미지(클릭 시 확대). 파싱 텍스트는 원본 수식폰트가 깨져 미리보기에서 제외. */}
+      {imgFailed ? (
+        <div className="flex h-28 w-full items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[11px] text-slate-400">
+          미리보기 없음
         </div>
-
-        <div className="min-w-0">
-          {item.text ? (
-            <MathText className="text-[13px] leading-relaxed text-slate-700">
-              {item.text}
-            </MathText>
-          ) : (
-            <p className="text-[12px] italic text-slate-400">본문 미리보기 없음</p>
-          )}
-        </div>
-      </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setZoomed(true)}
+          title="클릭하면 문제를 크게 봅니다"
+          className="block w-full cursor-zoom-in overflow-hidden rounded border border-slate-200 bg-white p-0"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={cropUrl}
+            alt={`${item.source_name} ${item.problem_no}번`}
+            loading="lazy"
+            onError={() => setImgFailed(true)}
+            className="block h-auto w-full max-h-64 rounded object-contain"
+          />
+        </button>
+      )}
 
       {zoomed && !imgFailed ? (
         <div
