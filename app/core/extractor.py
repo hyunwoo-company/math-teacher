@@ -46,6 +46,25 @@ DEFAULT_MAX_EDGE_PX: Final[int] = 1568  # Anthropic 이미지 장변 상한
 # 앵커는 칼럼 왼쪽 끝에 붙어 있다. 본문 속 "1." 오탐을 걸러내는 들여쓰기 허용치(pt).
 DEFAULT_ANCHOR_INDENT_TOL: Final[float] = 30.0
 
+# --- 유형 문제집 폴백 (additive) ---------------------------------------------
+# 유형 문제집은 문제 번호가 "1." 이 아니라 "001" "002" 처럼 3자리 zero-padded 로,
+# 본문(9~11pt)보다 훨씬 큰 볼드 글리프(관측: DINCondensed-Bold, size≈21)로 찍힌다.
+# 게다가 한 번호가 "00"+"1" 두 스팬으로 쪼개져 같은 줄(같은 y0)에 인접해 나온다.
+# 시험지 경로(`find_anchors`)에서 앵커를 못 찾을 때만(회귀 방지) 이 글리프를
+# 병합해 앵커를 만든다. 유형 헤더(작은 "01"/"02")·꼬리말 페이지번호는 폰트/크기가
+# 달라 자연 배제된다.
+TYPE_ANCHOR_FONT_HINT: Final[str] = "DINCondensed"
+# 본문 텍스트(≈9~11pt)·작은 참조 글리프(≈10pt)와 확실히 구분되는 크기 하한.
+TYPE_ANCHOR_MIN_SIZE: Final[float] = 15.0
+# 같은 번호로 볼 "같은 줄" 판정 허용 y 오차(pt).
+TYPE_ANCHOR_Y_TOL: Final[float] = 3.0
+# 같은 번호로 병합할 인접 글리프 최대 가로 간격(pt). 넘으면(칼럼 경계 등) 끊는다.
+TYPE_ANCHOR_X_GAP: Final[float] = 6.0
+# 시험지 앵커가 이 개수 미만일 때만 유형 문제집 폴백을 시도한다.
+TYPE_FALLBACK_MIN_ANCHORS: Final[int] = 2
+# 병합 결과를 유형 번호(001~999)로 인정하는 패턴.
+_TYPE_NO_RE: Final[re.Pattern[str]] = re.compile(r"^\d{1,3}$")
+
 _WHITE_LEVEL: Final[int] = 250  # 이 이상 밝으면 여백으로 본다
 _TRIM_PAD_PX: Final[int] = 6
 
@@ -281,6 +300,90 @@ def find_anchors(
     return [candidates[i] for i in keep]
 
 
+def _merge_type_number_glyphs(
+    glyphs: list[tuple[float, float, float, str]],
+    *,
+    y_tol: float = TYPE_ANCHOR_Y_TOL,
+    x_gap: float = TYPE_ANCHOR_X_GAP,
+) -> list[tuple[int, float, float]]:
+    """같은 줄에 쪼개진 유형 번호 글리프를 병합해 (번호, x0, y0) 로 돌려준다.
+
+    유형 문제집은 "001" 이 "00"+"1" 두 스팬으로 분리돼 같은 y0 에 인접해 나온다.
+    y 가 거의 같고 가로로 붙은(간격 <= x_gap) 글리프만 한 번호로 잇는다. 가로
+    간격이 크면(칼럼 경계 등) 다른 번호로 끊어, 같은 줄 다른 칼럼의 두 번호가
+    엉키지 않게 한다. 병합 텍스트에서 숫자만 남겨 정수로 파싱한다("001"->1).
+    """
+    ordered = sorted(glyphs, key=lambda g: (round(g[1], 1), g[0]))
+    groups: list[dict[str, Any]] = []
+    for x0, y0, x1, text in ordered:
+        if (
+            groups
+            and abs(groups[-1]["y0"] - y0) <= y_tol
+            and (x0 - groups[-1]["x1"]) <= x_gap
+        ):
+            groups[-1]["text"] += text
+            groups[-1]["x1"] = x1
+        else:
+            groups.append({"x0": x0, "y0": y0, "x1": x1, "text": text})
+
+    result: list[tuple[int, float, float]] = []
+    for group in groups:
+        digits = re.sub(r"\D", "", group["text"])
+        if not digits or _TYPE_NO_RE.match(digits) is None:
+            continue
+        result.append((int(digits), group["x0"], group["y0"]))
+    return result
+
+
+def find_type_workbook_anchors(doc: fitz.Document) -> list[Anchor]:
+    """유형 문제집("001" 형식) 앵커를 읽는 순서대로 찾는다 (best-effort 폴백).
+
+    시험지 앵커(`find_anchors`)를 못 찾을 때만 호출한다. 큰 볼드 번호 글리프를
+    폰트명(`TYPE_ANCHOR_FONT_HINT`)·크기(`TYPE_ANCHOR_MIN_SIZE`)로 추려 같은 줄에서
+    병합하고, 2단 조판을 좌/우로 나눠 번호가 오름차순이 되도록 정리한다. 본문이
+    특수폰트라 텍스트를 믿을 수 없으므로 이 경로가 잡히면 호출부에서 mode 를
+    image 로 강제한다.
+
+    시험지 경로와 달리 들여쓰기(indent) 필터는 쓰지 않는다. 유형 번호 글리프는
+    폰트·크기만으로 충분히 신뢰할 수 있고, 제본 여백 때문에 칼럼 시작 x 가
+    페이지마다 흔들려(예: 42.5 vs 56.7pt) indent 임계에 걸리면 정상 번호가
+    통째로 누락되기 때문이다.
+    """
+    candidates: list[Anchor] = []
+    for page_no in range(doc.page_count):
+        page = doc[page_no]
+        content = content_rect(page)
+        glyphs: list[tuple[float, float, float, str]] = []
+        for block in page.get_text("dict").get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    if TYPE_ANCHOR_FONT_HINT not in span.get("font", ""):
+                        continue
+                    if float(span.get("size", 0.0)) < TYPE_ANCHOR_MIN_SIZE:
+                        continue
+                    x0, y0, x1, _ = span["bbox"]
+                    glyphs.append(
+                        (float(x0), float(y0), float(x1), span.get("text", ""))
+                    )
+
+        page_candidates: list[Anchor] = []
+        for no, x0, y0 in _merge_type_number_glyphs(glyphs):
+            # 머리말/꼬리말 밴드 밖 글리프는 문제 번호가 아니다.
+            if y0 < content.y0 or y0 > content.y1:
+                continue
+            column = _classify_column(x0, page)
+            page_candidates.append(
+                Anchor(no=no, page=page_no, column=column, x0=x0, y0=y0)
+            )
+        page_candidates.sort(key=lambda a: (0 if a.column == "left" else 1, a.y0, a.x0))
+        candidates.extend(page_candidates)
+
+    keep = _longest_increasing([a.no for a in candidates])
+    return [candidates[i] for i in keep]
+
+
 def _lines_in_bbox(lines: list[TextLine], bbox: fitz.Rect) -> str:
     """bbox 안에 중심이 들어오는 라인들을 읽는 순서로 이어붙인다."""
     inside = [
@@ -393,6 +496,16 @@ def extract_problems(
         )
 
         anchors = find_anchors(doc, indent_tol=indent_tol)
+        # 시험지 경로에서 앵커를 사실상 못 찾았을 때만 유형 문제집 폴백을 시도한다
+        # (additive: 시험지 결과가 충분하면 이 블록은 아무것도 하지 않는다).
+        if len(anchors) < TYPE_FALLBACK_MIN_ANCHORS:
+            type_anchors = find_type_workbook_anchors(doc)
+            if len(type_anchors) > len(anchors):
+                anchors = type_anchors
+                # 본문이 특수폰트라 텍스트 신뢰 불가 → 자동 모드일 때 이미지 강제.
+                # (PUA 감지가 ASCII 코드점이라 과소평가해 'text' 로 오판하는 문제)
+                if mode == "auto":
+                    resolved_mode = "image"
         lines_cache: dict[int, list[TextLine]] = {}
         content_cache: dict[int, fitz.Rect] = {}
 
