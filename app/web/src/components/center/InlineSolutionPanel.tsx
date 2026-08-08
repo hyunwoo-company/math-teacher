@@ -23,29 +23,32 @@ interface InlineSolutionPanelProps {
  * 풀이를 노트 화면 안에서 바로 확인한다.
  *
  * 캐시 UX(agy 사용량 낭비 방지):
- * - 접힘이 기본. "풀이 보기" 를 눌러야 열린다.
+ * - 접힘이 기본. "풀이 보기" 를 눌러야 열린다. 열린 뒤 헤더를 다시 누르면 접힌다(토글).
  * - 열리면 저장 풀이만 조회한다(자동 풀이 없음): 저장분이 있으면 그대로 표시,
  *   없으면 "풀이 만들기" 버튼을 보여준다.
  * - "풀이 만들기" 로만 1회 풀이하고 캐시한다. 이후엔 재호출 없이 캐시를 보여준다.
  * - 결과는 스토어 `problemSolutions[`${fileId}::${no}`]` 에 캐시되어 재열람 시 즉시 표시된다.
+ *   접었다 다시 열어도 재호출 없이 캐시를 즉시 보여준다.
  */
 export function InlineSolutionPanel({ fileId, no, disabled = false, className }: InlineSolutionPanelProps) {
   const [open, setOpen] = useState(false);
 
   return (
     <div className={clsx('mt-3 rounded border border-slate-200 bg-slate-50/70 p-2.5', className)}>
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        disabled={disabled}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-[12px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+      >
+        <span aria-hidden>📖</span> {open ? '풀이 닫기' : '풀이 보기'}
+      </button>
       {open ? (
-        <InlineSolutionBody fileId={fileId} no={no} disabled={disabled} />
-      ) : (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          disabled={disabled}
-          className="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-[12px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-        >
-          <span aria-hidden>📖</span> 풀이 보기
-        </button>
-      )}
+        <div className="mt-2.5">
+          <InlineSolutionBody fileId={fileId} no={no} disabled={disabled} />
+        </div>
+      ) : null}
     </div>
   );
 }

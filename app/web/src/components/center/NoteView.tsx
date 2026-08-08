@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { api } from '@/lib/api';
 import { VariantPanel } from '@/components/center/VariantPanel';
@@ -136,11 +136,30 @@ function NoteItemCard({
   const [imgFailed, setImgFailed] = useState(false);
   const [zoomed, setZoomed] = useState(false);
   const cropUrl = api.noteCropUrl(noteId, item.id);
+
+  // 라이트박스는 Esc 로도 닫는다(배경/닫기 버튼과 동일).
+  useEffect(() => {
+    if (!zoomed) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setZoomed(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [zoomed]);
+
   return (
     <li className="flex flex-col gap-2 rounded border border-slate-200 bg-white p-2">
-      <div className="flex gap-3">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[13px] font-semibold text-slate-800">{item.problem_no}번</span>
+        {item.source_available ? null : <InlineBadge tone="amber">원본 삭제됨</InlineBadge>}
+        <span className="ml-auto min-w-0 truncate text-[12px] text-slate-500" title={item.source_name}>
+          {item.source_name}
+        </span>
+      </div>
+
+      {/* 문제 이미지: 카드 폭에 맞춰 크게(자연 비율). 클릭하면 라이트박스로 확대. */}
       {imgFailed ? (
-        <div className="flex h-32 w-24 shrink-0 items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[10px] text-slate-400">
+        <div className="flex h-40 w-full items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[11px] text-slate-400">
           미리보기 없음
         </div>
       ) : (
@@ -148,7 +167,7 @@ function NoteItemCard({
           type="button"
           onClick={() => setZoomed(true)}
           title="클릭하면 문제를 크게 봅니다"
-          className="shrink-0 cursor-zoom-in rounded border border-slate-200 bg-white p-0"
+          className="block w-full cursor-zoom-in overflow-hidden rounded border border-slate-200 bg-white p-0"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
@@ -156,14 +175,14 @@ function NoteItemCard({
             alt={`${item.source_name} ${item.problem_no}번`}
             loading="lazy"
             onError={() => setImgFailed(true)}
-            className="h-32 w-24 rounded object-contain"
+            className="block h-auto w-full max-h-[60vh] rounded object-contain"
           />
         </button>
       )}
 
       {zoomed && !imgFailed ? (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) setZoomed(false);
           }}
@@ -172,7 +191,7 @@ function NoteItemCard({
             role="dialog"
             aria-modal="true"
             aria-label={`${item.source_name} ${item.problem_no}번 문제 이미지`}
-            className="relative max-h-[90vh] max-w-[90vw] overflow-auto rounded-lg border border-slate-200 bg-white p-2 shadow-xl"
+            className="relative max-h-[92vh] max-w-[92vw] overflow-auto rounded-lg border border-slate-200 bg-white p-2 shadow-xl"
           >
             <button
               type="button"
@@ -186,48 +205,36 @@ function NoteItemCard({
             <img
               src={cropUrl}
               alt={`${item.source_name} ${item.problem_no}번`}
-              className="max-h-[86vh] max-w-[86vw] object-contain"
+              className="block h-auto max-h-[88vh] w-auto max-w-[88vw] object-contain"
             />
           </div>
         </div>
       ) : null}
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-1.5">
-          <span className="text-[13px] font-semibold text-slate-800">{item.problem_no}번</span>
-          {item.source_available ? null : <InlineBadge tone="amber">원본 삭제됨</InlineBadge>}
-        </div>
-        <p className="mt-0.5 truncate text-[12px] text-slate-500" title={item.source_name}>
-          {item.source_name}
-        </p>
-        {item.memo ? (
-          <p className="mt-1 line-clamp-2 text-[12px] text-slate-600">{item.memo}</p>
-        ) : null}
+      {item.memo ? <p className="line-clamp-2 text-[12px] text-slate-600">{item.memo}</p> : null}
 
-        <div className="mt-auto flex items-center gap-2 pt-1">
-          <button
-            type="button"
-            onClick={onOpenSource}
-            disabled={!onOpenSource}
-            title={onOpenSource ? '원본 시험지의 이 문항으로 이동' : '원본 시험지가 삭제되었습니다'}
-            className={clsx(
-              'rounded border px-2 py-0.5 text-[11px]',
-              onOpenSource
-                ? 'border-blue-300 bg-white text-blue-700 hover:bg-blue-50'
-                : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400',
-            )}
-          >
-            원본 바로가기
-          </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            className="ml-auto rounded border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-50"
-          >
-            빼기
-          </button>
-        </div>
-      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onOpenSource}
+          disabled={!onOpenSource}
+          title={onOpenSource ? '원본 시험지의 이 문항으로 이동' : '원본 시험지가 삭제되었습니다'}
+          className={clsx(
+            'rounded border px-2 py-0.5 text-[11px]',
+            onOpenSource
+              ? 'border-blue-300 bg-white text-blue-700 hover:bg-blue-50'
+              : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400',
+          )}
+        >
+          원본 바로가기
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          className="ml-auto rounded border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-50"
+        >
+          빼기
+        </button>
       </div>
 
       {/* 원본 시험지가 살아 있는 항목만 그 문항(file_id + problem_no)으로 풀이/변형한다. */}

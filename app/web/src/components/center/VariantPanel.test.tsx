@@ -133,6 +133,37 @@ describe('오답노트의 변형 문제 만들기', () => {
     expect(screen.getByRole('button', { name: '복사' })).toBeInTheDocument();
   }, 45_000);
 
+  it('변형 문제 만들기/닫기 토글 — 닫아도 캐시가 남아 다시 열면 재생성 없이 즉시 표시한다', async () => {
+    const user = userEvent.setup();
+    await useWorkspace.getState().loadEnv();
+    await useWorkspace.getState().loadTree('note');
+    await useWorkspace.getState().selectNote(MOCK_NOTE_ID);
+    await useWorkspace.getState().addProblemsToNote(MOCK_NOTE_ID, MOCK_FILE_ID, [4]);
+
+    render(<NoteView />);
+    const openButton = await screen.findByRole('button', { name: '변형 문제 만들기' });
+    expect(openButton).toHaveAttribute('aria-expanded', 'false');
+
+    await user.click(openButton);
+    // 열리면 첫 탭(숫자)이 자동 생성되어 캐시된다.
+    await waitFor(() => expect(modeDone(4, 'number')).toBe(true), { timeout: 20_000 });
+
+    // 열림 상태: 라벨/aria 가 바뀐다.
+    const closeButton = screen.getByRole('button', { name: '변형 닫기' });
+    expect(closeButton).toHaveAttribute('aria-expanded', 'true');
+
+    // 닫으면 탭이 사라진다.
+    const spy = vi.spyOn(api, 'generateVariant');
+    await user.click(closeButton);
+    expect(screen.queryByRole('tab', { name: '숫자 변형' })).toBeNull();
+
+    // 다시 열어도 캐시라 재생성 호출이 없다.
+    await user.click(screen.getByRole('button', { name: '변형 문제 만들기' }));
+    expect(await screen.findByRole('tab', { name: '숫자 변형' })).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(spy.mock.calls.some((call) => call[2] === 'number')).toBe(false);
+  }, 45_000);
+
   it('원본이 삭제된 항목에는 변형 컨트롤을 숨긴다', () => {
     const node: TreeNode = {
       id: MOCK_NOTE_ID,

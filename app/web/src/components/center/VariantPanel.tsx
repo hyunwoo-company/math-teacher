@@ -30,6 +30,7 @@ interface VariantPanelProps {
  * - 패널이 열리면 첫 탭(숫자)을 자동 생성한다.
  * - 처음 여는 탭은 전환 시 생성(lazy), 이미 생성된 탭은 즉시 캐시를 보여준다.
  * - 각 탭의 "다시 생성"으로만 재호출한다(그 외 자동 재생성 없음).
+ * - 헤더를 다시 누르면 접힌다(토글). 접어도 캐시는 스토어에 남아, 다시 열면 재호출 없이 즉시 표시된다.
  */
 export function VariantPanel({ fileId, no, disabled = false, className }: VariantPanelProps) {
   // 접힘이 기본. "변형 문제 만들기" 를 눌러야 탭이 열리고 생성이 시작된다.
@@ -38,18 +39,20 @@ export function VariantPanel({ fileId, no, disabled = false, className }: Varian
 
   return (
     <div className={clsx('mt-3 rounded border border-slate-200 bg-slate-50/70 p-2.5', className)}>
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        disabled={disabled}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-[12px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+      >
+        <span aria-hidden>✨</span> {open ? '변형 닫기' : '변형 문제 만들기'}
+      </button>
       {open ? (
-        <VariantTabs fileId={fileId} no={no} disabled={disabled} />
-      ) : (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          disabled={disabled}
-          className="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-[12px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-        >
-          <span aria-hidden>✨</span> 변형 문제 만들기
-        </button>
-      )}
+        <div className="mt-2.5">
+          <VariantTabs fileId={fileId} no={no} disabled={disabled} />
+        </div>
+      ) : null}
     </div>
   );
 }
