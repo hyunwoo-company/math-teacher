@@ -7,16 +7,22 @@ import type {
   AddNoteItemsResult,
   ChatHistoryResponse,
   ChatRequest,
+  Conversation,
+  ConversationChatRequest,
+  ConversationMessagesResponse,
+  ConversationsResponse,
   EnvResponse,
   FileDetail,
   NoteDetail,
   Section,
+  Solution,
   SolutionsResponse,
   SolveRequest,
   StreamEvent,
   ThreadsResponse,
   TreeNode,
   TreeResponse,
+  Usage,
   UsageSummaryResponse,
 } from '@/types/api';
 
@@ -49,10 +55,33 @@ export interface ApiClient {
   cropUrl(id: string, no: number): string;
 
   getSolutions(id: string): Promise<SolutionsResponse>;
+  /**
+   * 주어진 내용을 그 문항의 풀이로 저장(upsert)한다(계약:
+   * `POST /api/files/{id}/problems/{no}/solution`). 대화 답변을 "풀이" 탭에 반영할 때 쓴다.
+   */
+  saveSolutionContent(
+    id: string,
+    no: number,
+    content: string,
+    usage?: Usage | null,
+    source?: string | null,
+  ): Promise<Solution>;
   /** problemNo 로 스레드를 나눈다. 생략/ null 이면 시험지 전역 스레드. */
   getChatHistory(id: string, problemNo?: number | null): Promise<ChatHistoryResponse>;
   getChatThreads(id: string): Promise<ThreadsResponse>;
   clearChat(id: string, problemNo?: number | null): Promise<void>;
+
+  /* ── 전역(파일 무관) 자유 대화 ── */
+  createConversation(title?: string | null): Promise<Conversation>;
+  getConversations(): Promise<ConversationsResponse>;
+  renameConversation(id: string, title: string): Promise<Conversation>;
+  deleteConversation(id: string): Promise<void>;
+  getConversationMessages(id: string): Promise<ConversationMessagesResponse>;
+  conversationChat(
+    id: string,
+    body: ConversationChatRequest,
+    signal?: AbortSignal,
+  ): AsyncIterable<StreamEvent>;
 
   /* ── 오답노트 (계약 6-A) ── */
   createNote(name: string, parentId: string | null): Promise<TreeNode>;

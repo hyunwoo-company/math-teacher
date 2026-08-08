@@ -65,21 +65,21 @@ describe('새로고침 복원', () => {
     expect(useWorkspace.getState().openKind).toBe('none');
   }, 15_000);
 
-  it('마지막으로 보던 스레드도 함께 복원한다', async () => {
+  it('마지막으로 보던 대화도 새로고침 후 복원한다', async () => {
     await useWorkspace.getState().loadEnv();
     await useWorkspace.getState().loadTree();
-    await useWorkspace.getState().selectFile(MOCK_FILE_ID);
-    // 6번 스레드에서 대화를 남긴다(목 서버에 스레드가 생긴다).
-    await useWorkspace.getState().openThread(6);
-    await useWorkspace.getState().sendChat('6번 질문');
-    expect(readPrefs().lastThreadNo).toBe(6);
+    // 전역 대화를 하나 만들고 메시지를 남긴다(목 서버에 대화가 생긴다).
+    await useWorkspace.getState().sendChat('복원될 질문');
+    const convId = useWorkspace.getState().activeConversationId;
+    expect(convId).not.toBeNull();
+    expect(readPrefs().lastConversationId).toBe(convId);
 
     refreshStore();
     await useWorkspace.getState().loadEnv();
-    await useWorkspace.getState().loadTree();
+    await useWorkspace.getState().bootstrapConversations();
 
-    await waitUntil(() => useWorkspace.getState().selectedFileId === MOCK_FILE_ID);
-    await waitUntil(() => useWorkspace.getState().activeThreadNo === 6);
+    await waitUntil(() => useWorkspace.getState().activeConversationId === convId);
+    expect(useWorkspace.getState().messages.some((m) => m.content === '복원될 질문')).toBe(true);
   }, 30_000);
 
   it('사용자가 이미 다른 파일을 연 상태면 복원이 덮어쓰지 않는다', async () => {

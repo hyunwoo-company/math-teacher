@@ -16,16 +16,22 @@ import type {
   AddNoteItemsResult,
   ChatHistoryResponse,
   ChatRequest,
+  Conversation,
+  ConversationChatRequest,
+  ConversationMessagesResponse,
+  ConversationsResponse,
   EnvResponse,
   FileDetail,
   NoteDetail,
   Section,
+  Solution,
   SolutionsResponse,
   SolveRequest,
   StreamEvent,
   ThreadsResponse,
   TreeNode,
   TreeResponse,
+  Usage,
   UsageSummaryResponse,
 } from '@/types/api';
 
@@ -250,6 +256,19 @@ export const httpClient: ApiClient = {
     return requestJson<SolutionsResponse>(`/api/files/${encodeURIComponent(id)}/solutions`);
   },
 
+  saveSolutionContent(
+    id: string,
+    no: number,
+    content: string,
+    usage: Usage | null = null,
+    source: string | null = 'chat',
+  ) {
+    return requestJson<Solution>(
+      `/api/files/${encodeURIComponent(id)}/problems/${no}/solution`,
+      jsonBody({ content, usage, source }),
+    );
+  },
+
   getChatHistory(id: string, problemNo?: number | null) {
     const query = problemNo != null ? `?problem_no=${problemNo}` : '';
     return requestJson<ChatHistoryResponse>(`/api/files/${encodeURIComponent(id)}/chat${query}`);
@@ -262,6 +281,40 @@ export const httpClient: ApiClient = {
   async clearChat(id: string, problemNo?: number | null) {
     const query = problemNo != null ? `?problem_no=${problemNo}` : '';
     await requestVoid(`/api/files/${encodeURIComponent(id)}/chat${query}`, { method: 'DELETE' });
+  },
+
+  async createConversation(title: string | null = null) {
+    // 계약: POST /api/conversations {title?} → ConversationOut (201). title 생략 시 서버 기본값.
+    return requestJson<Conversation>(
+      '/api/conversations',
+      jsonBody(title != null && title.trim() !== '' ? { title } : {}),
+    );
+  },
+
+  getConversations() {
+    return requestJson<ConversationsResponse>('/api/conversations');
+  },
+
+  renameConversation(id: string, title: string) {
+    return requestJson<Conversation>(`/api/conversations/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    });
+  },
+
+  async deleteConversation(id: string) {
+    await requestVoid(`/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+
+  getConversationMessages(id: string) {
+    return requestJson<ConversationMessagesResponse>(
+      `/api/conversations/${encodeURIComponent(id)}/messages`,
+    );
+  },
+
+  conversationChat(id: string, body: ConversationChatRequest, signal?: AbortSignal) {
+    return openStream(`/api/conversations/${encodeURIComponent(id)}/chat`, body, signal);
   },
 
   async createNote(name: string, parentId: string | null) {

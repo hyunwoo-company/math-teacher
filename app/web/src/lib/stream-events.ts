@@ -98,7 +98,8 @@ export function toStreamEvent(message: SSEMessage): StreamEvent {
       return {
         type: 'done',
         no: readNumber(data, 'no'),
-        solution: readString(data, 'solution') ?? '',
+        // 파일 채팅/풀이는 `solution`, 전역 대화 채팅은 `content` 로 본문을 준다.
+        solution: readString(data, 'solution') ?? readString(data, 'content') ?? '',
         usage: readUsage(data, 'usage'),
         cost: readCost(data, 'cost'),
         truncated: data['truncated'] === true,

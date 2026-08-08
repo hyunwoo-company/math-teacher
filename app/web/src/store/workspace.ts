@@ -33,8 +33,8 @@ import { uploadTargetLabel } from '@/lib/upload-target';
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
-  type ChatMessage,
-  type ChatThread,
+  type Conversation,
+  type ConversationMessage,
   type Cost,
   type Effort,
   type EnvResponse,
@@ -85,6 +85,12 @@ export interface ChatEntry {
   createdAt: string;
   /** 이 메시지가 특정 문제를 컨텍스트로 걸고 보낸 것이면 그 번호. */
   problemNo: number | null;
+  /** 이 메시지가 컨텍스트로 건 시험지 file_id(문항 첨부 시). "N번 풀이로 저장" 대상. */
+  fileId: string | null;
+  /** "N번 풀이로 저장" 진행 중. */
+  savingSolution?: boolean;
+  /** 이 답변을 그 문항 풀이로 저장 완료(피드백 표시용). */
+  savedAsSolution?: boolean;
 }
 
 export interface SolveProgress {
@@ -121,8 +127,8 @@ interface UiPrefs {
   rightWidth?: number;
   /** 마지막으로 열어 본 시험지 파일 id(새로고침 복원용). null = 없음. */
   lastFileId?: string | null;
-  /** 마지막으로 보던 스레드의 problem_no(null = 전역 스레드). */
-  lastThreadNo?: number | null;
+  /** 마지막으로 보던 전역 대화 id(새로고침 복원용). null = 없음(새 대화 초안). */
+  lastConversationId?: string | null;
 }
 
 export const RIGHT_MIN = 320;
@@ -186,12 +192,12 @@ interface WorkspaceState {
   /** "학생 노트가 없습니다. 만들까요?" 확인 UI. */
   notePrompt: NotePrompt | null;
 
-  /* 문항별 스레드 (계약 6-B) */
-  threads: ChatThread[];
-  /** 현재 열려 있는 스레드의 problem_no. null = 전역 스레드. */
-  activeThreadNo: number | null;
+  /* 전역(파일 무관) 자유 대화 (ChatGPT식) */
+  conversations: Conversation[];
+  /** 현재 열려 있는 대화 id. null = 아직 대화가 없는 "새 대화" 초안. */
+  activeConversationId: string | null;
   /** 백엔드가 이력을 잘라 보냈으면 생략된 이전 메시지 수. */
-  threadTruncatedBefore: number;
+  chatTruncatedBefore: number;
 
   /* 중앙 패널 */
   activeTab: CenterTab;
@@ -243,8 +249,8 @@ interface WorkspaceState {
   setSection: (section: Section) => Promise<void>;
   loadTree: (section?: Section) => Promise<void>;
   /**
-   * 새로고침 복원: prefs.lastFileId 가 트리에 실제 존재하면 그 파일을 자동으로 열고
-   * prefs.lastThreadNo 스레드를 복원한다. 이미 다른 파일을 열었으면(경합) 아무것도 안 한다.
+   * 새로고침 복원: prefs.lastFileId 가 트리에 실제 존재하면 그 파일을 자동으로 연다.
+   * 이미 다른 파일을 열었으면(경합) 아무것도 안 한다.
    */
   restoreLastOpen: () => Promise<void>;
   toggleExpanded: (id: string) => void;
@@ -267,11 +273,21 @@ interface WorkspaceState {
   focusProblem: (no: number) => void;
   setActiveTab: (tab: CenterTab) => void;
 
-  /* 스레드 */
-  openThread: (problemNo: number | null) => Promise<void>;
-  loadThreads: () => Promise<void>;
-  /** 스레드(문항별 또는 전역) 하나를 삭제한다. 활성 스레드였으면 화면도 비운다. */
-  deleteThread: (problemNo: number | null) => Promise<void>;
+  /* 전역 대화 (ChatGPT식) */
+  /** 대화 목록을 새로 불러온다(updated_at 내림차순). 실패는 조용히 무시. */
+  loadConversations: () => Promise<void>;
+  /** 부트스트랩: 목록을 불러오고 마지막으로 보던 대화(prefs.lastConversationId)를 복원한다. */
+  bootstrapConversations: () => Promise<void>;
+  /** 대화를 열어 메시지를 복원한다. */
+  openConversation: (id: string) => Promise<void>;
+  /** "+ 새 대화": 활성 대화를 비운다(실제 생성은 첫 전송 시). */
+  newConversation: () => void;
+  /** 대화 이름을 바꾼다. */
+  renameConversation: (id: string, title: string) => Promise<void>;
+  /** 대화를 삭제한다. 활성 대화였으면 최신 대화로 폴백(없으면 새 대화 초안). */
+  deleteConversation: (id: string) => Promise<void>;
+  /** assistant 메시지(문항 컨텍스트 첨부)를 그 문항의 풀이로 저장한다. */
+  saveSolutionFromMessage: (messageId: string) => Promise<void>;
 
   /** agy 쿼터 사용량 요약을 새로 조회한다. 실패는 조용히 무시(세션 값만 표시). */
   loadUsageSummary: () => Promise<void>;
@@ -296,7 +312,6 @@ interface WorkspaceState {
     availableNos: readonly number[],
   ) => Promise<void>;
   abortChat: () => void;
-  clearChat: () => Promise<void>;
 
   setModel: (model: string) => void;
   setEffort: (effort: Effort) => void;
@@ -363,7 +378,7 @@ function writePrefs(prefs: UiPrefs): void {
 
 /**
  * prefs 를 **머지**로 저장한다. 항상 기존 값을 읽어 부분 필드만 갱신하므로
- * 서로 다른 저장부(model/effort/provider/rightWidth/lastFileId/lastThreadNo)가
+ * 서로 다른 저장부(model/effort/provider/rightWidth/lastFileId/lastConversationId)가
  * 서로를 지우지 않는다.
  */
 function persistPrefs(partial: UiPrefs): void {
@@ -403,21 +418,20 @@ function emptyEntry(no: number): SolutionEntry {
 
 let entrySeq = 0;
 
-/** 서버 이력 메시지 → 화면 엔트리 매퍼. 스레드의 problem_no 를 붙인다. */
-function chatMessageToEntry(problemNo: number | null) {
-  return (message: ChatMessage): ChatEntry => {
-    entrySeq += 1;
-    return {
-      id: `history-${entrySeq}`,
-      role: message.role,
-      content: message.content,
-      streaming: false,
-      usage: message.usage ?? null,
-      cost: message.cost ?? null,
-      error: null,
-      createdAt: message.created_at,
-      problemNo,
-    };
+/** 서버 대화 메시지 → 화면 엔트리 매퍼. file_id/problem_no 첨부 컨텍스트를 붙인다. */
+function conversationMessageToEntry(message: ConversationMessage): ChatEntry {
+  entrySeq += 1;
+  return {
+    id: `history-${entrySeq}`,
+    role: message.role,
+    content: message.content,
+    streaming: false,
+    usage: message.usage ?? null,
+    cost: message.cost ?? null,
+    error: null,
+    createdAt: message.created_at,
+    problemNo: message.problem_no,
+    fileId: message.file_id,
   };
 }
 
@@ -436,6 +450,7 @@ function pushSystemMessage(set: SetState, content: string): void {
     error: null,
     createdAt: new Date().toISOString(),
     problemNo: null,
+    fileId: null,
   };
   set((state) => ({ messages: [...state.messages, entry] }));
 }
@@ -473,9 +488,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   noteError: null,
   notePrompt: null,
 
-  threads: [],
-  activeThreadNo: null,
-  threadTruncatedBefore: 0,
+  conversations: [],
+  activeConversationId: null,
+  chatTruncatedBefore: 0,
 
   activeTab: 'pdf',
   focusRequest: null,
@@ -568,8 +583,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       await api.login(trimmed);
       writeStoredPassword(trimmed);
       set({ accessOk: true, authError: null, authChecking: false });
-      // 게이트를 넘었으니 트리를 (다시) 불러온다.
+      // 게이트를 넘었으니 트리와 대화 목록을 (다시) 불러온다.
       void get().loadTree();
+      void get().bootstrapConversations();
       return true;
     } catch (error) {
       // 401 = 비번이 틀림. 그 외(네트워크 등)는 원인 메시지를 그대로 보여준다.
@@ -584,8 +600,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
 
   logout() {
     writeStoredPassword(null);
-    // 복원 대상도 비운다(다음 로그인 때 이전 파일을 자동으로 열지 않게).
-    persistPrefs({ lastFileId: null, lastThreadNo: null });
+    // 복원 대상도 비운다(다음 로그인 때 이전 파일/대화를 자동으로 열지 않게).
+    persistPrefs({ lastFileId: null, lastConversationId: null });
     // 게이트 뒤에 남은 민감한 화면 상태를 비운다. (게이트는 전체화면으로 덮이지만 안전하게)
     set({
       accessOk: false,
@@ -599,6 +615,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       selectedNoteId: null,
       noteDetail: null,
       messages: [],
+      conversations: [],
+      activeConversationId: null,
+      chatTruncatedBefore: 0,
       solutions: {},
     });
   },
@@ -685,22 +704,11 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     // 트리에 시험지 파일로 실제 존재해야 연다. 삭제됐으면 stale prefs 를 정리하고 중단.
     const node = get().nodes.find((candidate) => candidate.id === fileId);
     if (!node || node.type !== 'file' || (node.section ?? 'exam') !== 'exam') {
-      persistPrefs({ lastFileId: null, lastThreadNo: null });
+      persistPrefs({ lastFileId: null });
       return;
     }
 
     await get().selectFile(fileId);
-    // 그 사이 사용자가 다른 파일을 열었으면 스레드 복원은 생략(selectFile 이 이미 무시됨).
-    if (get().selectedFileId !== fileId) return;
-
-    const threadNo = prefs.lastThreadNo ?? null;
-    if (threadNo == null) return; // 전역 스레드는 selectFile 이 이미 열었다.
-
-    // 그 스레드가 아직 남아 있으면 복원하고, 없으면 전역(null)으로 폴백한다.
-    await get().loadThreads();
-    if (get().selectedFileId !== fileId) return;
-    const exists = get().threads.some((thread) => thread.problem_no === threadNo);
-    await get().openThread(exists ? threadNo : null);
   },
 
   focusNode(id: string | null) {
@@ -825,11 +833,10 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
           fileStatus: 'idle',
           selectedProblemNo: null,
           solutions: {},
-          messages: [],
           solve: emptySolve,
         });
         // 삭제된 파일을 복원하지 않도록 stale prefs 를 정리한다.
-        persistPrefs({ lastFileId: null, lastThreadNo: null });
+        persistPrefs({ lastFileId: null });
       }
       const { selectedNoteId } = get();
       if (selectedNoteId && removed.has(selectedNoteId)) {
@@ -886,9 +893,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
 
   async selectFile(id: string) {
     if (get().openKind === 'exam' && get().selectedFileId === id) return;
-    // 진행 중인 스트림은 파일이 바뀌면 의미가 없다.
+    // 진행 중인 풀이 스트림은 파일이 바뀌면 의미가 없다.
+    // (대화는 파일과 무관한 전역 세션이므로 파일을 바꿔도 유지한다.)
     get().abortSolve();
-    get().abortChat();
     const epoch = ++dataEpoch;
 
     set({
@@ -903,16 +910,11 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       selectedProblemNo: null,
       solutions: {},
       solutionsStatus: 'loading',
-      messages: [],
-      chatStatus: 'loading',
       solve: emptySolve,
       focusRequest: null,
-      threads: [],
-      activeThreadNo: null,
-      threadTruncatedBefore: 0,
     });
-    // 새로고침 복원용: 마지막으로 연 파일을 기록한다. 초기 스레드는 전역(null).
-    persistPrefs({ lastFileId: id, lastThreadNo: null });
+    // 새로고침 복원용: 마지막으로 연 파일을 기록한다.
+    persistPrefs({ lastFileId: id });
 
     try {
       const detail = await api.getFile(id);
@@ -926,7 +928,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       return;
     }
 
-    // 기존 풀이 / 대화 이력은 각각 실패해도 나머지 화면은 살린다.
+    // 기존 풀이는 실패해도 나머지 화면은 살린다.
     void (async () => {
       try {
         const { solutions } = await api.getSolutions(id);
@@ -953,30 +955,11 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         set({ solutionsStatus: 'error' });
       }
     })();
-
-    // 전역 스레드(problem_no=null)를 초기 스레드로 연다.
-    void (async () => {
-      try {
-        const { messages } = await api.getChatHistory(id, null);
-        if (get().selectedFileId !== id || dataEpoch !== epoch) return;
-        set({
-          messages: messages.map(chatMessageToEntry(null)),
-          chatStatus: 'ready',
-        });
-      } catch {
-        if (get().selectedFileId !== id || dataEpoch !== epoch) return;
-        set({ chatStatus: 'error' });
-      }
-    })();
-
-    // 스레드 목록.
-    void get().loadThreads();
   },
 
   async selectNote(id: string) {
     if (get().openKind === 'note' && get().selectedNoteId === id) return;
     get().abortSolve();
-    get().abortChat();
 
     set({
       openKind: 'note',
@@ -984,14 +967,14 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       noteDetail: null,
       noteStatus: 'loading',
       noteError: null,
-      // 노트를 열면 시험지/스레드 컨텍스트는 접는다.
+      // 노트를 열면 시험지 컨텍스트는 접는다(대화는 전역이라 유지).
       selectedFileId: null,
       fileDetail: null,
       fileStatus: 'idle',
       selectedProblemNo: null,
     });
-    // 노트를 열면 시험지 선택이 해제되므로 복원 대상도 비운다.
-    persistPrefs({ lastFileId: null, lastThreadNo: null });
+    // 노트를 열면 시험지 선택이 해제되므로 파일 복원 대상만 비운다.
+    persistPrefs({ lastFileId: null });
 
     try {
       const detail = await api.getNote(id);
@@ -1040,68 +1023,158 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   focusProblem(no: number) {
     const detail = get().fileDetail;
     const problem = detail?.problems.find((candidate) => candidate.no === no);
+    // 문제 클릭 = 그 문제를 대화 첨부 컨텍스트로 선택(전역 대화에 file_id+problem_no 로 실린다).
     set((state) => ({
       selectedProblemNo: no,
       focusRequest: problem
         ? { no, page: problem.page, token: (state.focusRequest?.token ?? 0) + 1 }
         : state.focusRequest,
     }));
-    // 문제 클릭 = 그 문제 스레드 열기(계약 6-B).
-    void get().openThread(no);
   },
 
-  async openThread(problemNo: number | null) {
-    const fileId = get().selectedFileId;
-    if (!fileId) return;
-    // 새로고침 복원용: 마지막으로 보던 스레드를 기록한다(전환 의도이므로 early-return 전에).
-    persistPrefs({ lastThreadNo: problemNo });
-    if (get().activeThreadNo === problemNo && get().chatStatus === 'ready') return;
+  async loadConversations() {
+    try {
+      const { conversations } = await api.getConversations();
+      set({ conversations });
+    } catch {
+      // 목록 실패는 화면을 막지 않는다.
+    }
+  },
 
+  async bootstrapConversations() {
+    await get().loadConversations();
+    const prefs = readPrefs();
+    const lastId = prefs.lastConversationId ?? null;
+    const list = get().conversations;
+    // 마지막으로 보던 대화가 아직 남아 있으면 그걸 복원한다.
+    // (없거나 삭제됐으면 새 대화 초안(none) 상태로 둔다.)
+    if (lastId && list.some((conversation) => conversation.id === lastId)) {
+      await get().openConversation(lastId);
+    } else if (lastId) {
+      persistPrefs({ lastConversationId: null });
+    }
+  },
+
+  async openConversation(id: string) {
+    if (get().activeConversationId === id && get().chatStatus === 'ready') return;
     get().abortChat();
     const epoch = ++dataEpoch;
     set({
-      activeThreadNo: problemNo,
-      selectedProblemNo: problemNo,
+      activeConversationId: id,
       messages: [],
       chatStatus: 'loading',
-      threadTruncatedBefore: 0,
+      chatTruncatedBefore: 0,
     });
+    persistPrefs({ lastConversationId: id });
     try {
-      const { messages } = await api.getChatHistory(fileId, problemNo);
-      if (get().selectedFileId !== fileId || dataEpoch !== epoch) return;
-      set({ messages: messages.map(chatMessageToEntry(problemNo)), chatStatus: 'ready' });
+      const { messages } = await api.getConversationMessages(id);
+      if (get().activeConversationId !== id || dataEpoch !== epoch) return;
+      set({ messages: messages.map(conversationMessageToEntry), chatStatus: 'ready' });
     } catch {
-      if (get().selectedFileId !== fileId || dataEpoch !== epoch) return;
+      if (get().activeConversationId !== id || dataEpoch !== epoch) return;
       set({ chatStatus: 'error' });
     }
   },
 
-  async loadThreads() {
-    const fileId = get().selectedFileId;
-    if (!fileId) return;
+  newConversation() {
+    get().abortChat();
+    dataEpoch += 1;
+    set({
+      activeConversationId: null,
+      messages: [],
+      chatStatus: 'ready',
+      chatTruncatedBefore: 0,
+    });
+    persistPrefs({ lastConversationId: null });
+  },
+
+  async renameConversation(id: string, title: string) {
+    const trimmed = title.trim();
+    if (trimmed === '') return;
     try {
-      const { threads } = await api.getChatThreads(fileId);
-      if (get().selectedFileId !== fileId) return;
-      set({ threads });
-    } catch {
-      // 스레드 목록 실패는 화면을 막지 않는다.
+      const conversation = await api.renameConversation(id, trimmed);
+      set((state) => ({
+        conversations: state.conversations.map((candidate) =>
+          candidate.id === id ? conversation : candidate,
+        ),
+      }));
+    } catch (error) {
+      get().showToast({ kind: 'error', message: toUserMessage(error) });
     }
   },
 
-  async deleteThread(problemNo: number | null) {
-    const { selectedFileId, activeThreadNo } = get();
-    if (!selectedFileId) return;
+  async deleteConversation(id: string) {
     try {
-      await api.clearChat(selectedFileId, problemNo);
-      set((state) => ({
-        threads: state.threads.filter((thread) => thread.problem_no !== problemNo),
-      }));
-      // 지금 보고 있던 스레드를 지웠으면 화면도 비운다(전송 흐름은 그대로 유지).
-      if (activeThreadNo === problemNo) {
-        set({ messages: [], threadTruncatedBefore: 0 });
-      }
-      void get().loadThreads();
+      await api.deleteConversation(id);
     } catch (error) {
+      get().showToast({ kind: 'error', message: toUserMessage(error) });
+      return;
+    }
+    const wasActive = get().activeConversationId === id;
+    set((state) => ({
+      conversations: state.conversations.filter((candidate) => candidate.id !== id),
+    }));
+    if (!wasActive) return;
+    // 활성 대화를 지웠으면 최신 대화로 폴백(없으면 새 대화 초안).
+    const latest = get().conversations[0];
+    if (latest) await get().openConversation(latest.id);
+    else get().newConversation();
+  },
+
+  async saveSolutionFromMessage(messageId: string) {
+    const message = get().messages.find((entry) => entry.id === messageId);
+    if (
+      !message ||
+      message.role !== 'assistant' ||
+      message.fileId == null ||
+      message.problemNo == null ||
+      message.content.trim() === '' ||
+      message.savingSolution
+    ) {
+      return;
+    }
+    const fileId = message.fileId;
+    const no = message.problemNo;
+    set((state) => ({
+      messages: state.messages.map((entry) =>
+        entry.id === messageId ? { ...entry, savingSolution: true } : entry,
+      ),
+    }));
+    try {
+      const saved = await api.saveSolutionContent(fileId, no, message.content, message.usage, 'chat');
+      // 지금 그 시험지가 열려 있으면 풀이 탭에 즉시 반영한다.
+      if (get().selectedFileId === fileId) {
+        set((state) => ({
+          solutions: {
+            ...state.solutions,
+            [no]: {
+              no,
+              text: saved.solution,
+              streamingText: '',
+              status: 'done',
+              usage: saved.usage,
+              cost: saved.cost,
+              truncated: saved.truncated ?? false,
+              error: null,
+              createdAt: saved.created_at,
+            },
+          },
+        }));
+      }
+      set((state) => ({
+        messages: state.messages.map((entry) =>
+          entry.id === messageId
+            ? { ...entry, savingSolution: false, savedAsSolution: true }
+            : entry,
+        ),
+      }));
+      get().showToast({ kind: 'success', message: `${no}번 풀이로 저장했습니다.` });
+    } catch (error) {
+      set((state) => ({
+        messages: state.messages.map((entry) =>
+          entry.id === messageId ? { ...entry, savingSolution: false } : entry,
+        ),
+      }));
       get().showToast({ kind: 'error', message: toUserMessage(error) });
     }
   },
@@ -1311,49 +1384,69 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     if (trimmed === '') return;
     const { selectedFileId, model, effort, provider, selectedProblemNo, chatSending, fileDetail } =
       get();
-    if (!selectedFileId) {
-      get().showToast({ kind: 'error', message: '먼저 왼쪽에서 파일을 선택하세요.' });
-      return;
-    }
     if (chatSending) return;
 
     const availableNos = fileDetail?.problems.map((problem) => problem.no) ?? [];
 
-    // ── 1차: 오답노트 추가 의도면 AI 를 부르지 않고 직접 처리(계약 6-A) ──
-    const intent = parseNoteAddIntent(trimmed, availableNos);
-    if (intent.isAddIntent) {
-      // 배경 이력 로딩이 방금 추가한 메시지를 덮어쓰지 못하게 한다(일반 채팅과 동일).
-      dataEpoch += 1;
-      // 사용자 발화는 채팅에 남긴다.
-      chatSeq += 1;
-      const userEntry: ChatEntry = {
-        id: `user-${chatSeq}`,
-        role: 'user',
-        content: trimmed,
-        streaming: false,
-        usage: null,
-        cost: null,
-        error: null,
-        createdAt: new Date().toISOString(),
-        problemNo: selectedProblemNo,
-      };
-      set((state) => ({ messages: [...state.messages, userEntry] }));
-      await get().handleNoteAddIntent(intent, selectedFileId, availableNos);
-      return;
+    // ── 1차: 시험지가 열려 있고 오답노트 추가 의도면 AI 를 부르지 않고 직접 처리(계약 6-A) ──
+    if (selectedFileId) {
+      const intent = parseNoteAddIntent(trimmed, availableNos);
+      if (intent.isAddIntent) {
+        dataEpoch += 1;
+        chatSeq += 1;
+        const userEntry: ChatEntry = {
+          id: `user-${chatSeq}`,
+          role: 'user',
+          content: trimmed,
+          streaming: false,
+          usage: null,
+          cost: null,
+          error: null,
+          createdAt: new Date().toISOString(),
+          problemNo: selectedProblemNo,
+          fileId: selectedProblemNo != null ? selectedFileId : null,
+        };
+        set((state) => ({ messages: [...state.messages, userEntry] }));
+        await get().handleNoteAddIntent(intent, selectedFileId, availableNos);
+        return;
+      }
     }
 
-    // 문항을 직접 클릭해 고른 게 있으면 그것이 우선이다.
-    // 아무것도 안 골랐을 때만 문장에서 "6번" 같은 언급을 찾아 채운다.
-    const attachedProblemNo = selectedProblemNo ?? detectProblemNo(trimmed, availableNos);
+    // 문항 첨부: 시험지가 열려 있을 때만. 직접 클릭한 문항이 우선이고, 없으면 문장에서 찾는다.
+    const attachedProblemNo = selectedFileId
+      ? (selectedProblemNo ?? detectProblemNo(trimmed, availableNos))
+      : null;
+    // file_id 와 problem_no 는 짝으로 싣는다("N번 풀이로 저장" 이 둘을 모두 요구).
+    const attachedFileId = attachedProblemNo != null ? selectedFileId : null;
 
-    // 뒤늦게 도착할 대화 이력 응답이 방금 보낸 메시지를 덮어쓰지 못하게 한다.
+    // 전송을 시작한 즉시 상태를 잡는다. (대화 생성이 비동기라, 이 플래그를 나중에
+    // 세우면 "전송 중이 아님" 창이 생겨 UI 가 이미 끝난 것으로 오인한다.)
+    set({ chatSending: true, chatStatus: 'ready' });
+
+    // 활성 대화가 없으면 새로 만든다(ChatGPT식: 첫 전송 시 생성).
+    let conversationId = get().activeConversationId;
+    if (!conversationId) {
+      try {
+        const conversation = await api.createConversation();
+        conversationId = conversation.id;
+        set((state) => ({
+          activeConversationId: conversation.id,
+          conversations: [conversation, ...state.conversations],
+        }));
+        persistPrefs({ lastConversationId: conversation.id });
+      } catch (error) {
+        set({ chatSending: false });
+        get().showToast({ kind: 'error', message: toUserMessage(error) });
+        return;
+      }
+    }
+
+    // 뒤늦게 도착할 이력 응답이 방금 보낸 메시지를 덮어쓰지 못하게 한다.
     dataEpoch += 1;
     chatSeq += 1;
     const userId = `user-${chatSeq}`;
     chatSeq += 1;
     const assistantId = `assistant-${chatSeq}`;
-    // 이 메시지로 스레드가 정해진다.
-    set({ activeThreadNo: attachedProblemNo });
 
     set((state) => ({
       chatSending: true,
@@ -1370,6 +1463,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
           error: null,
           createdAt: new Date().toISOString(),
           problemNo: attachedProblemNo,
+          fileId: attachedFileId,
         },
         {
           id: assistantId,
@@ -1381,19 +1475,27 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
           error: null,
           createdAt: new Date().toISOString(),
           problemNo: attachedProblemNo,
+          fileId: attachedFileId,
         },
       ],
     }));
 
     chatController = new AbortController();
     try {
-      const stream = api.chat(
-        selectedFileId,
-        { message: trimmed, provider, model, effort, problem_no: attachedProblemNo },
+      const stream = api.conversationChat(
+        conversationId,
+        {
+          message: trimmed,
+          file_id: attachedFileId,
+          problem_no: attachedProblemNo,
+          provider,
+          model,
+          effort,
+        },
         chatController.signal,
       );
       for await (const event of stream) {
-        if (get().selectedFileId !== selectedFileId) break;
+        if (get().activeConversationId !== conversationId) break;
         switch (event.type) {
           case 'delta':
             set((state) => ({
@@ -1418,8 +1520,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
                   : entry,
               ),
               totals: accumulate(state.totals, event.usage, event.cost),
-              // 계약 6-B: 이력이 잘려 보내졌으면 사용자에게 알린다.
-              threadTruncatedBefore: event.history_truncated ? (event.truncated_before ?? 0) : 0,
+              // 이력이 잘려 보내졌으면 사용자에게 알린다.
+              chatTruncatedBefore: event.history_truncated ? (event.truncated_before ?? 0) : 0,
             }));
             break;
           case 'error':
@@ -1452,8 +1554,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
           entry.id === assistantId && entry.streaming ? { ...entry, streaming: false } : entry,
         ),
       }));
-      // 스레드 목록(턴 수/시간) 갱신.
-      void get().loadThreads();
+      // 대화 목록(제목/미리보기/시간) 갱신.
+      void get().loadConversations();
       // 채팅이 끝났으니 쿼터 사용량 요약도 갱신한다(실패는 조용히 무시).
       void get().loadUsageSummary();
     }
@@ -1562,19 +1664,6 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
           : entry,
       ),
     }));
-  },
-
-  async clearChat() {
-    const { selectedFileId, activeThreadNo } = get();
-    if (!selectedFileId) return;
-    try {
-      // 현재 스레드만 지운다(계약 6-B).
-      await api.clearChat(selectedFileId, activeThreadNo);
-      set({ messages: [], threadTruncatedBefore: 0 });
-      void get().loadThreads();
-    } catch (error) {
-      get().showToast({ kind: 'error', message: toUserMessage(error) });
-    }
   },
 
   setModel(model: string) {

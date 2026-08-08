@@ -33,6 +33,7 @@ export function Workspace() {
   const loadEnv = useWorkspace((state) => state.loadEnv);
   const loadTree = useWorkspace((state) => state.loadTree);
   const loadUsageSummary = useWorkspace((state) => state.loadUsageSummary);
+  const bootstrapConversations = useWorkspace((state) => state.bootstrapConversations);
   const logout = useWorkspace((state) => state.logout);
   const setRightWidth = useWorkspace((state) => state.setRightWidth);
   const dismissToast = useWorkspace((state) => state.dismissToast);
@@ -52,11 +53,13 @@ export function Workspace() {
       await loadEnv();
       if (useWorkspace.getState().accessOk) {
         void loadTree();
+        // 전역 대화 목록을 불러오고 마지막으로 보던 대화를 복원한다(실패는 조용히 무시).
+        void bootstrapConversations();
         // agy 쿼터 사용량 요약을 초기 진입에 한 번 불러온다(실패는 조용히 무시).
         void loadUsageSummary();
       }
     })();
-  }, [hydratePrefs, loadEnv, loadTree, loadUsageSummary]);
+  }, [hydratePrefs, loadEnv, loadTree, loadUsageSummary, bootstrapConversations]);
 
   useEffect(() => {
     if (!toast) return;
@@ -151,6 +154,23 @@ export function Workspace() {
         </div>
       ) : null}
 
+      {/*
+        접속 비밀번호 게이트가 켜진 배포본에서만 상단 바에 로그아웃을 둔다.
+        이전에는 우하단 고정 버튼이 본문을 가렸다 → 콘텐츠를 덮지 않는 상단 헤더 우측으로 옮긴다.
+      */}
+      {env.auth_required ? (
+        <header className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white px-3 py-1.5">
+          <span className="text-[12px] font-semibold text-slate-600">수학 문제풀이</span>
+          <button
+            type="button"
+            onClick={logout}
+            className="rounded border border-slate-300 bg-white px-2.5 py-1 text-[12px] font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-800"
+          >
+            로그아웃
+          </button>
+        </header>
+      ) : null}
+
       <div className="flex min-h-0 flex-1">
         <FileTreePanel />
         <CenterPanel />
@@ -181,16 +201,6 @@ export function Workspace() {
           <AiPanel />
         </div>
       </div>
-
-      {env.auth_required ? (
-        <button
-          type="button"
-          onClick={logout}
-          className="fixed bottom-3 right-3 z-40 rounded border border-slate-300 bg-white/90 px-2 py-1 text-[11px] text-slate-500 shadow-sm hover:bg-slate-50 hover:text-slate-700"
-        >
-          로그아웃
-        </button>
-      ) : null}
 
       {toast ? (
         <div

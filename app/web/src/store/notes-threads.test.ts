@@ -141,50 +141,72 @@ describe('채팅 오답노트 추가 의도', () => {
   }, 30_000);
 });
 
-describe('문항별 스레드', () => {
+describe('전역 대화 (ChatGPT식)', () => {
   beforeEach(reset);
 
-  it('문제를 클릭하면 그 문제 스레드가 열린다', async () => {
+  async function ready() {
+    await useWorkspace.getState().loadEnv();
     await useWorkspace.getState().loadTree();
-    await useWorkspace.getState().selectFile(MOCK_FILE_ID);
-    expect(useWorkspace.getState().activeThreadNo).toBeNull();
+  }
 
+  it('문제를 클릭하면 그 문항이 대화 첨부로 선택된다(스레드 전환 없음)', async () => {
+    await ready();
+    await useWorkspace.getState().selectFile(MOCK_FILE_ID);
     useWorkspace.getState().focusProblem(6);
-    await new Promise((r) => setTimeout(r, 50));
-    expect(useWorkspace.getState().activeThreadNo).toBe(6);
     expect(useWorkspace.getState().selectedProblemNo).toBe(6);
   });
 
-  it('스레드별로 대화가 분리되고, 다시 열면 그 스레드 이력만 보인다', async () => {
-    await useWorkspace.getState().loadEnv();
-    await useWorkspace.getState().loadTree();
-    await useWorkspace.getState().selectFile(MOCK_FILE_ID);
+  it('전송 시 활성 대화가 없으면 새 대화를 만들어 보낸다', async () => {
+    await ready();
+    expect(useWorkspace.getState().activeConversationId).toBeNull();
 
-    // 6번 스레드에서 한 번 대화.
-    useWorkspace.getState().focusProblem(6);
-    await new Promise((r) => setTimeout(r, 60));
-    await useWorkspace.getState().sendChat('이거 왜 이래?');
-    const sixMessages = useWorkspace.getState().messages.length;
-    expect(sixMessages).toBeGreaterThanOrEqual(2);
+    await useWorkspace.getState().sendChat('안녕하세요');
 
-    // 7번 스레드로 전환 → 비어 있어야 한다.
-    await useWorkspace.getState().openThread(7);
-    expect(useWorkspace.getState().activeThreadNo).toBe(7);
-    expect(useWorkspace.getState().messages).toHaveLength(0);
+    const state = useWorkspace.getState();
+    expect(state.activeConversationId).not.toBeNull();
+    expect(state.messages).toHaveLength(2);
+    expect(state.messages[0]?.role).toBe('user');
+    expect(state.messages[1]?.role).toBe('assistant');
 
-    // 6번으로 돌아오면 아까 대화가 남아 있다.
-    await useWorkspace.getState().openThread(6);
-    expect(useWorkspace.getState().messages.length).toBe(sixMessages);
+    await useWorkspace.getState().loadConversations();
+    expect(useWorkspace.getState().conversations.length).toBeGreaterThanOrEqual(1);
   }, 30_000);
 
-  it('스레드 목록(turns)이 갱신된다', async () => {
-    await useWorkspace.getState().loadEnv();
-    await useWorkspace.getState().loadTree();
+  it('대화를 전환하면 그 대화 메시지만 보인다', async () => {
+    await ready();
+    await useWorkspace.getState().sendChat('첫 대화 질문');
+    const first = useWorkspace.getState().activeConversationId;
+    expect(first).not.toBeNull();
+
+    // 새 대화로 전환 후 다른 질문.
+    useWorkspace.getState().newConversation();
+    expect(useWorkspace.getState().messages).toHaveLength(0);
+    await useWorkspace.getState().sendChat('둘째 대화 질문');
+    const second = useWorkspace.getState().activeConversationId;
+    expect(second).not.toBe(first);
+
+    // 첫 대화로 돌아오면 첫 질문이 복원되고 둘째 질문은 안 보인다.
+    await useWorkspace.getState().openConversation(first ?? '');
+    const messages = useWorkspace.getState().messages;
+    expect(messages.some((m) => m.content === '첫 대화 질문')).toBe(true);
+    expect(messages.some((m) => m.content === '둘째 대화 질문')).toBe(false);
+  }, 30_000);
+
+  it('문항을 선택하고 보낸 답변은 file_id+problem_no 가 실려 풀이로 저장할 수 있다', async () => {
+    await ready();
     await useWorkspace.getState().selectFile(MOCK_FILE_ID);
-    await useWorkspace.getState().sendChat('전역 질문');
-    await useWorkspace.getState().loadThreads();
-    const threads = useWorkspace.getState().threads;
-    expect(threads.some((t) => t.problem_no === null && t.turns >= 1)).toBe(true);
+    useWorkspace.getState().selectProblem(6);
+
+    await useWorkspace.getState().sendChat('이 문제 풀어줘');
+    const assistant = useWorkspace.getState().messages.find((m) => m.role === 'assistant');
+    expect(assistant).toBeDefined();
+    expect(assistant?.fileId).toBe(MOCK_FILE_ID);
+    expect(assistant?.problemNo).toBe(6);
+
+    // 저장하면 그 문항이 풀이 탭에 완료로 반영된다.
+    await useWorkspace.getState().saveSolutionFromMessage(assistant?.id ?? '');
+    expect(useWorkspace.getState().solutions[6]?.status).toBe('done');
+    expect(useWorkspace.getState().solutions[6]?.text).toContain('6번');
   }, 30_000);
 });
 

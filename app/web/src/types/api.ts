@@ -234,6 +234,50 @@ export interface ChatHistoryResponse {
   messages: ChatMessage[];
 }
 
+/* ── 전역(파일 무관) 자유 대화 ───────────────────────────────────── */
+
+/** `GET /api/conversations` 의 원소 / `POST`·`PATCH` 응답. */
+export interface Conversation {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  /** 마지막 메시지 앞부분(목록 미리보기). 없으면 null. */
+  preview: string | null;
+}
+
+export interface ConversationsResponse {
+  conversations: Conversation[];
+}
+
+/**
+ * `GET /api/conversations/{id}/messages` 의 원소.
+ * `file_id`/`problem_no` 는 그 메시지가 특정 시험지·문항을 컨텍스트로 걸었을 때만 채워진다.
+ */
+export interface ConversationMessage {
+  role: ChatRole;
+  content: string;
+  file_id: string | null;
+  problem_no: number | null;
+  created_at: string;
+  usage?: Usage | null;
+  cost?: Cost | null;
+}
+
+export interface ConversationMessagesResponse {
+  messages: ConversationMessage[];
+}
+
+/** `POST /api/conversations/{id}/chat` 요청 본문. */
+export interface ConversationChatRequest {
+  message: string;
+  file_id?: string | null;
+  problem_no?: number | null;
+  provider: ProviderChoice;
+  model?: string;
+  effort?: string;
+}
+
 /* ── 사용량 요약 (agy 쿼터 기반) ─────────────────────────────────── */
 
 /** 한 시간창의 사용량. agy 는 쿼터 기반이라 금액이 아니라 토큰/호출 수로 센다. */

@@ -361,22 +361,16 @@ describe('워크스페이스 화면 (목 모드)', () => {
     expect(screen.getByRole('button', { name: '1' })).toBeInTheDocument();
   });
 
-  it('문제를 클릭하면 오른쪽 AI 패널에 문제 컨텍스트가 걸린다', async () => {
+  it('문제를 클릭하면 그 문항이 대화 첨부 컨텍스트로 선택된다', async () => {
     const user = await openWorkspace();
     await openSampleFile(user);
 
     await user.click(await screen.findByRole('button', { name: '7' }));
 
-    // 스레드 바가 7번 문제 대화로 전환된다(계약 6-B).
-    expect(await screen.findByText(/7번 문제 대화/)).toBeInTheDocument();
-    expect(screen.getByText(/문제 이미지와 기존 풀이가 함께 전달됩니다/)).toBeInTheDocument();
+    // 전역 대화이지만 문항을 고르면 그 문항이 첨부 컨텍스트로 걸린다.
     expect(useWorkspace.getState().selectedProblemNo).toBe(7);
-    await waitFor(() => expect(useWorkspace.getState().activeThreadNo).toBe(7));
-
-    // 전역 스레드 칩으로 전체 대화로 돌아간다.
-    await user.click(screen.getByTitle('전체 대화(전역 스레드)로 전환'));
-    await waitFor(() => expect(useWorkspace.getState().selectedProblemNo).toBeNull());
-    await waitFor(() => expect(useWorkspace.getState().activeThreadNo).toBeNull());
+    // 중앙 패널이 선택을 알린다.
+    expect(await screen.findByText('7번 문제가 선택되었습니다.')).toBeInTheDocument();
   });
 
   it(

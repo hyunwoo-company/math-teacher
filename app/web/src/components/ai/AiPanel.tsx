@@ -5,7 +5,7 @@ import clsx from 'clsx';
 import { MathText } from '@/components/MathText';
 import { ApiCostNotice } from '@/components/ai/ApiCostNotice';
 import { SubscriptionNotice } from '@/components/ai/SubscriptionNotice';
-import { ThreadBar } from '@/components/ai/ThreadBar';
+import { ConversationList } from '@/components/ai/ConversationList';
 import { UsageFooter } from '@/components/ai/UsageFooter';
 import { UsageStatusBar } from '@/components/ai/UsageStatusBar';
 import { ConfirmDialog } from '@/components/ui/Dialog';
@@ -41,8 +41,7 @@ export function AiPanel() {
   const providerConfig = useWorkspace((state) => state.providerConfig);
   const hasLocalApiKey = useWorkspace((state) => state.hasLocalApiKey);
   const usdKrw = useWorkspace((state) => state.env?.usd_krw ?? 1400);
-  const activeThreadNo = useWorkspace((state) => state.activeThreadNo);
-  const threadTruncatedBefore = useWorkspace((state) => state.threadTruncatedBefore);
+  const chatTruncatedBefore = useWorkspace((state) => state.chatTruncatedBefore);
   const notePrompt = useWorkspace((state) => state.notePrompt);
 
   const setModel = useWorkspace((state) => state.setModel);
@@ -52,7 +51,8 @@ export function AiPanel() {
   const abortSolve = useWorkspace((state) => state.abortSolve);
   const sendChat = useWorkspace((state) => state.sendChat);
   const abortChat = useWorkspace((state) => state.abortChat);
-  const clearChat = useWorkspace((state) => state.clearChat);
+  const newConversation = useWorkspace((state) => state.newConversation);
+  const saveSolutionFromMessage = useWorkspace((state) => state.saveSolutionFromMessage);
   const confirmNotePrompt = useWorkspace((state) => state.confirmNotePrompt);
   const cancelNotePrompt = useWorkspace((state) => state.cancelNotePrompt);
 
@@ -244,8 +244,8 @@ export function AiPanel() {
         ) : null}
       </header>
 
-      {/* 스레드 목록/전환/삭제 (계약 6-B). */}
-      <ThreadBar />
+      {/* 전역 대화 목록/전환/이름변경/삭제 (ChatGPT식). */}
+      <ConversationList />
 
       <div
         ref={listRef}
@@ -256,22 +256,16 @@ export function AiPanel() {
         }}
         className="min-h-0 flex-1 overflow-auto px-3 py-2"
       >
-        {!selectedFileId ? (
-          <EmptyState
-            title="시험지를 선택하면 대화를 시작할 수 있습니다"
-            description="왼쪽 보관함에서 PDF를 클릭하세요."
-            icon="💬"
-          />
-        ) : chatStatus === 'loading' && messages.length === 0 ? (
+        {chatStatus === 'loading' && messages.length === 0 ? (
           <LoadingState label="대화 기록을 불러오는 중입니다…" />
         ) : messages.length === 0 ? (
           <div className="flex flex-col gap-3 py-4">
             <EmptyState
-              title={activeThreadNo != null ? `${activeThreadNo}번 문제로 대화를 시작하세요` : '아직 대화가 없습니다'}
-              description="아래 예시를 눌러 바로 시작할 수 있습니다."
+              title="새 대화를 시작하세요"
+              description="무엇이든 물어보세요. 문제 번호를 클릭하면 그 문항을 함께 보낼 수 있습니다."
               icon="💬"
             />
-            {/* 계약 6: 사용 예시 칩 (클릭하면 입력됨) */}
+            {/* 사용 예시 칩 (클릭하면 입력됨) */}
             <div className="flex flex-col items-stretch gap-1.5 px-2">
               {EXAMPLE_CHIPS.map((chip) => (
                 <button
@@ -288,14 +282,14 @@ export function AiPanel() {
           </div>
         ) : (
           <ul className="space-y-3">
-            {/* 계약 6-B: 이력이 잘려 보내졌음을 알린다. */}
-            {threadTruncatedBefore > 0 ? (
+            {/* 이력이 잘려 보내졌음을 알린다. */}
+            {chatTruncatedBefore > 0 ? (
               <li className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-                이전 대화 {threadTruncatedBefore}개가 생략된 채로 전달되었습니다. 맥락이 흐려질 수
+                이전 대화 {chatTruncatedBefore}개가 생략된 채로 전달되었습니다. 맥락이 흐려질 수
                 있으니
                 <button
                   type="button"
-                  onClick={() => void clearChat()}
+                  onClick={newConversation}
                   className="ml-1 rounded border border-amber-300 bg-white px-1.5 py-0.5 font-medium text-amber-800 hover:bg-amber-100"
                 >
                   새 대화
@@ -347,14 +341,35 @@ export function AiPanel() {
                     ) : null}
                   </div>
                   {message.role === 'assistant' && !message.streaming ? (
-                    <p className="mt-1 pl-1 text-[10px] text-slate-400">
-                      {/* cost 로만 과금 판단. 구독/agy 는 usage 만 오고 cost 는 null. */}
-                      {message.cost
-                        ? `토큰 ${formatInt(tokens)} · ${formatUsd(usd)} / ${formatKrw(krw)}`
-                        : message.usage
-                          ? `토큰 ${formatInt(tokens)} · 요금 청구 없음`
-                          : '요금 청구 없음'}
-                    </p>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 pl-1">
+                      <p className="text-[10px] text-slate-400">
+                        {/* cost 로만 과금 판단. 구독/agy 는 usage 만 오고 cost 는 null. */}
+                        {message.cost
+                          ? `토큰 ${formatInt(tokens)} · ${formatUsd(usd)} / ${formatKrw(krw)}`
+                          : message.usage
+                            ? `토큰 ${formatInt(tokens)} · 요금 청구 없음`
+                            : '요금 청구 없음'}
+                      </p>
+                      {/* 문항 컨텍스트가 걸린 답변은 그 문항 풀이로 저장할 수 있다. */}
+                      {message.fileId != null && message.problemNo != null && message.content ? (
+                        message.savedAsSolution ? (
+                          <span className="text-[10px] font-medium text-emerald-600">
+                            ✓ {message.problemNo}번 풀이로 저장됨
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void saveSolutionFromMessage(message.id)}
+                            disabled={message.savingSolution}
+                            className="rounded border border-emerald-500 bg-white px-2 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                          >
+                            {message.savingSolution
+                              ? '저장 중…'
+                              : `${message.problemNo}번 풀이로 저장`}
+                          </button>
+                        )
+                      ) : null}
+                    </div>
                   ) : null}
                 </li>
               );
@@ -383,13 +398,11 @@ export function AiPanel() {
               }
             }}
             rows={2}
-            disabled={!selectedFileId || !canCallAi}
+            disabled={!canCallAi}
             placeholder={
               !canCallAi
                 ? (guidance?.inputPlaceholder ?? 'AI 사용 설정이 필요합니다')
-                : selectedFileId
-                  ? '질문을 입력하세요. Enter 전송, Shift+Enter 줄바꿈'
-                  : '먼저 왼쪽에서 시험지를 선택하세요'
+                : '질문을 입력하세요. Enter 전송, Shift+Enter 줄바꿈'
             }
             className="max-h-40 min-h-[46px] flex-1 resize-y rounded border border-slate-300 px-2 py-1.5 text-[13px] outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
           />
@@ -405,22 +418,13 @@ export function AiPanel() {
             <button
               type="button"
               onClick={submit}
-              disabled={!selectedFileId || draft.trim() === '' || !canCallAi}
+              disabled={draft.trim() === '' || !canCallAi}
               className="h-[46px] rounded border border-blue-600 bg-blue-600 px-3 text-[13px] font-medium text-white hover:bg-blue-700 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500"
             >
               전송
             </button>
           )}
         </div>
-        {messages.length > 0 ? (
-          <button
-            type="button"
-            onClick={() => void clearChat()}
-            className="mt-1 text-[11px] text-slate-400 hover:text-slate-600"
-          >
-            대화 기록 지우기
-          </button>
-        ) : null}
       </div>
 
       <UsageStatusBar />

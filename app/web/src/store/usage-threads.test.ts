@@ -21,27 +21,25 @@ async function openFile() {
   await useWorkspace.getState().selectFile(MOCK_FILE_ID);
 }
 
-describe('스레드 삭제', () => {
+describe('대화 삭제', () => {
   beforeEach(reset);
 
-  it('스레드를 삭제하면 목록에서 빠지고, 활성 스레드면 메시지도 비운다', async () => {
+  it('대화를 삭제하면 목록에서 빠지고, 활성 대화면 최신으로 폴백한다', async () => {
     await openFile();
-    // 전역 대화 1개 + 6번 문제 대화 1개를 만든다.
-    await useWorkspace.getState().sendChat('전역 질문');
-    await useWorkspace.getState().openThread(6);
-    await useWorkspace.getState().sendChat('6번 질문');
-    await useWorkspace.getState().loadThreads();
-    expect(useWorkspace.getState().threads.some((t) => t.problem_no === 6)).toBe(true);
-    expect(useWorkspace.getState().activeThreadNo).toBe(6);
+    // 대화 2개를 만든다.
+    await useWorkspace.getState().sendChat('첫 대화');
+    const first = useWorkspace.getState().activeConversationId;
+    useWorkspace.getState().newConversation();
+    await useWorkspace.getState().sendChat('둘째 대화');
+    const second = useWorkspace.getState().activeConversationId;
 
-    // 활성(6번) 스레드를 삭제 → 목록에서 빠지고 메시지도 비워진다.
-    await useWorkspace.getState().deleteThread(6);
-    expect(useWorkspace.getState().threads.some((t) => t.problem_no === 6)).toBe(false);
-    expect(useWorkspace.getState().messages).toHaveLength(0);
+    await useWorkspace.getState().loadConversations();
+    expect(useWorkspace.getState().conversations.length).toBe(2);
 
-    // 전역 스레드는 그대로 남아 있다.
-    await useWorkspace.getState().loadThreads();
-    expect(useWorkspace.getState().threads.some((t) => t.problem_no === null)).toBe(true);
+    // 활성(둘째) 대화 삭제 → 목록에서 빠지고 최신(첫)으로 폴백된다.
+    await useWorkspace.getState().deleteConversation(second ?? '');
+    expect(useWorkspace.getState().conversations.some((c) => c.id === second)).toBe(false);
+    expect(useWorkspace.getState().activeConversationId).toBe(first);
   }, 30_000);
 });
 

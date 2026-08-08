@@ -30,6 +30,11 @@ import type {
   ChatHistoryResponse,
   ChatMessage,
   ChatRequest,
+  Conversation,
+  ConversationChatRequest,
+  ConversationMessage,
+  ConversationMessagesResponse,
+  ConversationsResponse,
   Cost,
   EnvResponse,
   FileDetail,
@@ -53,6 +58,17 @@ function threadKey(fileId: string, problemNo: number | null): string {
   return `${fileId}::${problemNo ?? 'global'}`;
 }
 
+/** 전역 대화 1건의 내부 표현(메시지 포함). */
+interface MockConversation {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  /** 제목이 자동 지정 가능한 상태인지(첫 메시지에만 자동 제목을 붙인다). */
+  autoTitle: boolean;
+  messages: ConversationMessage[];
+}
+
 interface MockState {
   env: EnvResponse;
   nodes: TreeNode[];
@@ -60,6 +76,8 @@ interface MockState {
   solutions: Map<string, Map<number, Solution>>;
   /** key = threadKey(fileId, problemNo). */
   chats: Map<string, ChatMessage[]>;
+  /** 전역(파일 무관) 자유 대화. 삽입 순서 배열, 조회 시 updated_at 내림차순 정렬. */
+  conversations: MockConversation[];
   /** noteId -> items. */
   noteItems: Map<string, NoteItem[]>;
   counter: number;
@@ -79,9 +97,33 @@ function initialState(): MockState {
     problems,
     solutions: new Map(),
     chats: new Map(),
+    conversations: [],
     noteItems: new Map([[MOCK_NOTE_ID, []]]),
     counter: 0,
   };
+}
+
+/** 대화 preview: 마지막 메시지 앞부분(없으면 null). */
+function conversationPreview(conversation: MockConversation): string | null {
+  const last = conversation.messages[conversation.messages.length - 1];
+  if (!last) return null;
+  return last.content.slice(0, 80);
+}
+
+function toConversationOut(conversation: MockConversation): Conversation {
+  return {
+    id: conversation.id,
+    title: conversation.title,
+    created_at: conversation.created_at,
+    updated_at: conversation.updated_at,
+    preview: conversationPreview(conversation),
+  };
+}
+
+function findConversation(id: string): MockConversation {
+  const conversation = state.conversations.find((candidate) => candidate.id === id);
+  if (!conversation) throw new ApiError('not_found', '대화를 찾을 수 없습니다.', null, 404);
+  return conversation;
 }
 
 let state = initialState();
@@ -322,6 +364,51 @@ async function* chatScript(
   };
 }
 
+async function* convChatScript(
+  conversation: MockConversation,
+  body: ConversationChatRequest,
+): AsyncGenerator<MockSseEvent, void, void> {
+  const subscription = isSubscriptionCall(body.provider);
+  const model = body.model ?? 'claude-opus-5';
+  const problemNo = body.problem_no ?? null;
+  const reply = mockChatReply(body.message, problemNo);
+
+  for (const piece of chunkText(reply, 20)) {
+    yield { event: 'delta', data: { text: piece }, delayMs: 22 };
+  }
+
+  const usage = usageFor(problemNo ?? 1);
+  const cost = subscription ? null : costFor(model, usage);
+
+  conversation.messages.push({
+    role: 'assistant',
+    content: reply,
+    file_id: body.file_id ?? null,
+    problem_no: problemNo,
+    created_at: nowIso(),
+    usage,
+    cost,
+  });
+  conversation.updated_at = nowIso();
+
+  const truncatedBefore = Math.max(0, conversation.messages.length - 12);
+
+  yield {
+    event: 'done',
+    data: {
+      content: reply,
+      file_id: body.file_id ?? null,
+      problem_no: problemNo,
+      usage,
+      cost,
+      truncated: false,
+      history_truncated: truncatedBefore > 0,
+      truncated_before: truncatedBefore,
+    },
+    delayMs: 40,
+  };
+}
+
 async function* streamFrom(
   script: AsyncGenerator<MockSseEvent, void, void>,
   signal?: AbortSignal,
@@ -359,6 +446,9 @@ export const mockClient: ApiClient = {
     }
     for (const messages of state.chats.values()) {
       for (const message of messages) addUsage(message.usage);
+    }
+    for (const conversation of state.conversations) {
+      for (const message of conversation.messages) addUsage(message.usage);
     }
     const window = { tokens, calls };
     return { windows: { last_24h: window, last_7_days: window, total: window } };
@@ -543,6 +633,35 @@ export const mockClient: ApiClient = {
     };
   },
 
+  async saveSolutionContent(
+    id: string,
+    no: number,
+    content: string,
+    usage: Usage | null = null,
+    _source: string | null = null,
+  ): Promise<Solution> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    findNode(id);
+    if (content.trim() === '') {
+      throw new ApiError('invalid_content', '저장할 풀이 내용이 없습니다.', null, 400);
+    }
+    const solution: Solution = {
+      no,
+      solution: content,
+      usage: usage ?? null,
+      cost: null,
+      truncated: false,
+      created_at: nowIso(),
+    };
+    const fileSolutions = state.solutions.get(id) ?? new Map<number, Solution>();
+    fileSolutions.set(no, solution);
+    state.solutions.set(id, fileSolutions);
+    const problem = (state.problems.get(id) ?? []).find((candidate) => candidate.no === no);
+    if (problem) problem.has_solution = true;
+    return { ...solution };
+  },
+
   async getChatHistory(id: string, problemNo: number | null = null): Promise<ChatHistoryResponse> {
     await sleep(LATENCY_MS);
     requireAuth();
@@ -573,6 +692,79 @@ export const mockClient: ApiClient = {
     await sleep(LATENCY_MS);
     requireAuth();
     state.chats.delete(threadKey(id, problemNo));
+  },
+
+  async createConversation(title: string | null = null): Promise<Conversation> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    const trimmed = title?.trim() ?? '';
+    const now = nowIso();
+    const conversation: MockConversation = {
+      id: nextId('conv'),
+      title: trimmed === '' ? '새 대화' : trimmed,
+      created_at: now,
+      updated_at: now,
+      // 사용자가 제목을 지정하지 않았을 때만 첫 메시지로 자동 제목을 붙인다.
+      autoTitle: trimmed === '',
+      messages: [],
+    };
+    state.conversations.push(conversation);
+    return toConversationOut(conversation);
+  },
+
+  async getConversations(): Promise<ConversationsResponse> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    const conversations = [...state.conversations]
+      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))
+      .map(toConversationOut);
+    return { conversations };
+  },
+
+  async renameConversation(id: string, title: string): Promise<Conversation> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    const conversation = findConversation(id);
+    const trimmed = title.trim();
+    if (trimmed === '') throw new ApiError('invalid_name', '대화 이름을 입력하세요.', null, 400);
+    conversation.title = trimmed;
+    // 사용자가 직접 정한 제목은 자동 제목으로 덮이지 않는다.
+    conversation.autoTitle = false;
+    return toConversationOut(conversation);
+  },
+
+  async deleteConversation(id: string) {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    findConversation(id);
+    state.conversations = state.conversations.filter((candidate) => candidate.id !== id);
+  },
+
+  async getConversationMessages(id: string): Promise<ConversationMessagesResponse> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    const conversation = findConversation(id);
+    return { messages: conversation.messages.map((message) => ({ ...message })) };
+  },
+
+  conversationChat(id: string, body: ConversationChatRequest, signal?: AbortSignal) {
+    requireAuth();
+    const conversation = findConversation(id);
+    const firstMessage = conversation.messages.length === 0;
+    conversation.messages.push({
+      role: 'user',
+      content: body.message,
+      file_id: body.file_id ?? null,
+      problem_no: body.problem_no ?? null,
+      created_at: nowIso(),
+    });
+    // 첫 사용자 메시지면 자동 제목을 붙인다(직접 지정한 제목은 건드리지 않는다).
+    if (firstMessage && conversation.autoTitle) {
+      conversation.title = body.message.trim().slice(0, 40) || '새 대화';
+      conversation.autoTitle = false;
+    }
+    conversation.updated_at = nowIso();
+    return streamFrom(convChatScript(conversation, body), signal);
   },
 
   async createNote(name: string, parentId: string | null) {

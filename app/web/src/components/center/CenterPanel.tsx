@@ -101,16 +101,29 @@ export function CenterPanel() {
         <p className="mt-0.5 truncate text-[11px] text-slate-400">{path.join(' / ')}</p>
       </header>
 
-      <nav className="flex items-center gap-1 border-b border-slate-200 px-3">
-        <TabButton active={activeTab === 'pdf'} onClick={() => setActiveTab('pdf')}>
-          PDF
-        </TabButton>
-        <TabButton active={activeTab === 'solutions'} onClick={() => setActiveTab('solutions')}>
-          풀이
-          <span className="ml-1.5 rounded bg-slate-100 px-1 text-[10px] text-slate-500">
-            {solvedCount}/{problems.length}
-          </span>
-        </TabButton>
+      <nav
+        role="tablist"
+        aria-label="문서 보기 전환"
+        className="flex items-center gap-1 border-b border-slate-200 bg-slate-50 px-3 py-2"
+      >
+        <div className="inline-flex rounded-lg border border-slate-300 bg-slate-200/70 p-0.5">
+          <TabButton active={activeTab === 'pdf'} onClick={() => setActiveTab('pdf')}>
+            PDF
+          </TabButton>
+          <TabButton active={activeTab === 'solutions'} onClick={() => setActiveTab('solutions')}>
+            풀이
+            <span
+              className={clsx(
+                'ml-1.5 rounded px-1 text-[10px] tabular-nums',
+                activeTab === 'solutions'
+                  ? 'bg-blue-100 text-blue-700'
+                  : 'bg-slate-300/70 text-slate-600',
+              )}
+            >
+              {solvedCount}/{problems.length}
+            </span>
+          </TabButton>
+        </div>
       </nav>
 
       {problems.length > 0 ? (
@@ -190,12 +203,14 @@ function TabButton({
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
       className={clsx(
-        '-mb-px border-b-2 px-3 py-1.5 text-[13px] font-medium',
+        'flex items-center rounded-md px-4 py-1.5 text-[13px] font-medium transition-colors',
         active
-          ? 'border-blue-600 text-blue-700'
-          : 'border-transparent text-slate-500 hover:text-slate-700',
+          ? 'bg-white text-blue-700 shadow-sm ring-1 ring-slate-300'
+          : 'text-slate-600 hover:bg-white/60 hover:text-slate-800',
       )}
     >
       {children}
