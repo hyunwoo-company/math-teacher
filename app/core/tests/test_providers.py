@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 import ai_service
 import config
 import main
+import prompts
 from errors import ApiError
 from providers import subscription as subscription_provider
 from providers.apikey import ApiKeyProvider
@@ -329,6 +330,27 @@ def test_chat_without_problem_uses_file_summary(
     texts = [part.text for part in parts if isinstance(part, TextPart)]
     assert any("전체 22문항" in text for text in texts)
     assert not any(isinstance(part, ImagePart) for part in parts)
+
+
+def test_chat_with_problem_uses_solve_prompt(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """문항이 첨부된 파일 채팅은 풀이 스킬(SOLVE_SYSTEM_PROMPT)을 쓴다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    client.post(
+        f"/api/files/{node_id}/chat",
+        json={"message": "3번 풀어주세요", "problem_no": 3},
+    )
+    assert stub_provider.calls[0]["system"] == prompts.SOLVE_SYSTEM_PROMPT
+
+
+def test_chat_without_problem_uses_chat_prompt(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """문항이 없는 일반 파일 대화는 기존대로 채팅 프롬프트를 쓴다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    client.post(f"/api/files/{node_id}/chat", json={"message": "이 시험지 어때요?"})
+    assert stub_provider.calls[0]["system"] == prompts.CHAT_SYSTEM_PROMPT
 
 
 def test_chat_history_is_carried_over(

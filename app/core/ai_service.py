@@ -608,6 +608,9 @@ async def chat_stream(
     `truncated_before > 0` 이면 이력 앞부분이 **잘려나갔다**(요약이 아니다).
     그 사실을 done 이벤트의 `history_truncated` / `truncated_before` 로 알린다.
     """
+    # 특정 문항이 첨부된 채팅(문항 컨텍스트 O)이면 풀이 스킬을 적용한다.
+    # 문항 없는 시험지 전역 대화는 기존대로 채팅용 프롬프트(system 미지정)를 쓴다.
+    system = prompts.SOLVE_SYSTEM_PROMPT if problem_no is not None else None
     try:
         await run_in_threadpool(
             save_chat_message,
@@ -622,6 +625,7 @@ async def chat_stream(
                 model=model,
                 effort=effort,
                 max_tokens=config.DEFAULT_MAX_TOKENS,
+                system=system,
             ):
                 if chunk["type"] == "delta":
                     yield sse.event("delta", {"text": chunk["text"]})
@@ -773,6 +777,14 @@ async def conversation_chat_stream(
     메시지를 usage/cost 와 함께 저장하고 대화의 `updated_at` 을 갱신한다. SSE 이벤트
     형식은 시험지 채팅(`chat_stream`)과 동일하다.
     """
+    # 파일의 특정 문항이 첨부된 대화(문항 컨텍스트 O)면 풀이 스킬을 적용한다.
+    # (load_conversation_context 는 file_id 와 problem_no 가 모두 있을 때만 문항
+    #  블록을 붙인다.) 그 외 자유 대화는 기존대로 채팅용 프롬프트를 쓴다.
+    system = (
+        prompts.SOLVE_SYSTEM_PROMPT
+        if file_id is not None and problem_no is not None
+        else None
+    )
     try:
         await run_in_threadpool(
             service.save_conversation_user_message,
@@ -787,6 +799,7 @@ async def conversation_chat_stream(
                 model=model,
                 effort=effort,
                 max_tokens=config.DEFAULT_MAX_TOKENS,
+                system=system,
             ):
                 if chunk["type"] == "delta":
                     yield sse.event("delta", {"text": chunk["text"]})

@@ -9,6 +9,7 @@ from typing import Any
 from conftest import StubProvider, parse_sse, upload_test_pdf
 from fastapi.testclient import TestClient
 
+import prompts
 import storage
 
 
@@ -181,6 +182,32 @@ def test_chat_with_file_attaches_problem_context(
     ).json()["messages"]
     assert messages[0]["file_id"] == node_id
     assert messages[0]["problem_no"] == 5
+
+    # 문항이 첨부됐으므로 풀이 스킬(SOLVE_SYSTEM_PROMPT)이 적용된다.
+    assert stub_provider.calls[-1]["system"] == prompts.SOLVE_SYSTEM_PROMPT
+
+
+def test_chat_with_file_but_no_problem_uses_chat_prompt(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """파일만 첨부(문항 미지정)한 대화는 풀이 스킬을 쓰지 않는다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    conversation_id = _create(client)["id"]
+
+    _chat(client, conversation_id, "이 시험지 어때요?", file_id=node_id)
+
+    assert stub_provider.calls[-1]["system"] == prompts.CHAT_SYSTEM_PROMPT
+
+
+def test_free_chat_uses_chat_prompt(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """파일 무관 자유 대화는 기존대로 채팅 프롬프트를 쓴다."""
+    conversation_id = _create(client)["id"]
+
+    _chat(client, conversation_id, "안녕하세요")
+
+    assert stub_provider.calls[-1]["system"] == prompts.CHAT_SYSTEM_PROMPT
 
 
 def test_chat_with_missing_problem_rejected(
