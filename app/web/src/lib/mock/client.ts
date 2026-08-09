@@ -47,7 +47,11 @@ import type {
   Job,
   JobCreateRequest,
   JobCreated,
+  ExportFormat,
+  ExportInclude,
+  ExportTarget,
   JobsResponse,
+  VariantsResponse,
   ReextractResult,
   Section,
   Solution,
@@ -64,6 +68,9 @@ import type {
 /** DOCX(Word) MIME. '문제만' 내보내기 목 blob 에 쓴다. */
 const DOCX_MEDIA_TYPE =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+/** HWPX(한글) MIME. */
+const HWPX_MEDIA_TYPE = 'application/hwp+zip';
 
 /** 문항별 스레드 키. null = 시험지 전역. */
 function threadKey(fileId: string, problemNo: number | null): string {
@@ -710,13 +717,27 @@ export const mockClient: ApiClient = {
     return withAccess(mockCropUrl(no));
   },
 
-  async exportProblemsDocx(id: string): Promise<{ blob: Blob; filename: string | null }> {
+  async exportDocument(
+    target: ExportTarget,
+    id: string,
+    format: ExportFormat,
+    include: ExportInclude,
+  ): Promise<{ blob: Blob; filename: string | null }> {
     await sleep(LATENCY_MS);
     requireAuth();
     const node = findNode(id);
-    // 목은 실제 DOCX 를 만들지 않는다. 다운로드 흐름(blob→a[download]) 확인용 더미 blob.
-    const blob = new Blob([`mock docx: ${node.name}`], { type: DOCX_MEDIA_TYPE });
+    // 목은 실제 문서를 만들지 않는다. 다운로드 흐름(blob→a[download]) 확인용 더미.
+    const type = format === 'hwpx' ? HWPX_MEDIA_TYPE : DOCX_MEDIA_TYPE;
+    const blob = new Blob([`mock ${format}: ${target}/${node.name}/${include}`], { type });
     return { blob, filename: null };
+  },
+
+  async getVariants(id: string): Promise<VariantsResponse> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    findNode(id);
+    // 목은 생성된 변형을 서버에 쌓지 않는다(스토어 캐시로 충분).
+    return { variants: [] };
   },
 
   async getSolutions(id: string): Promise<SolutionsResponse> {

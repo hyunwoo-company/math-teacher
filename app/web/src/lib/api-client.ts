@@ -26,7 +26,11 @@ import type {
   UsageSummaryResponse,
   JobCreateRequest,
   JobCreated,
+  ExportFormat,
+  ExportInclude,
+  ExportTarget,
   JobsResponse,
+  VariantsResponse,
 } from '@/types/api';
 
 export interface ApiClient {
@@ -69,7 +73,22 @@ export interface ApiClient {
    * 크롭 이미지만 담고 풀이/변형/정답은 넣지 않는다. 파일명은 서버 Content-Disposition
    * 을 우선하고, 없으면(교차 오리진 등) 호출부가 `<시험지명>_문제.docx` 로 정한다.
    */
-  exportProblemsDocx(id: string): Promise<{ blob: Blob; filename: string | null }>;
+  /**
+   * 문서를 내려받는다(계약: `GET /api/{files|notes}/{id}[/variants]/export.{docx|hwpx}`).
+   *
+   * `target` 이 무엇을(시험지/변형/오답노트), `format` 이 어떤 형식으로,
+   * `include` 가 문제만인지 해설까지인지를 정한다. 파일명은 서버
+   * `Content-Disposition` 을 우선한다.
+   */
+  exportDocument(
+    target: ExportTarget,
+    id: string,
+    format: ExportFormat,
+    include: ExportInclude,
+  ): Promise<{ blob: Blob; filename: string | null }>;
+
+  /** 저장된 변형 목록(시험지를 열 때 스토어를 채운다). */
+  getVariants(id: string): Promise<VariantsResponse>;
 
   getSolutions(id: string): Promise<SolutionsResponse>;
   /**

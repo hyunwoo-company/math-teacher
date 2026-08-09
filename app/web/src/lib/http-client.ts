@@ -35,7 +35,11 @@ import type {
   UsageSummaryResponse,
   JobCreateRequest,
   JobCreated,
+  ExportFormat,
+  ExportInclude,
+  ExportTarget,
   JobsResponse,
+  VariantsResponse,
 } from '@/types/api';
 
 /** 브라우저에 보관한 API 키(웹 모드). 서버에 저장하지 않는다. */
@@ -318,10 +322,22 @@ export const httpClient: ApiClient = {
     return withAccess(url(`/api/files/${encodeURIComponent(id)}/problems/${no}/crop`));
   },
 
-  async exportProblemsDocx(id: string): Promise<{ blob: Blob; filename: string | null }> {
+  async exportDocument(
+    target: ExportTarget,
+    id: string,
+    format: ExportFormat,
+    include: ExportInclude,
+  ): Promise<{ blob: Blob; filename: string | null }> {
     // 바이너리 다운로드. fetch 로 받으므로 헤더 인증(authHeaders)과 ?access= 를 함께 건다
-    // (백엔드는 이 경로에 두 방식 모두 허용). 파일명은 서버 Content-Disposition 우선.
-    const path = `/api/files/${encodeURIComponent(id)}/export.docx`;
+    // (백엔드는 이 경로들에 두 방식 모두 허용). 파일명은 서버 Content-Disposition 우선.
+    const encoded = encodeURIComponent(id);
+    const base =
+      target === 'note'
+        ? `/api/notes/${encoded}`
+        : target === 'variants'
+          ? `/api/files/${encoded}/variants`
+          : `/api/files/${encoded}`;
+    const path = `${base}/export.${format}?include=${include}`;
     let response: Response;
     try {
       response = await fetch(withAccess(url(path)), {
@@ -337,8 +353,11 @@ export const httpClient: ApiClient = {
       throw await errorFromResponse(response);
     }
     const blob = await response.blob();
-    const filename = filenameFromDisposition(response.headers.get('Content-Disposition'));
-    return { blob, filename };
+    return { blob, filename: filenameFromDisposition(response.headers.get('Content-Disposition')) };
+  },
+
+  getVariants(id: string) {
+    return requestJson<VariantsResponse>(`/api/files/${encodeURIComponent(id)}/variants`);
   },
 
   getSolutions(id: string) {

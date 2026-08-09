@@ -15,14 +15,23 @@ interface AddToNoteButtonProps {
   sourceNodeId: string;
   problemNumbers: number[];
   compact?: boolean;
+  /** 담기에 성공한 뒤 호출(문항 선택 해제 등). */
+  onDone?: () => void;
 }
 
 /**
  * "오답노트에 담기" 버튼 + 노트 선택 다이얼로그.
- * 노트 목록은 열 때마다 `GET /api/tree?section=note` 로 새로 받는다(최신 반영).
+ *
+ * 문항도 노트도 여러 개를 고를 수 있다. 노트 목록은 열 때마다
+ * `GET /api/tree?section=note` 로 새로 받는다(최신 반영).
  */
-export function AddToNoteButton({ sourceNodeId, problemNumbers, compact }: AddToNoteButtonProps) {
-  const addProblemsToNote = useWorkspace((state) => state.addProblemsToNote);
+export function AddToNoteButton({
+  sourceNodeId,
+  problemNumbers,
+  compact,
+  onDone,
+}: AddToNoteButtonProps) {
+  const addProblemsToNotes = useWorkspace((state) => state.addProblemsToNotes);
   const createNote = useWorkspace((state) => state.createNote);
   const showToast = useWorkspace((state) => state.showToast);
 
@@ -30,12 +39,15 @@ export function AddToNoteButton({ sourceNodeId, problemNumbers, compact }: AddTo
   const [loading, setLoading] = useState(false);
   const [noteNodes, setNoteNodes] = useState<TreeNode[] | null>(null);
   const [creating, setCreating] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     setLoading(true);
     setNoteNodes(null);
+    setPicked(new Set());
     void (async () => {
       try {
         const { nodes } = await api.getTree('note');
@@ -57,12 +69,27 @@ export function AddToNoteButton({ sourceNodeId, problemNumbers, compact }: AddTo
   const noteFiles = (noteNodes ?? []).filter((node) => node.type === 'file');
   const roots = noteNodes ? buildTree(noteNodes) : [];
 
-  const pick = async (noteId: string) => {
-    setOpen(false);
-    await addProblemsToNote(noteId, sourceNodeId, problemNumbers);
+  const toggle = (id: string) => {
+    setPicked((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
-  const label = problemNumbers.length === 1 ? '오답노트에 담기' : `${problemNumbers.length}개 담기`;
+  const submit = async () => {
+    if (picked.size === 0 || busy) return;
+    setBusy(true);
+    const ok = await addProblemsToNotes([...picked], sourceNodeId, problemNumbers);
+    setBusy(false);
+    setOpen(false);
+    if (ok) onDone?.();
+  };
+
+  const label =
+    problemNumbers.length > 1 ? `${problemNumbers.length}개 담기` : '오답노트에 담기';
+  const confirmLabel = picked.size > 1 ? `${picked.size}개 노트에 담기` : '담기';
 
   return (
     <>
@@ -88,6 +115,13 @@ export function AddToNoteButton({ sourceNodeId, problemNumbers, compact }: AddTo
           <>
             <DialogButton onClick={() => setCreating(true)}>새 오답노트</DialogButton>
             <DialogButton onClick={() => setOpen(false)}>닫기</DialogButton>
+            <DialogButton
+              onClick={() => void submit()}
+              disabled={picked.size === 0 || busy}
+              tone="primary"
+            >
+              {busy ? '담는 중…' : confirmLabel}
+            </DialogButton>
           </>
         }
       >
@@ -99,10 +133,17 @@ export function AddToNoteButton({ sourceNodeId, problemNumbers, compact }: AddTo
           </p>
         ) : (
           <div className="max-h-[320px] overflow-auto">
-            <p className="mb-1 text-[12px] text-slate-500">담을 오답노트를 선택하세요.</p>
+            <p className="mb-1 text-[12px] text-slate-500">
+              담을 오답노트를 선택하세요. (여러 개 가능)
+            </p>
             <ul>
               {roots.map((item) => (
-                <NotePickRow key={item.node.id} item={item} onPick={(id) => void pick(id)} />
+                <NotePickRow
+                  key={item.node.id}
+                  item={item}
+                  picked={picked}
+                  onToggle={toggle}
+                />
               ))}
             </ul>
           </div>
@@ -124,8 +165,17 @@ export function AddToNoteButton({ sourceNodeId, problemNumbers, compact }: AddTo
             // 방금 만든 노트를 찾아 담는다.
             try {
               const { nodes } = await api.getTree('note');
-              const made = [...nodes].reverse().find((node) => node.type === 'file' && node.name === value);
-              if (made) await addProblemsToNote(made.id, sourceNodeId, problemNumbers);
+              const made = [...nodes]
+                .reverse()
+                .find((node) => node.type === 'file' && node.name === value);
+              if (made) {
+                const added = await addProblemsToNotes(
+                  [made.id],
+                  sourceNodeId,
+                  problemNumbers,
+                );
+                if (added) onDone?.();
+              }
             } catch (error) {
               showToast({ kind: 'error', message: toUserMessage(error) });
             }
@@ -136,9 +186,18 @@ export function AddToNoteButton({ sourceNodeId, problemNumbers, compact }: AddTo
   );
 }
 
-function NotePickRow({ item, onPick }: { item: TreeItem; onPick: (id: string) => void }) {
+function NotePickRow({
+  item,
+  picked,
+  onToggle,
+}: {
+  item: TreeItem;
+  picked: Set<string>;
+  onToggle: (id: string) => void;
+}) {
   const { node } = item;
   const isFolder = node.type === 'folder';
+  const checked = picked.has(node.id);
   return (
     <li>
       <div style={{ paddingLeft: 4 + item.depth * 14 }}>
@@ -148,20 +207,27 @@ function NotePickRow({ item, onPick }: { item: TreeItem; onPick: (id: string) =>
             <span className="truncate">{node.name}</span>
           </div>
         ) : (
-          <button
-            type="button"
-            onClick={() => onPick(node.id)}
-            className="flex w-full items-center gap-1 rounded py-1 pr-2 text-left text-[13px] text-slate-700 hover:bg-blue-50"
-          >
+          <label className="flex w-full cursor-pointer items-center gap-1.5 rounded py-1 pr-2 text-[13px] text-slate-700 hover:bg-blue-50">
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={() => onToggle(node.id)}
+              className="h-3.5 w-3.5 shrink-0 accent-rose-600"
+            />
             <span aria-hidden>📕</span>
             <span className="truncate">{node.name}</span>
-          </button>
+          </label>
         )}
       </div>
       {item.children.length > 0 ? (
         <ul>
           {item.children.map((child) => (
-            <NotePickRow key={child.node.id} item={child} onPick={onPick} />
+            <NotePickRow
+              key={child.node.id}
+              item={child}
+              picked={picked}
+              onToggle={onToggle}
+            />
           ))}
         </ul>
       ) : null}

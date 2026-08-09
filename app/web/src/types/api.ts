@@ -355,6 +355,29 @@ export interface VariantRequest {
   effort?: string;
 }
 
+/* ── 내보내기 ────────────────────────────────────────────────────── */
+
+/** 무엇을 내보낼지. */
+export type ExportTarget = 'exam' | 'variants' | 'note';
+/** 파일 형식. hwpx 는 한글 네이티브, docx 는 한글·워드 모두에서 열린다. */
+export type ExportFormat = 'docx' | 'hwpx';
+/** 문서 구성: 문제만 / 문제+해설. */
+export type ExportInclude = 'problems' | 'full';
+
+/** 저장된 변형 1건. */
+export interface Variant {
+  no: number;
+  mode: VariantMode;
+  text: string;
+  usage: Usage | null;
+  cost: Cost | null;
+  created_at: string;
+}
+
+export interface VariantsResponse {
+  variants: Variant[];
+}
+
 /* ── 작업 큐 ─────────────────────────────────────────────────────── */
 
 export type JobKind = 'solve' | 'variant';

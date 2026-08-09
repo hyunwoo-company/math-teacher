@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { api } from '@/lib/api';
 import { VariantPanel } from '@/components/center/VariantPanel';
+import { ExportButton } from '@/components/center/ExportButton';
 import { InlineSolutionPanel } from '@/components/center/InlineSolutionPanel';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { ConfirmDialog } from '@/components/ui/Dialog';
@@ -60,9 +61,12 @@ export function NoteView() {
           </h1>
           <InlineBadge tone="rose">오답노트</InlineBadge>
           <InlineBadge>{items.length}문항</InlineBadge>
-          <span className="ml-auto shrink-0 text-[11px] text-slate-400">
-            만든 날짜 {formatDate(node.created_at)}
-          </span>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <ExportButton target="note" id={selectedNoteId ?? node.id} name={node.name} />
+            <span className="text-[11px] text-slate-400">
+              만든 날짜 {formatDate(node.created_at)}
+            </span>
+          </div>
         </div>
         <p className="mt-0.5 truncate text-[11px] text-slate-400">{path.join(' / ')}</p>
       </header>

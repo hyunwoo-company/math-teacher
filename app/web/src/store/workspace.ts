@@ -361,6 +361,17 @@ interface WorkspaceState {
     problemNumbers: number[],
     memo?: string | null,
   ) => Promise<boolean>;
+  /**
+   * 문항들을 **여러 오답노트에** 담는다. 노트별로 순차 호출하고 결과를 모아
+   * 토스트를 **한 번만** 낸다(노트마다 토스트가 뜨면 화면이 가려진다).
+   * 한 노트가 실패해도 나머지는 계속 담는다.
+   */
+  addProblemsToNotes: (
+    noteIds: string[],
+    sourceNodeId: string,
+    problemNumbers: number[],
+    memo?: string | null,
+  ) => Promise<boolean>;
   confirmNotePrompt: () => Promise<void>;
   cancelNotePrompt: () => void;
 
@@ -1342,6 +1353,33 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         set({ solutionsStatus: 'error' });
       }
     })();
+
+    // 저장된 변형을 스토어에 채운다. 새로고침해도 남고, 이미 만든 변형을 다시
+    // 생성해 쿼터를 낭비하지 않는다(실패는 조용히 무시).
+    void (async () => {
+      try {
+        const { variants } = await api.getVariants(id);
+        if (get().selectedFileId !== id || dataEpoch !== epoch) return;
+        if (variants.length === 0) return;
+        set((state) => {
+          let next = state.variants;
+          for (const variant of variants) {
+            next = setVariant(next, variantKey(id, variant.no), variant.mode, {
+              mode: variant.mode,
+              text: variant.text,
+              streamingText: '',
+              status: 'done',
+              usage: variant.usage,
+              cost: variant.cost,
+              error: null,
+            });
+          }
+          return { variants: next };
+        });
+      } catch {
+        // 저장 변형 조회 실패는 화면을 막지 않는다(생성은 여전히 가능).
+      }
+    })();
   },
 
   async selectNote(id: string) {
@@ -1596,6 +1634,64 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       get().showToast({ kind: 'error', message: toUserMessage(error) });
       return false;
     }
+  },
+
+  async addProblemsToNotes(
+    noteIds: string[],
+    sourceNodeId: string,
+    problemNumbers: number[],
+    memo: string | null = null,
+  ) {
+    if (noteIds.length === 0 || problemNumbers.length === 0) return false;
+
+    let addedTotal = 0;
+    let skippedTotal = 0;
+    const failed: string[] = [];
+    let firstError: string | null = null;
+
+    // 순차로 부른다. 같은 SQLite 를 동시에 건드리지 않고, 실패 원인을 노트 단위로
+    // 분간하기 위해서다.
+    for (const noteId of noteIds) {
+      try {
+        const result = await api.addNoteItems(noteId, sourceNodeId, problemNumbers, memo);
+        addedTotal += result.added.length;
+        skippedTotal += result.skipped.length;
+      } catch (error) {
+        const name = get().nodes.find((node) => node.id === noteId)?.name ?? noteId;
+        failed.push(name);
+        firstError = firstError ?? toUserMessage(error);
+      }
+    }
+
+    // 지금 보고 있는 노트가 대상에 있으면 즉시 갱신한다.
+    const openNote = get().selectedNoteId;
+    if (openNote && noteIds.includes(openNote)) await get().refreshNote();
+
+    const noteCount = noteIds.length - failed.length;
+    if (failed.length === noteIds.length) {
+      get().showToast({ kind: 'error', message: firstError ?? '오답노트에 담지 못했습니다.' });
+      return false;
+    }
+    if (addedTotal === 0 && skippedTotal > 0) {
+      get().showToast({ kind: 'info', message: '이미 모두 담겨 있습니다.' });
+      return true;
+    }
+
+    const problems = `${problemNumbers.length}개 문항`;
+    const notes = noteCount === 1 ? '오답노트에' : `${noteCount}개 오답노트에`;
+    const skipped = skippedTotal > 0 ? ` (이미 있던 ${skippedTotal}건은 건너뛰었습니다)` : '';
+    if (failed.length > 0) {
+      get().showToast({
+        kind: 'error',
+        message: `${problems}을 ${notes} 담았습니다.${skipped} '${failed.join(', ')}' 는 실패했습니다.`,
+      });
+      return true;
+    }
+    get().showToast({
+      kind: 'success',
+      message: `${problems}을 ${notes} 담았습니다.${skipped}`,
+    });
+    return true;
   },
 
   async confirmNotePrompt() {

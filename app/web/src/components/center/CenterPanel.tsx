@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { api } from '@/lib/api';
 import { PdfViewer } from '@/components/center/PdfViewer';
@@ -7,7 +8,7 @@ import { SolutionsTab } from '@/components/center/SolutionsTab';
 import { NoteView } from '@/components/center/NoteView';
 import { AddToNoteButton } from '@/components/center/AddToNoteButton';
 import { DownloadPdfButton } from '@/components/center/DownloadPdfButton';
-import { DownloadDocxButton } from '@/components/center/DownloadDocxButton';
+import { ExportButton } from '@/components/center/ExportButton';
 import { ReextractButton } from '@/components/center/ReextractButton';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { formatDate } from '@/lib/format';
@@ -16,6 +17,16 @@ import { useWorkspace } from '@/store/workspace';
 
 /** 가운데 패널: 시험지([PDF]/[풀이]) 또는 오답노트 항목 목록. */
 export function CenterPanel() {
+  // 문항 다중선택. 한 화면 안에서 끝나고 파일을 옮기면 사라져야 하므로 지역 상태다.
+  const [picking, setPicking] = useState(false);
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const openFileId = useWorkspace((state) => state.selectedFileId);
+
+  // 다른 시험지를 열면 선택을 버린다(엉뚱한 문항을 담는 사고 방지).
+  useEffect(() => {
+    setPicking(false);
+    setPicked(new Set());
+  }, [openFileId]);
   const openKind = useWorkspace((state) => state.openKind);
   const selectedFileId = useWorkspace((state) => state.selectedFileId);
   const fileDetail = useWorkspace((state) => state.fileDetail);
@@ -98,7 +109,8 @@ export function CenterPanel() {
               <>
                 <ReextractButton fileId={node.id} problemCount={node.file.problem_count} />
                 <DownloadPdfButton url={api.fileRawUrl(node.id)} fileName={node.name} />
-                <DownloadDocxButton fileId={node.id} fileName={node.name} />
+                <ExportButton target="exam" id={node.id} name={node.name} />
+                <ExportButton target="variants" id={node.id} name={node.name} />
               </>
             ) : null}
             <span className="text-[11px] text-slate-400">등록 {formatDate(node.created_at)}</span>
@@ -138,43 +150,121 @@ export function CenterPanel() {
             <span className="shrink-0 pr-1 text-[11px] text-slate-400">문제</span>
             {problems.map((problem) => {
               const status = solutions[problem.no]?.status ?? 'empty';
+              const checked = picked.has(problem.no);
               return (
                 <button
                   key={problem.no}
                   type="button"
-                  onClick={() => focusProblem(problem.no)}
-                  title={`${problem.no}번 문제 (${problem.page}쪽) · 클릭하면 이 문제로 대화가 시작됩니다`}
+                  {...(picking
+                    ? {
+                        'aria-pressed': checked,
+                        'aria-label': `${problem.no}번 선택/해제`,
+                      }
+                    : {
+                        'aria-current': selectedProblemNo === problem.no,
+                        'aria-label': `${problem.no}번 문제`,
+                      })}
+                  onClick={() => {
+                    if (!picking) {
+                      focusProblem(problem.no);
+                      return;
+                    }
+                    setPicked((current) => {
+                      const next = new Set(current);
+                      if (next.has(problem.no)) next.delete(problem.no);
+                      else next.add(problem.no);
+                      return next;
+                    });
+                  }}
+                  title={
+                    picking
+                      ? `${problem.no}번 선택/해제`
+                      : `${problem.no}번 문제 (${problem.page}쪽) · 클릭하면 이 문제로 대화가 시작됩니다`
+                  }
                   className={clsx(
-                    'h-6 w-7 shrink-0 rounded border text-[11px] tabular-nums',
-                    selectedProblemNo === problem.no
-                      ? 'border-blue-500 bg-blue-500 text-white'
-                      : status === 'done'
-                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                        : status === 'running'
-                          ? 'border-blue-200 bg-blue-50 text-blue-700'
-                          : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50',
+                    'h-6 shrink-0 rounded border text-[11px] tabular-nums',
+                    picking ? 'w-8' : 'w-7',
+                    picking && checked
+                      ? 'border-rose-500 bg-rose-500 text-white'
+                      : !picking && selectedProblemNo === problem.no
+                        ? 'border-blue-500 bg-blue-500 text-white'
+                        : status === 'done'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                          : status === 'running'
+                            ? 'border-blue-200 bg-blue-50 text-blue-700'
+                            : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50',
                   )}
                 >
-                  {problem.no}
+                  {picking && checked ? '✓' : problem.no}
                 </button>
               );
             })}
           </div>
-          {/* 계약 6: 문제 미선택 시 클릭이 대화 시작 트리거임을 알린다. */}
-          {selectedProblemNo == null ? (
-            <p className="mt-1 text-[11px] text-slate-400">
-              문제 번호를 클릭하면 그 문제로 대화를 시작할 수 있습니다.
-            </p>
-          ) : (
-            <div className="mt-1 flex items-center gap-2">
-              <span className="text-[11px] text-blue-700">
-                {selectedProblemNo}번 문제가 선택되었습니다.
+          {picking ? (
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-medium text-rose-700">
+                {picked.size}개 선택됨
               </span>
+              <button
+                type="button"
+                onClick={() => setPicked(new Set(problems.map((problem) => problem.no)))}
+                className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+              >
+                전체 선택
+              </button>
+              <button
+                type="button"
+                onClick={() => setPicked(new Set())}
+                className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+              >
+                선택 해제
+              </button>
               <AddToNoteButton
                 sourceNodeId={node.id}
-                problemNumbers={[selectedProblemNo]}
+                problemNumbers={[...picked].sort((a, b) => a - b)}
                 compact
+                onDone={() => {
+                  setPicked(new Set());
+                  setPicking(false);
+                }}
               />
+              <button
+                type="button"
+                onClick={() => {
+                  setPicked(new Set());
+                  setPicking(false);
+                }}
+                className="rounded px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100"
+              >
+                취소
+              </button>
+            </div>
+          ) : (
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              {/* 계약 6: 문제 미선택 시 클릭이 대화 시작 트리거임을 알린다. */}
+              {selectedProblemNo == null ? (
+                <span className="text-[11px] text-slate-400">
+                  문제 번호를 클릭하면 그 문제로 대화를 시작할 수 있습니다.
+                </span>
+              ) : (
+                <>
+                  <span className="text-[11px] text-blue-700">
+                    {selectedProblemNo}번 문제가 선택되었습니다.
+                  </span>
+                  <AddToNoteButton
+                    sourceNodeId={node.id}
+                    problemNumbers={[selectedProblemNo]}
+                    compact
+                  />
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => setPicking(true)}
+                className="ml-auto rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+              >
+                여러 개 선택
+              </button>
             </div>
           )}
         </div>

@@ -40,7 +40,7 @@ async function openSampleFile(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('treeitem', { name: /공통수학1/ }));
   await user.click(await screen.findByRole('treeitem', { name: /풍문고/ }));
   // 문제 번호 목록이 뜨면 fileDetail 로딩이 끝난 것이다.
-  await screen.findByRole('button', { name: '22' }, { timeout: 5000 });
+  await screen.findByRole('button', { name: '22번 문제' }, { timeout: 5000 });
 }
 
 describe('좌측 2섹션 (시험지 / 오답노트)', () => {
@@ -91,11 +91,13 @@ describe('좌측 2섹션 (시험지 / 오답노트)', () => {
     const user = await openWorkspace();
     // 먼저 시험지에서 3번을 담는다.
     await openSampleFile(user);
-    await user.click(screen.getByRole('button', { name: '3' }));
+    await user.click(screen.getByRole('button', { name: '3번 문제' }));
     await user.click(await screen.findByRole('button', { name: '오답노트에 담기' }));
     const pickDialog = await screen.findByRole('dialog', { name: /오답노트에 담기/ });
-    // 노트 목록은 비동기로 불러온다.
-    await user.click(await within(pickDialog).findByRole('button', { name: /중간고사 오답/ }));
+    // 노트 목록은 비동기로 불러온다. 노트는 체크박스로 고르고 확인을 눌러 담는다
+    // (여러 노트에 한 번에 담을 수 있다).
+    await user.click(await within(pickDialog).findByRole('checkbox', { name: /중간고사 오답/ }));
+    await user.click(within(pickDialog).getByRole('button', { name: '담기' }));
 
     // 오답노트 섹션에서 그 노트를 연다.
     await user.click(screen.getByRole('tab', { name: '오답노트' }));
@@ -195,7 +197,7 @@ describe('워크스페이스 화면 (목 모드)', () => {
     const user = await openWorkspace();
     await openSampleFile(user);
 
-    await user.click(await screen.findByRole('button', { name: '3' }));
+    await user.click(await screen.findByRole('button', { name: '3번 문제' }));
     const input = await screen.findByPlaceholderText(/질문을 입력하세요/);
     await user.type(input, '6번이랑 비교해서 설명해줘');
 
@@ -357,15 +359,15 @@ describe('워크스페이스 화면 (목 모드)', () => {
     // PDF 탭이 기본이고 뷰어가 붙는다.
     expect(screen.getByTestId('pdf-viewer-stub')).toBeInTheDocument();
     // 문제 번호 목록(22개)이 나온다.
-    expect(screen.getByRole('button', { name: '22' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '22번 문제' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '1번 문제' })).toBeInTheDocument();
   });
 
   it('문제를 클릭하면 그 문항이 대화 첨부 컨텍스트로 선택된다', async () => {
     const user = await openWorkspace();
     await openSampleFile(user);
 
-    await user.click(await screen.findByRole('button', { name: '7' }));
+    await user.click(await screen.findByRole('button', { name: '7번 문제' }));
 
     // 전역 대화이지만 문항을 고르면 그 문항이 첨부 컨텍스트로 걸린다.
     expect(useWorkspace.getState().selectedProblemNo).toBe(7);
