@@ -418,6 +418,7 @@ def _write_crops(
                 "image_w": problem.image_w,
                 "image_h": problem.image_h,
                 "text": problem.text,
+                "label": problem.label or str(problem.no),
             }
         )
     return rows
@@ -435,6 +436,7 @@ def file_detail(node_id: str) -> dict[str, Any]:
         "problems": [
             {
                 "no": problem["no"],
+                "label": problem.get("label") or str(problem["no"]),
                 "page": problem["page"],
                 "bbox": problem["bbox"],
                 "image_w": problem["image_w"],

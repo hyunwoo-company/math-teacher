@@ -123,7 +123,15 @@ export interface TreeResponse {
  * (service/extractor.py 의 Problem 을 따른다.)
  */
 export interface Problem {
+  /** 저장·조회에 쓰는 통짜 순번. 화면 조작은 전부 이 값을 쓴다. */
   no: number;
+  /**
+   * 문제지에 찍힌 번호 표기.
+   *
+   * 구획마다 번호가 1 부터 다시 시작하는 교재(부교재·문제집)에서만 `no` 와
+   * 다르다. 보통 시험지는 둘이 같다.
+   */
+  label?: string;
   page: number;
   bbox: number[];
   image_w: number;

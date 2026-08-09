@@ -14,6 +14,7 @@ import type { Job } from '@/types/api';
  */
 export function JobBanner() {
   const jobs = useWorkspace((state) => state.jobs);
+  const cancelingJobIds = useWorkspace((state) => state.cancelingJobIds);
   const cancelJob = useWorkspace((state) => state.cancelJob);
   const openNode = useWorkspace((state) => state.openNode);
   const setSection = useWorkspace((state) => state.setSection);
@@ -27,6 +28,7 @@ export function JobBanner() {
 
   const current = active[0];
   const waiting = active.slice(1);
+  const canceling = current != null && cancelingJobIds.includes(current.id);
 
   const open = (job: Job) => {
     void setSection('exam');
@@ -41,7 +43,7 @@ export function JobBanner() {
           <span className="min-w-0 truncate text-[12px] text-blue-900" title={current.node_name}>
             <span className="font-medium">{current.node_name}</span>
             <span className="mx-1 text-blue-400">·</span>
-            {describe(current)}
+            {canceling ? '중단하는 중… (현재 문항을 마치면 멈춥니다)' : describe(current)}
           </span>
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             <button
@@ -53,10 +55,11 @@ export function JobBanner() {
             </button>
             <button
               type="button"
+              disabled={canceling}
               onClick={() => void cancelJob(current.id)}
-              className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+              className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
             >
-              취소
+              {canceling ? '중단 중…' : '취소'}
             </button>
           </div>
         </div>

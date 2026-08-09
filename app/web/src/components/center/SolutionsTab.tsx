@@ -19,6 +19,9 @@ const EMPTY_PROBLEMS: Problem[] = [];
 /** 중앙 [풀이] 탭: 문제별 아코디언. */
 export function SolutionsTab() {
   const fileDetail = useWorkspace((state) => state.fileDetail);
+  const picking = useWorkspace((state) => state.notePicking);
+  const notePicked = useWorkspace((state) => state.notePicked);
+  const toggleNotePick = useWorkspace((state) => state.toggleNotePick);
   const solutions = useWorkspace((state) => state.solutions);
   const solutionsStatus = useWorkspace((state) => state.solutionsStatus);
   const selectedProblemNo = useWorkspace((state) => state.selectedProblemNo);
@@ -66,6 +69,8 @@ export function SolutionsTab() {
       />
     );
   }
+
+  const pickedSet = new Set(notePicked);
 
   const toggle = (no: number) => {
     setOpenSet((current) => {
@@ -122,6 +127,9 @@ export function SolutionsTab() {
                 onSolveOne={() => void startSolve([problem.no])}
                 onResolveOne={() => void startSolve([problem.no], { force: true })}
                 disabled={solve.running}
+                picking={picking}
+                picked={pickedSet.has(problem.no)}
+                onTogglePick={() => toggleNotePick(problem.no)}
               />
             ))}
           </ul>
@@ -142,6 +150,11 @@ interface SolutionRowProps {
   onSolveOne: () => void;
   onResolveOne: () => void;
   disabled: boolean;
+  /** 오답노트 담기 모드인지. */
+  picking: boolean;
+  /** 이 문항이 담기 대상으로 골라졌는지. */
+  picked: boolean;
+  onTogglePick: () => void;
 }
 
 function SolutionRow({
@@ -155,6 +168,9 @@ function SolutionRow({
   onSolveOne,
   onResolveOne,
   disabled,
+  picking,
+  picked,
+  onTogglePick,
 }: SolutionRowProps) {
   const status = entry?.status ?? (problem.has_solution ? 'done' : 'empty');
   const streaming = status === 'running';
@@ -163,8 +179,18 @@ function SolutionRow({
   const tokens = totalTokens(entry?.usage);
 
   return (
-    <li className={clsx(selected && 'bg-blue-50/40')}>
+    <li className={clsx(selected && 'bg-blue-50/40', picking && picked && 'bg-rose-50/60')}>
       <div className="flex w-full items-start gap-3 px-3 py-2">
+        {/* 담기 모드에서만 체크박스가 보인다. 상단 번호 줄과 같은 선택을 공유한다. */}
+        {picking ? (
+          <input
+            type="checkbox"
+            checked={picked}
+            onChange={() => onTogglePick()}
+            aria-label={`${problem.no}번 오답노트 선택`}
+            className="mt-1 h-4 w-4 shrink-0 accent-rose-600"
+          />
+        ) : null}
         <button
           type="button"
           onClick={onToggle}
@@ -176,6 +202,12 @@ function SolutionRow({
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">
               <span className="text-[13px] font-semibold text-slate-800">{problem.no}번</span>
+              {/* 구획마다 번호가 되돌아가는 교재는 문제지 표기가 따로 있다. */}
+              {problem.label && problem.label !== String(problem.no) ? (
+                <span className="text-[11px] text-amber-700">
+                  문제지 {problem.label}번
+                </span>
+              ) : null}
               <span className="text-[11px] text-slate-400">{problem.page}쪽</span>
               <StatusBadge status={status} truncated={entry?.truncated ?? false} />
             </span>

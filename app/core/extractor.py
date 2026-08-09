@@ -106,7 +106,14 @@ class Anchor:
 
 @dataclass
 class Problem:
-    """분리된 문제 하나."""
+    """분리된 문제 하나.
+
+    `no` 는 **문서 안에서 유일한 통짜 순번**이다. 부교재·문제집은 구획마다
+    (`< 기 본 >` / `< 심 화 >`) 번호를 1 부터 다시 매기는데, 그대로 두면
+    `problems` 의 기본키 `(node_id, no)` 가 충돌해 뒤 문항이 앞 문항을 덮어쓴다.
+    그래서 저장용 번호는 통짜로 다시 매기고, 원문 표기는 `label` 에 남긴다
+    (번호가 겹치지 않는 보통 시험지에서는 둘이 같다).
+    """
 
     no: int
     page: int
@@ -115,6 +122,8 @@ class Problem:
     image_b64: str | None = None
     image_w: int = 0
     image_h: int = 0
+    #: 원문에 찍힌 번호 표기. 보통 `str(no)` 와 같다.
+    label: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -270,6 +279,60 @@ def _longest_increasing(numbers: list[int]) -> list[int]:
     return list(reversed(chain))
 
 
+def _renumber_duplicates(problems: list[Problem]) -> None:
+    """번호가 겹치면 읽는 순서대로 1..N 을 다시 매긴다 (제자리 수정).
+
+    구획마다 번호를 되돌리는 교재(`< 기 본 >` 1~5, `< 심 화 >` 1~2)를 그대로
+    저장하면 `problems` 의 기본키 `(node_id, no)` 가 충돌해 뒤 문항이 앞 문항을
+    덮어쓴다. 겹칠 때만 다시 매기므로 보통 시험지는 번호가 그대로다.
+
+    원문 표기는 이미 `label` 에 들어 있어 화면에서 "문제지 표기: 1번" 으로
+    보여줄 수 있다.
+
+    Args:
+        problems: 읽는 순서대로 정렬된 문제 목록.
+    """
+    numbers = [problem.no for problem in problems]
+    if len(numbers) == len(set(numbers)):
+        return
+    for index, problem in enumerate(problems, start=1):
+        problem.no = index
+
+
+def _pick_anchor_chain(numbers: list[int]) -> list[int]:
+    """오탐을 버리되 **구획마다 번호가 1부터 다시 시작하는 교재**를 지원한다.
+
+    시험지는 1..N 이 한 번만 흐르지만, 부교재·문제집은 `< 기 본 >` / `< 심 화 >`
+    처럼 구획마다 번호를 되돌린다. 순증가만 인정하면 두 번째 구획이 통째로
+    버려진다(실측: 풍문고 부교재).
+
+    규칙은 둘뿐이다.
+      * 직전보다 크면 같은 구획으로 이어간다.
+      * `1` 이 다시 나오면 새 구획이 시작된 것으로 본다.
+    그 외(작아지지만 1 이 아닌 값)는 오탐으로 버린다.
+
+    구획이 하나뿐이면 결과가 `_longest_increasing` 과 같다. 다만 순증가 최장
+    부분수열보다 짧아질 수 있어 **둘 중 더 많이 살리는 쪽**을 고른다.
+
+    Args:
+        numbers: 읽는 순서대로 나열한 앵커 번호.
+
+    Returns:
+        채택한 앵커의 인덱스 목록(읽는 순서).
+    """
+    if not numbers:
+        return []
+
+    reset_chain: list[int] = []
+    previous: int | None = None
+    for index, value in enumerate(numbers):
+        if previous is None or value > previous or value == 1:
+            reset_chain.append(index)
+            previous = value
+    increasing = _longest_increasing(numbers)
+    return reset_chain if len(reset_chain) >= len(increasing) else increasing
+
+
 def find_anchors(
     doc: fitz.Document, *, indent_tol: float = DEFAULT_ANCHOR_INDENT_TOL
 ) -> list[Anchor]:
@@ -322,7 +385,7 @@ def find_anchors(
     delimiter = _dominant_delimiter(candidates)
     kept = [anchor for anchor, delim in candidates if delim == delimiter]
 
-    keep = _longest_increasing([a.no for a in kept])
+    keep = _pick_anchor_chain([a.no for a in kept])
     return [kept[i] for i in keep]
 
 
@@ -607,8 +670,11 @@ def extract_problems(
                     image_b64=image_b64,
                     image_w=width,
                     image_h=height,
+                    label=str(anchor.no),
                 )
             )
+
+        _renumber_duplicates(problems)
 
         return ExtractResult(
             page_count=doc.page_count,

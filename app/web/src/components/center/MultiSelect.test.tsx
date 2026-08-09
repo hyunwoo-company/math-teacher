@@ -1,8 +1,9 @@
 /**
- * 문항 다중선택 + 오답노트 다중선택.
+ * 오답노트 담기: 문항 다중선택 + 노트 다중선택.
  *
- * 선택 모드에서는 번호 클릭이 대화 시작(focusProblem)이 아니라 체크 토글이다.
- * 두 동작이 섞이지 않게 모드로 가른다.
+ * [오답노트에 담기] 를 누르면 담기 모드로 들어가고, 그때부터 번호 클릭은 대화
+ * 시작(focusProblem)이 아니라 체크 토글이다. 선택은 스토어에 있어서 상단 번호
+ * 줄과 [풀이] 탭 목록이 같은 선택을 공유한다.
  */
 
 import { render, screen, waitFor } from '@testing-library/react';
@@ -29,14 +30,14 @@ async function openFile() {
 }
 
 describe('문항 다중선택 (CenterPanel)', () => {
-  it('[여러 개 선택] 을 누르면 번호 클릭이 대화 시작이 아니라 토글이 된다', async () => {
+  it('[오답노트에 담기] 를 누르면 번호 클릭이 대화 시작이 아니라 토글이 된다', async () => {
     const user = userEvent.setup();
     await openFile();
     const focusProblem = vi.fn();
     useWorkspace.setState({ focusProblem });
 
     render(<CenterPanel />);
-    await user.click(screen.getByRole('button', { name: '여러 개 선택' }));
+    await user.click(screen.getByRole('button', { name: '오답노트에 담기' }));
     await user.click(screen.getByRole('button', { name: '2번 선택/해제' }));
 
     expect(focusProblem).not.toHaveBeenCalled();
@@ -61,7 +62,7 @@ describe('문항 다중선택 (CenterPanel)', () => {
     await openFile();
     render(<CenterPanel />);
 
-    await user.click(screen.getByRole('button', { name: '여러 개 선택' }));
+    await user.click(screen.getByRole('button', { name: '오답노트에 담기' }));
     for (const no of [2, 4, 7]) {
       await user.click(screen.getByRole('button', { name: `${no}번 선택/해제` }));
     }
@@ -76,8 +77,9 @@ describe('문항 다중선택 (CenterPanel)', () => {
     await openFile();
     render(<CenterPanel />);
 
-    await user.click(screen.getByRole('button', { name: '여러 개 선택' }));
-    expect(screen.getByRole('button', { name: '오답노트에 담기' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: '오답노트에 담기' }));
+    // 담기 모드에 들어가면 확정 버튼은 "담을 문제를 고르세요" 로 바뀌고 비활성이다.
+    expect(screen.getByRole('button', { name: '담을 문제를 고르세요' })).toBeDisabled();
   });
 
   it('전체 선택 / 선택 해제가 동작한다', async () => {
@@ -85,7 +87,7 @@ describe('문항 다중선택 (CenterPanel)', () => {
     await openFile();
     render(<CenterPanel />);
 
-    await user.click(screen.getByRole('button', { name: '여러 개 선택' }));
+    await user.click(screen.getByRole('button', { name: '오답노트에 담기' }));
     await user.click(screen.getByRole('button', { name: '전체 선택' }));
     expect(screen.getByText('22개 선택됨')).toBeInTheDocument();
 

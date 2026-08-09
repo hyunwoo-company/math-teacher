@@ -52,6 +52,7 @@ export function AiPanel({ onCollapse }: { onCollapse?: () => void }) {
   const startSolve = useWorkspace((state) => state.startSolve);
   const cancelJob = useWorkspace((state) => state.cancelJob);
   const jobs = useWorkspace((state) => state.jobs);
+  const cancelingJobIds = useWorkspace((state) => state.cancelingJobIds);
   const sendChat = useWorkspace((state) => state.sendChat);
   const abortChat = useWorkspace((state) => state.abortChat);
   const newConversation = useWorkspace((state) => state.newConversation);
@@ -71,6 +72,16 @@ export function AiPanel({ onCollapse }: { onCollapse?: () => void }) {
   }, [messages]);
 
   const subscriptionAvailable = env?.subscription.available === true;
+  // 중단 버튼은 스토어의 solve 가 아니라 **작업 목록**을 근거로 삼는다.
+  // 화면을 옮겼다 돌아와도, 새로고침해도 같은 판단이 나온다.
+  const runningSolveJob =
+    jobs.find(
+      (job) =>
+        job.node_id === selectedFileId &&
+        job.kind === 'solve' &&
+        (job.status === 'running' || job.status === 'queued'),
+    ) ?? null;
+  const canceling = runningSolveJob != null && cancelingJobIds.includes(runningSolveJob.id);
   const unsolved = fileDetail
     ? fileDetail.problems.filter((problem) => solutions[problem.no]?.status !== 'done').length
     : 0;
@@ -144,22 +155,19 @@ export function AiPanel({ onCollapse }: { onCollapse?: () => void }) {
               ▸
             </button>
           ) : null}
-          {solve.running ? (
+          {runningSolveJob ? (
             <button
               type="button"
-              onClick={() => {
-                // 이 시험지의 진행 중 풀이 작업을 취소한다(서버 큐에서 뺀다).
-                const running = jobs.find(
-                  (job) =>
-                    job.node_id === selectedFileId &&
-                    job.kind === 'solve' &&
-                    (job.status === 'running' || job.status === 'queued'),
-                );
-                if (running) void cancelJob(running.id);
-              }}
-              className="flex-1 rounded border border-rose-600 bg-rose-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-rose-700"
+              disabled={canceling}
+              onClick={() => void cancelJob(runningSolveJob.id)}
+              title={
+                canceling
+                  ? '지금 풀고 있는 문항을 마치면 멈춥니다'
+                  : '이 시험지의 풀이 작업을 중단합니다'
+              }
+              className="flex-1 rounded border border-rose-600 bg-rose-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-rose-700 disabled:opacity-60"
             >
-              풀이 중단
+              {canceling ? '중단하는 중…' : '풀이 중단'}
             </button>
           ) : (
             <button

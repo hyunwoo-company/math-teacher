@@ -90,9 +90,14 @@ class NodeResponse(BaseModel):
 
 
 class ProblemOut(BaseModel):
-    """추출된 문항 1건."""
+    """추출된 문항 1건.
+
+    `no` 는 저장·조회에 쓰는 통짜 순번이고, `label` 은 문제지에 찍힌 표기다.
+    구획마다 번호가 1 부터 다시 시작하는 교재에서만 둘이 다르다.
+    """
 
     no: int
+    label: str = ""
     page: int
     bbox: list[float]
     image_w: int

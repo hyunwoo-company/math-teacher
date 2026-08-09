@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+
 import clsx from 'clsx';
 import { api } from '@/lib/api';
 import { PdfViewer } from '@/components/center/PdfViewer';
@@ -17,16 +17,14 @@ import { useWorkspace } from '@/store/workspace';
 
 /** 가운데 패널: 시험지([PDF]/[풀이]) 또는 오답노트 항목 목록. */
 export function CenterPanel() {
-  // 문항 다중선택. 한 화면 안에서 끝나고 파일을 옮기면 사라져야 하므로 지역 상태다.
-  const [picking, setPicking] = useState(false);
-  const [picked, setPicked] = useState<Set<number>>(new Set());
-  const openFileId = useWorkspace((state) => state.selectedFileId);
-
-  // 다른 시험지를 열면 선택을 버린다(엉뚱한 문항을 담는 사고 방지).
-  useEffect(() => {
-    setPicking(false);
-    setPicked(new Set());
-  }, [openFileId]);
+  // 담기 선택은 스토어에 있다([풀이] 탭 목록과 같은 선택을 공유해야 한다).
+  const picking = useWorkspace((state) => state.notePicking);
+  const pickedList = useWorkspace((state) => state.notePicked);
+  const startNotePicking = useWorkspace((state) => state.startNotePicking);
+  const stopNotePicking = useWorkspace((state) => state.stopNotePicking);
+  const toggleNotePick = useWorkspace((state) => state.toggleNotePick);
+  const setNotePicked = useWorkspace((state) => state.setNotePicked);
+  const picked = new Set(pickedList);
   const openKind = useWorkspace((state) => state.openKind);
   const selectedFileId = useWorkspace((state) => state.selectedFileId);
   const fileDetail = useWorkspace((state) => state.fileDetail);
@@ -91,8 +89,13 @@ export function CenterPanel() {
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-white">
       <header className="border-b border-slate-200 px-3 py-2">
-        <div className="flex items-center gap-2">
-          <h1 className="truncate text-[14px] font-semibold text-slate-800" title={node.name}>
+        {/* 좁은 화면에서 버튼이 우측 패널을 밀지 않도록 줄바꿈을 허용하고,
+            제목은 min-w-0 로 줄여 준다. */}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <h1
+            className="min-w-0 flex-1 truncate text-[14px] font-semibold text-slate-800"
+            title={node.name}
+          >
             {node.name}
           </h1>
           {node.file ? (
@@ -104,7 +107,7 @@ export function CenterPanel() {
               </InlineBadge>
             </>
           ) : null}
-          <div className="ml-auto flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
             {node.file ? (
               <>
                 <ReextractButton fileId={node.id} problemCount={node.file.problem_count} />
@@ -169,12 +172,7 @@ export function CenterPanel() {
                       focusProblem(problem.no);
                       return;
                     }
-                    setPicked((current) => {
-                      const next = new Set(current);
-                      if (next.has(problem.no)) next.delete(problem.no);
-                      else next.add(problem.no);
-                      return next;
-                    });
+                    toggleNotePick(problem.no);
                   }}
                   title={
                     picking
@@ -205,35 +203,33 @@ export function CenterPanel() {
               <span className="text-[11px] font-medium text-rose-700">
                 {picked.size}개 선택됨
               </span>
+              <span className="text-[11px] text-slate-400">
+                번호나 아래 [풀이] 목록에서 문제를 골라 주세요.
+              </span>
               <button
                 type="button"
-                onClick={() => setPicked(new Set(problems.map((problem) => problem.no)))}
+                onClick={() => setNotePicked(problems.map((problem) => problem.no))}
                 className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
               >
                 전체 선택
               </button>
               <button
                 type="button"
-                onClick={() => setPicked(new Set())}
+                onClick={() => setNotePicked([])}
                 className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
               >
                 선택 해제
               </button>
               <AddToNoteButton
                 sourceNodeId={node.id}
-                problemNumbers={[...picked].sort((a, b) => a - b)}
+                problemNumbers={pickedList}
                 compact
-                onDone={() => {
-                  setPicked(new Set());
-                  setPicking(false);
-                }}
+                autoOpen
+                onDone={stopNotePicking}
               />
               <button
                 type="button"
-                onClick={() => {
-                  setPicked(new Set());
-                  setPicking(false);
-                }}
+                onClick={stopNotePicking}
                 className="rounded px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100"
               >
                 취소
@@ -247,23 +243,20 @@ export function CenterPanel() {
                   문제 번호를 클릭하면 그 문제로 대화를 시작할 수 있습니다.
                 </span>
               ) : (
-                <>
-                  <span className="text-[11px] text-blue-700">
-                    {selectedProblemNo}번 문제가 선택되었습니다.
-                  </span>
-                  <AddToNoteButton
-                    sourceNodeId={node.id}
-                    problemNumbers={[selectedProblemNo]}
-                    compact
-                  />
-                </>
+                <span className="text-[11px] text-blue-700">
+                  {selectedProblemNo}번 문제가 선택되었습니다.
+                </span>
               )}
               <button
                 type="button"
-                onClick={() => setPicking(true)}
-                className="ml-auto rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+                onClick={() => {
+                  startNotePicking();
+                  // 지금 보고 있는 문항이 있으면 미리 골라 둔다(가장 흔한 조작).
+                  if (selectedProblemNo != null) setNotePicked([selectedProblemNo]);
+                }}
+                className="ml-auto rounded border border-rose-300 bg-white px-2 py-0.5 text-[11px] font-medium text-rose-700 hover:bg-rose-50"
               >
-                여러 개 선택
+                오답노트에 담기
               </button>
             </div>
           )}

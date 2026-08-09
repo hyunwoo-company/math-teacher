@@ -30,7 +30,7 @@ SECTION_NOTE: Final[str] = "note"
 
 # 스키마 버전. 1 = 최초, 2 = nodes.section / chat_messages.problem_no / note_items,
 # 3 = jobs(작업 큐), 4 = variants(변형 저장).
-SCHEMA_VERSION: Final[int] = 4
+SCHEMA_VERSION: Final[int] = 5
 
 SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS problems (
     image_w INTEGER NOT NULL DEFAULT 0,
     image_h INTEGER NOT NULL DEFAULT 0,
     text TEXT NOT NULL DEFAULT '',
+    -- 원문에 찍힌 번호 표기. `no` 는 저장용 통짜 순번이라 구획마다 번호가
+    -- 되돌아가는 교재에서는 둘이 다르다(extractor._renumber_duplicates).
+    label TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (node_id, no)
 );
 
@@ -231,6 +234,17 @@ def migrate(conn: sqlite3.Connection) -> None:
     if chat_columns and "problem_no" not in chat_columns:
         # 기존 행은 NULL 로 남는다 = 시험지 전역 스레드.
         conn.execute("ALTER TABLE chat_messages ADD COLUMN problem_no INTEGER NULL")
+
+    problem_columns = table_columns(conn, "problems")
+    if problem_columns and "label" not in problem_columns:
+        conn.execute("ALTER TABLE problems ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+    if problem_columns:
+        # 방어적 백필: 컬럼만 있고 값이 빈 행(구버전 삽입분)도 번호로 채운다.
+        # 예전에는 번호가 곧 표기였다.
+        conn.execute(
+            "UPDATE problems SET label = CAST(no AS TEXT)"
+            " WHERE label IS NULL OR label = ''"
+        )
 
     conn.executescript(POST_MIGRATION_SCHEMA)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -541,8 +555,8 @@ def replace_problems(
     conn.executemany(
         """
         INSERT INTO problems
-            (node_id, no, page, bbox, crop_path, image_w, image_h, text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (node_id, no, page, bbox, crop_path, image_w, image_h, text, label)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -554,6 +568,7 @@ def replace_problems(
                 int(problem["image_w"]),
                 int(problem["image_h"]),
                 str(problem.get("text") or ""),
+                str(problem.get("label") or problem["no"]),
             )
             for problem in problems
         ],
@@ -567,6 +582,9 @@ def _problem_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "page": int(row["page"]),
         "bbox": [float(v) for v in bbox],
         "crop_path": row["crop_path"],
+        # `sqlite3.Row` 는 `in` 으로 키를 못 물으므로 keys() 목록으로 확인한다.
+        # (마이그레이션 전에 열린 커넥션이 label 없는 행을 줄 수 있다.)
+        "label": str(row["label"] if "label" in list(row.keys()) else row["no"]),
         "image_w": int(row["image_w"]),
         "image_h": int(row["image_h"]),
         "text": row["text"],

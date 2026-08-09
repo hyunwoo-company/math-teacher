@@ -92,7 +92,10 @@ describe('좌측 2섹션 (시험지 / 오답노트)', () => {
     // 먼저 시험지에서 3번을 담는다.
     await openSampleFile(user);
     await user.click(screen.getByRole('button', { name: '3번 문제' }));
+    // [오답노트에 담기] 는 담기 모드로 들어가는 버튼이다. 보고 있던 문항이
+    // 미리 골라지므로 곧바로 확정 버튼을 누르면 된다.
     await user.click(await screen.findByRole('button', { name: '오답노트에 담기' }));
+    await user.click(await screen.findByRole('button', { name: '1개 담기' }));
     const pickDialog = await screen.findByRole('dialog', { name: /오답노트에 담기/ });
     // 노트 목록은 비동기로 불러온다. 노트는 체크박스로 고르고 확인을 눌러 담는다
     // (여러 노트에 한 번에 담을 수 있다).

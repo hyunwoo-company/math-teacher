@@ -309,3 +309,72 @@ def test_problems_below_header_table_are_not_dropped() -> None:
     """머리글 표가 있는 페이지의 문제가 통째로 버려지지 않는다."""
     result = ex.extract_problems(pdf_bytes=_build_header_table_pdf(), render_images=False)
     assert [problem.no for problem in result.problems] == [1, 2]
+
+
+# ── 구획마다 번호가 되돌아가는 교재 (부교재/문제집) ──────────────────
+# 실측: 풍문고 부교재는 `< 기 본 >` 1~5, `< 심 화 >` 1~2 로 번호가 리셋된다.
+# 순증가만 인정하면 두 번째 구획이 통째로 버려지고, 그대로 저장하면
+# problems 의 기본키 (node_id, no) 가 충돌해 뒤 문항이 앞 문항을 덮어쓴다.
+
+
+def test_pick_anchor_chain_allows_section_reset() -> None:
+    """`1` 이 다시 나오면 새 구획으로 보고 살린다."""
+    assert ex._pick_anchor_chain([1, 2, 3, 1, 2]) == [0, 1, 2, 3, 4]
+
+
+def test_pick_anchor_chain_still_drops_noise() -> None:
+    """1 이 아닌데 작아지는 값(본문 오탐)은 계속 버린다."""
+    assert ex._pick_anchor_chain([1, 2, 9, 3, 4]) == [0, 1, 3, 4]
+
+
+def test_pick_anchor_chain_matches_increasing_for_plain_exam() -> None:
+    """보통 시험지(리셋 없음)에서는 기존 순증가 결과와 같다."""
+    numbers = [1, 2, 3, 4, 5, 6]
+    assert ex._pick_anchor_chain(numbers) == ex._longest_increasing(numbers)
+
+
+def test_duplicate_numbers_are_renumbered_with_label_kept() -> None:
+    """번호가 겹치면 1..N 으로 다시 매기고 원문 표기는 label 에 남긴다."""
+    problems = [
+        ex.Problem(no=1, page=1, bbox=[0, 0, 1, 1], text="", label="1"),
+        ex.Problem(no=2, page=1, bbox=[0, 0, 1, 1], text="", label="2"),
+        ex.Problem(no=1, page=2, bbox=[0, 0, 1, 1], text="", label="1"),
+    ]
+    ex._renumber_duplicates(problems)
+
+    assert [problem.no for problem in problems] == [1, 2, 3]
+    assert [problem.label for problem in problems] == ["1", "2", "1"]
+
+
+def test_unique_numbers_are_left_alone() -> None:
+    """번호가 겹치지 않으면 손대지 않는다(보통 시험지 회귀 방지)."""
+    problems = [
+        ex.Problem(no=3, page=1, bbox=[0, 0, 1, 1], text="", label="3"),
+        ex.Problem(no=7, page=1, bbox=[0, 0, 1, 1], text="", label="7"),
+    ]
+    ex._renumber_duplicates(problems)
+
+    assert [problem.no for problem in problems] == [3, 7]
+
+
+def test_section_reset_pdf_keeps_every_problem() -> None:
+    """구획이 둘인 합성 PDF 에서 문항이 하나도 버려지지 않는다."""
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        # < 기 본 > 1~3
+        for index, y in enumerate((60, 200, 340), start=1):
+            page.insert_text((40, y), f"{index}. 기본 문제", fontsize=11)
+        # < 심 화 > 1~2 (번호가 되돌아간다)
+        for index, y in enumerate((480, 620), start=1):
+            page.insert_text((40, y), f"{index}. 심화 문제", fontsize=11)
+        pdf_bytes = doc.tobytes()
+    finally:
+        doc.close()
+
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+
+    # 5문항 모두 살아 있고 저장용 번호는 유일하다.
+    assert [problem.no for problem in result.problems] == [1, 2, 3, 4, 5]
+    # 원문 표기는 되돌아간 그대로 남는다.
+    assert [problem.label for problem in result.problems] == ["1", "2", "3", "1", "2"]

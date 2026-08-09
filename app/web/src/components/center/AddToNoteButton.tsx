@@ -17,6 +17,11 @@ interface AddToNoteButtonProps {
   compact?: boolean;
   /** 담기에 성공한 뒤 호출(문항 선택 해제 등). */
   onDone?: () => void;
+  /**
+   * 선택 모드에서 쓰는 확정 버튼. 라벨을 "N개 노트 선택" 으로 바꾸고,
+   * 고른 문항이 없으면 비활성으로 둔다.
+   */
+  autoOpen?: boolean;
 }
 
 /**
@@ -30,6 +35,7 @@ export function AddToNoteButton({
   problemNumbers,
   compact,
   onDone,
+  autoOpen = false,
 }: AddToNoteButtonProps) {
   const addProblemsToNotes = useWorkspace((state) => state.addProblemsToNotes);
   const createNote = useWorkspace((state) => state.createNote);
@@ -87,8 +93,13 @@ export function AddToNoteButton({
     if (ok) onDone?.();
   };
 
-  const label =
-    problemNumbers.length > 1 ? `${problemNumbers.length}개 담기` : '오답노트에 담기';
+  const label = autoOpen
+    ? problemNumbers.length > 0
+      ? `${problemNumbers.length}개 담기`
+      : '담을 문제를 고르세요'
+    : problemNumbers.length > 1
+      ? `${problemNumbers.length}개 담기`
+      : '오답노트에 담기';
   const confirmLabel = picked.size > 1 ? `${picked.size}개 노트에 담기` : '담기';
 
   return (

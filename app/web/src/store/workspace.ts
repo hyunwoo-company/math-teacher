@@ -389,6 +389,31 @@ interface WorkspaceState {
   jobs: Job[];
 
   /**
+   * 오답노트에 담을 문항 고르기 모드.
+   *
+   * 상단 번호 줄과 [풀이] 탭 목록 **양쪽**에서 같은 선택을 공유해야 해서
+   * 컴포넌트 지역 상태가 아니라 스토어에 둔다.
+   */
+  notePicking: boolean;
+  /** 고른 문항 번호. */
+  notePicked: number[];
+  /** 담기 모드를 켠다(이미 켜져 있으면 유지). */
+  startNotePicking: () => void;
+  /** 담기 모드를 끄고 선택을 비운다. */
+  stopNotePicking: () => void;
+  /** 문항 하나를 선택/해제한다. */
+  toggleNotePick: (no: number) => void;
+  /** 주어진 번호들로 선택을 통째로 바꾼다(전체 선택/해제용). */
+  setNotePicked: (numbers: number[]) => void;
+  /**
+   * 취소를 요청했지만 아직 서버가 멈추지 않은 작업 id.
+   *
+   * 프로바이더 호출은 중간에 끊을 수 없어 **현재 문항을 마친 뒤** 멈춘다.
+   * 그 사이 아무 표시가 없으면 "중지가 안 된다" 고 느끼므로 따로 들고 있는다.
+   */
+  cancelingJobIds: string[];
+
+  /**
    * 그 문항(file_id + problem_no)의 저장 풀이를 조회해 `problemSolutions` 에 채운다.
    * 저장분이 있으면 그대로 표시용으로 캐시하고, 없으면 빈 상태로 둔다(풀이는 하지 않음).
    * 이미 캐시(done/running/empty)가 있으면 재조회하지 않는다(오답노트 인라인 풀이용).
@@ -485,6 +510,13 @@ async function watchJob(job: Job): Promise<void> {
       switch (event.type) {
         case 'snapshot':
           setState((state) => ({
+            jobs: patchJobProgress(state.jobs, job.id, (item) => ({
+              ...item,
+              status: event.status,
+              total: event.total,
+              done_count: event.done_count,
+              current_no: event.current_no,
+            })),
             solve:
               state.selectedFileId === fileId && isSolve
                 ? {
@@ -517,6 +549,11 @@ async function watchJob(job: Job): Promise<void> {
 
         case 'problem':
           setState((state) => ({
+            jobs: patchJobProgress(state.jobs, job.id, (item) => ({
+              ...item,
+              status: 'running',
+              current_no: event.no,
+            })),
             solve:
               state.selectedFileId === fileId && isSolve
                 ? { ...state.solve, currentNo: event.no }
@@ -558,6 +595,10 @@ async function watchJob(job: Job): Promise<void> {
           if (!isSolve && mode) {
             const key = variantKey(fileId, event.no);
             setState((state) => ({
+              jobs: patchJobProgress(state.jobs, job.id, (item) => ({
+                ...item,
+                done_count: item.done_count + 1,
+              })),
               variants: patchVariant(state.variants, key, mode, (entry) => ({
                 ...entry,
                 status: 'done',
@@ -572,6 +613,10 @@ async function watchJob(job: Job): Promise<void> {
             break;
           }
           setState((state) => ({
+            jobs: patchJobProgress(state.jobs, job.id, (item) => ({
+              ...item,
+              done_count: item.done_count + 1,
+            })),
             solve:
               state.selectedFileId === fileId && isSolve
                 ? { ...state.solve, doneCount: state.solve.doneCount + 1 }
@@ -607,6 +652,10 @@ async function watchJob(job: Job): Promise<void> {
             break;
           }
           setState((state) => ({
+            jobs: patchJobProgress(state.jobs, job.id, (item) => ({
+              ...item,
+              done_count: item.done_count + 1,
+            })),
             solve:
               state.selectedFileId === fileId && isSolve
                 ? { ...state.solve, doneCount: state.solve.doneCount + 1 }
@@ -620,14 +669,27 @@ async function watchJob(job: Job): Promise<void> {
           break;
         }
 
-        case 'end':
+        case 'end': {
+          const finalStatus = event.status ?? 'done';
           setState((state) => ({
+            jobs: patchJobProgress(state.jobs, job.id, (item) => ({
+              ...item,
+              status: finalStatus,
+              current_no: null,
+            })),
+            cancelingJobIds: state.cancelingJobIds.filter((id) => id !== job.id),
             solve:
               state.selectedFileId === fileId && isSolve
-                ? { ...state.solve, running: false, currentNo: null }
+                ? {
+                    ...state.solve,
+                    running: false,
+                    currentNo: null,
+                    aborted: finalStatus === 'canceled',
+                  }
                 : state.solve,
           }));
           break;
+        }
 
         default:
           break;
@@ -644,13 +706,37 @@ async function watchJob(job: Job): Promise<void> {
     }
   } finally {
     jobSubscriptions.delete(job.id);
-    setState((state) => ({
-      solutions: settleRunning(state.solutions),
-      solve: { ...state.solve, running: false, currentNo: null },
-    }));
+    setState((state) =>
+      state.selectedFileId === fileId
+        ? {
+            solutions: settleRunning(state.solutions),
+            solve: { ...state.solve, running: false, currentNo: null },
+          }
+        : {},
+    );
     void getState().loadJobs();
     void getState().loadUsageSummary();
   }
+}
+
+/**
+ * 진행 중 작업의 카운터를 스토어 `jobs` 배열에도 반영한다.
+ *
+ * 배너는 `jobs` 를 읽는다. 이벤트로 화면만 갱신하고 이 배열을 놔두면 진행률이
+ * "3/22" 에서 멈춘 것처럼 보여 사용자가 작업이 죽었다고 오해한다.
+ */
+function patchJobProgress(
+  jobs: Job[],
+  jobId: string,
+  update: (job: Job) => Job,
+): Job[] {
+  let changed = false;
+  const next = jobs.map((job) => {
+    if (job.id !== jobId) return job;
+    changed = true;
+    return update(job);
+  });
+  return changed ? next : jobs;
 }
 
 /** 변형 이벤트에 실린 `mode`(백엔드가 delta/done/error 에 함께 넣어 준다). */
@@ -819,6 +905,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   pendingOp: null,
   reextracting: null,
   jobs: [],
+  cancelingJobIds: [],
+  notePicking: false,
+  notePicked: [],
 
   openKind: 'none',
   selectedFileId: null,
@@ -1310,6 +1399,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       solutionsStatus: 'loading',
       solve: emptySolve,
       focusRequest: null,
+      // 다른 시험지를 열면 담기 선택을 버린다(엉뚱한 문항을 담는 사고 방지).
+      notePicking: false,
+      notePicked: [],
     });
     // 새로고침 복원용: 마지막으로 연 파일을 기록한다.
     persistPrefs({ lastFileId: id });
@@ -1352,6 +1444,39 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         if (get().selectedFileId !== id || dataEpoch !== epoch) return;
         set({ solutionsStatus: 'error' });
       }
+    })();
+
+    // 이 시험지에 진행 중인 풀이 작업이 있으면 화면 상태를 되살린다.
+    // (파일을 옮겼다 돌아오면 solve 가 초기화되어 "풀고 있다" 표시가 사라졌다.)
+    void (async () => {
+      await get().loadJobs();
+      if (get().selectedFileId !== id || dataEpoch !== epoch) return;
+      const running = get().jobs.find(
+        (job) =>
+          job.node_id === id &&
+          job.kind === 'solve' &&
+          (job.status === 'running' || job.status === 'queued'),
+      );
+      if (!running) return;
+      set((state) => ({
+        solve: {
+          running: true,
+          total: running.total,
+          doneCount: running.done_count,
+          currentNo: running.current_no,
+          partial: state.solve.partial,
+          error: null,
+          aborted: false,
+        },
+        // 지금 풀고 있는 문항은 '생성 중' 으로 보여준다(다음 델타부터 이어진다).
+        solutions:
+          running.current_no != null
+            ? patchEntry(state.solutions, running.current_no, (entry) => ({
+                ...entry,
+                status: 'running',
+              }))
+            : state.solutions,
+      }));
     })();
 
     // 저장된 변형을 스토어에 채운다. 새로고침해도 남고, 이미 만든 변형을 다시
@@ -1773,19 +1898,44 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     void watchJob(created.job);
   },
 
+  startNotePicking() {
+    set({ notePicking: true });
+  },
+
+  stopNotePicking() {
+    set({ notePicking: false, notePicked: [] });
+  },
+
+  toggleNotePick(no: number) {
+    set((state) => ({
+      notePicked: state.notePicked.includes(no)
+        ? state.notePicked.filter((item) => item !== no)
+        : [...state.notePicked, no].sort((a, b) => a - b),
+    }));
+  },
+
+  setNotePicked(numbers: number[]) {
+    set({ notePicked: [...numbers].sort((a, b) => a - b) });
+  },
+
   async cancelJob(jobId: string) {
+    if (get().cancelingJobIds.includes(jobId)) return;
+    set((state) => ({ cancelingJobIds: [...state.cancelingJobIds, jobId] }));
     try {
       await api.cancelJob(jobId);
     } catch (error) {
+      set((state) => ({
+        cancelingJobIds: state.cancelingJobIds.filter((id) => id !== jobId),
+      }));
       get().showToast({ kind: 'error', message: toUserMessage(error) });
       return;
     }
-    jobSubscriptions.get(jobId)?.abort();
-    jobSubscriptions.delete(jobId);
-    set((state) => ({
-      solve: { ...state.solve, running: false, aborted: true, currentNo: null },
-      solutions: settleRunning(state.solutions),
-    }));
+    // **구독을 끊지 않는다.** 서버는 현재 문항을 마친 뒤 멈추므로, 끊어 버리면
+    // 실제로 멈춘 시점을 알 수 없어 화면이 멈춘 것처럼 보인다.
+    get().showToast({
+      kind: 'info',
+      message: '중단을 요청했습니다. 지금 풀고 있는 문항을 마치고 멈춥니다.',
+    });
     await get().loadJobs();
   },
 

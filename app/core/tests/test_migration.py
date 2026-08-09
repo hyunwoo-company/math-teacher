@@ -242,7 +242,7 @@ def test_v2_db_gains_variants_table(tmp_path: Path) -> None:
 
         conn = storage.connect()
         try:
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 4
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 5
             assert "variants" in {
                 str(row["name"])
                 for row in conn.execute(
@@ -365,3 +365,32 @@ def test_real_user_db_copy_migrates_safely(tmp_path: Path) -> None:
             after.close()
     finally:
         config.use_data_dir(original)
+
+
+def test_v4_db_gains_problem_label(tmp_path: Path) -> None:
+    """v4 DB 를 열면 `problems.label` 이 생기고 기존 행은 번호로 채워진다.
+
+    구획마다 번호가 되돌아가는 교재를 지원하려고 저장용 번호(`no`)를 통짜로
+    다시 매기면서, 원문 표기를 담을 자리가 필요해졌다.
+    """
+    config.use_data_dir(tmp_path / "data")
+    storage.init_db()
+
+    with storage.transaction() as conn:
+        assert "label" in storage.table_columns(conn, "problems")
+        conn.execute(
+            "INSERT INTO nodes (id, type, name, parent_id, section, created_at)"
+            " VALUES ('n1', 'file', '시험지', NULL, 'exam', '2026-08-10')"
+        )
+        # label 을 비운 채(구버전처럼) 넣고 마이그레이션이 채우는지 본다.
+        conn.execute(
+            "INSERT INTO problems (node_id, no, page, bbox, crop_path, text, label)"
+            " VALUES ('n1', 7, 1, '[0,0,1,1]', 'crops/n1/q07.png', '', '')"
+        )
+
+    with storage.transaction() as conn:
+        storage.migrate(conn)
+        row = conn.execute(
+            "SELECT label FROM problems WHERE node_id = 'n1' AND no = 7"
+        ).fetchone()
+    assert row["label"] == "7"
