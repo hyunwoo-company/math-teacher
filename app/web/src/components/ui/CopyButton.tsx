@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 
 interface CopyButtonProps {
-  /** 클립보드에 넣을 텍스트(풀이는 마크다운 원문을 넘긴다). */
+  /** 클립보드에 넣을 텍스트(호출부가 마크다운 원문 또는 평문을 골라 넘긴다). */
   text: string;
   /** 기본 라벨. 아이콘만 쓰려면 빈 문자열. */
   label?: string;

@@ -56,7 +56,7 @@ describe('CopyButton', () => {
     expect(plain).toBe('넓이 (a)/(b)');
 
     render(<CopyButton text={plain} label="복사(한글·워드용)" title="한글·워드용 텍스트로 복사" />);
-    // 라벨 텍스트가 접근성 이름이 되고, 기존 '복사' 버튼과 구분된다.
+    // 라벨 텍스트가 접근성 이름이 되고, 다른 용도의 복사 버튼과 구분된다.
     expect(screen.queryByRole('button', { name: '복사' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '복사(한글·워드용)' }));
 

@@ -60,8 +60,8 @@ describe('오답노트 인라인 풀이', () => {
     expect(solveSpy).not.toHaveBeenCalled();
     expect(problemDone(MOCK_FILE_ID, 1)).toBe(true);
 
-    // 복사 2종이 있다.
-    expect(screen.getByRole('button', { name: '복사' })).toBeInTheDocument();
+    // 복사 2종이 있다(AI 대화용=원문, 한글·워드용=평문).
+    expect(screen.getByRole('button', { name: '복사(AI 대화용)' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '복사(한글·워드용)' })).toBeInTheDocument();
   }, 30_000);
 

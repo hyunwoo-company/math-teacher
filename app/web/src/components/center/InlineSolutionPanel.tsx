@@ -147,12 +147,16 @@ function SolutionContent({
       <>
         <div className="mb-1.5 flex min-h-[20px] items-center">
           <div className="ml-auto flex items-center gap-1.5">
-            {/* 복사는 렌더된 텍스트가 아니라 마크다운 원문(entry.text)을 넣는다. */}
-            <CopyButton text={entry.text} label="복사" />
+            {/* 두 버튼 다 용도가 이름에 있다: AI 대화용=마크다운 원문, 한글·워드용=유니코드 평문. */}
+            <CopyButton
+              text={entry.text}
+              label="복사(AI 대화용)"
+              title="마크다운·LaTeX 원문 그대로 복사 (다른 AI 에 붙여넣을 때)"
+            />
             <CopyButton
               text={toPlainText(entry.text)}
               label="복사(한글·워드용)"
-              title="한글·워드용 텍스트로 복사"
+              title="한글·워드에 붙여넣을 수 있는 텍스트로 복사"
             />
             <button
               type="button"

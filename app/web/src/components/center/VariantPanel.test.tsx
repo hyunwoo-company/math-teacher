@@ -96,7 +96,7 @@ describe('풀이 탭의 변형 문제 만들기', () => {
     expect(screen.getByText('정답')).toBeInTheDocument();
     expect(document.querySelector('.katex')).not.toBeNull();
 
-    expect(screen.getByRole('button', { name: '복사' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '복사(AI 대화용)' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '복사(한글·워드용)' })).toBeInTheDocument();
 
     const before = spy.mock.calls.filter((call) => call[2] === 'number').length;
@@ -130,7 +130,7 @@ describe('오답노트의 변형 문제 만들기', () => {
     await waitFor(() => expect(modeDone(3, 'condition')).toBe(true), { timeout: 20_000 });
 
     expect(screen.getByText('정답')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '복사' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '복사(AI 대화용)' })).toBeInTheDocument();
   }, 45_000);
 
   it('변형 문제 만들기/닫기 토글 — 닫아도 캐시가 남아 다시 열면 재생성 없이 즉시 표시한다', async () => {

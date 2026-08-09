@@ -383,14 +383,18 @@ export function AiPanel({ onCollapse }: { onCollapse?: () => void }) {
                           </button>
                         )
                       ) : null}
-                      {/* 답변 복사: 마크다운 원문 + 한글·워드용 유니코드 평문. */}
+                      {/* 두 버튼 다 용도가 이름에 있다: AI 대화용=마크다운 원문, 한글·워드용=유니코드 평문. */}
                       {message.content ? (
                         <div className="ml-auto flex items-center gap-1.5">
-                          <CopyButton text={message.content} label="복사" />
+                          <CopyButton
+                            text={message.content}
+                            label="복사(AI 대화용)"
+                            title="마크다운·LaTeX 원문 그대로 복사 (다른 AI 에 붙여넣을 때)"
+                          />
                           <CopyButton
                             text={toPlainText(message.content)}
                             label="복사(한글·워드용)"
-                            title="한글·워드용 텍스트로 복사"
+                            title="한글·워드에 붙여넣을 수 있는 텍스트로 복사"
                           />
                         </div>
                       ) : null}
