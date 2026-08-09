@@ -187,3 +187,125 @@ def test_exam_paper_does_not_trigger_type_fallback() -> None:
     assert numbers == [1, 2, 3, 4, 5, 6, 7, 8]
     # 폴백을 타면 image 로 바뀐다. text 유지 == 폴백 미발동.
     assert result.mode == "text"
+
+
+# ── 번호 구분자 ")" 지원 + 머리글 표 괘선 방어 ────────────────────────
+# 실측 회귀: `tmp/0809 일일테스트.pdf` (A3 2단, 서술형 15문항)
+#   ① 문제 번호가 "1)" 형식이라 `\d+\.` 앵커로는 0문항이었다.
+#   ② 첫 장 머리글 표(성명·일자 칸)의 가로선이 본문 괘선으로 잡혀
+#      content_rect 가 높이 -4pt 인 뒤집힌 사각형이 되어 1~4번이 통째로 버려졌다.
+
+
+def _build_paren_number_pdf(pages: int = 2) -> bytes:
+    """문제 번호가 `1)` 형식인 2단 조판 PDF."""
+    doc = fitz.open()
+    try:
+        for page_index in range(pages):
+            base = page_index * 4
+            page = doc.new_page(width=595, height=841)
+            page.insert_text((40, 52), f"{base + 1})좌측 상단 문제", fontsize=11)
+            page.insert_text((40, 400), f"{base + 2})좌측 하단 문제", fontsize=11)
+            page.insert_text((310, 52), f"{base + 3})우측 상단 문제", fontsize=11)
+            page.insert_text((310, 400), f"{base + 4})우측 하단 문제", fontsize=11)
+        data: bytes = doc.tobytes()
+        return data
+    finally:
+        doc.close()
+
+
+def _build_header_table_pdf() -> bytes:
+    """머리글 표의 가로선 2개만 있고 본문 괘선은 없는 페이지.
+
+    두 선을 거의 같은 높이(y=230, 231)에 두어 괘선 검출이 '높이 0 이하'인
+    본문 영역을 만들게 한다. 문제는 그 아래에 정상 배치한다.
+    """
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        for y in (230.0, 231.0):
+            page.draw_line(fitz.Point(40, y), fitz.Point(555, y), width=0.5)
+        page.insert_text((40, 300), "1. 좌측 문제", fontsize=11)
+        page.insert_text((310, 300), "2. 우측 문제", fontsize=11)
+        data: bytes = doc.tobytes()
+        return data
+    finally:
+        doc.close()
+
+
+def test_paren_style_numbers_are_detected() -> None:
+    """`1)` 형식 문제 번호도 앵커로 잡힌다."""
+    result = ex.extract_problems(
+        pdf_bytes=_build_paren_number_pdf(2), render_images=False
+    )
+    assert [problem.no for problem in result.problems] == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_choice_parens_do_not_shadow_dot_anchors() -> None:
+    """`1.` 형식 객관식 시험지에서 선택지 `1)`이 문제 번호를 밀어내지 않는다.
+
+    선택지는 **개수로는 문제보다 많다**(문항 6개에 선택지 5개씩 = 30개 대 6개).
+    개수로 구분자를 고르면 추출이 통째로 무너진다. 번호 단조증가 사슬 길이로
+    고르는 규칙(`_dominant_delimiter`)이 이를 막는지 고정한다.
+
+    최악을 가정해 선택지를 들여쓰기 없이 칼럼 왼쪽 끝에 붙인다(실제 시험지는
+    들여쓰기되어 indent_tol 로도 걸러진다).
+    """
+    doc = fitz.open()
+    try:
+        # 문항 6개(마침표), 각 문항마다 선택지 5개(닫는 괄호) = 괄호가 5배 많다.
+        for page_index in range(2):
+            page = doc.new_page(width=595, height=841)
+            for slot in range(3):
+                no = page_index * 3 + slot + 1
+                top = 52 + slot * 260
+                page.insert_text((40, top), f"{no}. 좌측 문제", fontsize=11)
+                for choice in range(1, 6):
+                    page.insert_text(
+                        (40, top + 20 + choice * 25), f"{choice}) 선택지", fontsize=11
+                    )
+        pdf_bytes = doc.tobytes()
+    finally:
+        doc.close()
+
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+    assert [problem.no for problem in result.problems] == [1, 2, 3, 4, 5, 6]
+
+
+def test_dominant_delimiter_uses_increasing_chain_not_count() -> None:
+    """구분자는 개수가 아니라 번호 단조증가 사슬 길이로 고른다."""
+
+    def anchor(no: int) -> ex.Anchor:
+        return ex.Anchor(no=no, page=0, column="left", x0=40.0, y0=50.0)
+
+    # 사슬이 같으면(둘 다 1) 마침표 — 기존 검증된 경로 우선.
+    assert ex._dominant_delimiter([(anchor(1), "."), (anchor(1), ")")]) == "."
+    assert ex._dominant_delimiter([]) == "."
+
+    # 마침표가 없으면 괄호를 고른다(`1)` 형식 시험지).
+    parens = [(anchor(no), ")") for no in range(1, 6)]
+    assert ex._dominant_delimiter(parens) == ")"
+
+    # 개수는 괄호가 3배 많지만 사슬은 마침표가 길다 → 마침표.
+    dots = [(anchor(no), ".") for no in range(1, 5)]
+    repeating = [(anchor(no), ")") for _ in range(4) for no in (1, 2, 3)]
+    assert ex._dominant_delimiter(dots + repeating) == "."
+
+
+def test_header_table_rules_fall_back_to_ratio_margins() -> None:
+    """머리글 표 괘선만 잡히면 비율 폴백을 쓴다(높이 0 이하 본문 방지)."""
+    doc = fitz.open(stream=_build_header_table_pdf(), filetype="pdf")
+    try:
+        page = doc[0]
+        content = ex.content_rect(page)
+        # 괘선 기반이었다면 높이가 음수였다. 폴백이면 상단 3% / 하단 6%.
+        assert content.height > 0
+        assert content.y0 == page.rect.y0 + page.rect.height * 0.03
+        assert content.y1 == page.rect.y1 - page.rect.height * 0.06
+    finally:
+        doc.close()
+
+
+def test_problems_below_header_table_are_not_dropped() -> None:
+    """머리글 표가 있는 페이지의 문제가 통째로 버려지지 않는다."""
+    result = ex.extract_problems(pdf_bytes=_build_header_table_pdf(), render_images=False)
+    assert [problem.no for problem in result.problems] == [1, 2]

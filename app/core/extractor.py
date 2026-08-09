@@ -23,6 +23,7 @@ import io
 import json
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -33,8 +34,11 @@ from PIL import Image
 Mode = Literal["text", "image"]
 Column = Literal["left", "right"]
 
-# 문제 번호 앵커: 줄 맨 앞의 "1." "22." 형태.
-ANCHOR_RE: Final[re.Pattern[str]] = re.compile(r"^\s*(\d{1,2})\s*\.")
+# 문제 번호 앵커: 줄 맨 앞의 "1." "22." 또는 "1)" "15)" 형태.
+# 그룹 2 는 구분자다. 한 문서 안에서는 둘 중 **우세한 쪽만** 앵커로 인정한다
+# (`_dominant_delimiter` 참고). 객관식 선택지 "1) 2) 3)" 이 문제 번호로
+# 오인되는 것을 막기 위해서다.
+ANCHOR_RE: Final[re.Pattern[str]] = re.compile(r"^\s*(\d{1,2})\s*([.)])")
 
 PUA_START: Final[int] = 0xE000
 PUA_END: Final[int] = 0xF8FF
@@ -74,6 +78,11 @@ _RULE_INSET_PT: Final[float] = 2.0
 
 # 다음 문제 앵커 글리프의 윗부분이 몇 px 씩 딸려 들어오면 역시 트림이 막힌다.
 _ANCHOR_GAP_PT: Final[float] = 3.0
+
+# 괘선으로 잡은 본문 영역이 페이지 높이의 이 비율 미만이면 검출 실패로 본다.
+# 첫 장 머리글 표(성명·일자 칸)의 가로선만 괘선으로 걸리면 높이가 0 이하인
+# 사각형이 나오고, 그러면 그 페이지 문항이 통째로 버려진다(실측: 높이 -4pt).
+_MIN_CONTENT_HEIGHT_RATIO: Final[float] = 0.5
 
 
 @dataclass(frozen=True)
@@ -188,12 +197,16 @@ def content_rect(page: fitz.Page) -> fitz.Rect:
         top, bottom = rules[0], rules[-1]
         x0 = min(top.x0, bottom.x0)
         x1 = max(top.x1, bottom.x1)
-        return fitz.Rect(
+        found = fitz.Rect(
             x0 + _RULE_INSET_PT,
             top.y1 + _RULE_INSET_PT,
             x1 - _RULE_INSET_PT,
             bottom.y0 - _RULE_INSET_PT,
         )
+        # 머리글 표의 가로선들만 걸리면 위/아래 괘선이 사실상 같은 높이라
+        # 본문이 없는(심지어 뒤집힌) 사각형이 나온다. 그럴 땐 비율 폴백을 쓴다.
+        if found.height >= page_rect.height * _MIN_CONTENT_HEIGHT_RATIO:
+            return found
 
     # 괘선이 없어 물리적 경계를 못 찾은 폴백. 상/하 여백은 머리말·꼬리말을
     # 크롭 밖으로 밀어내려는 휴리스틱일 뿐이다.
@@ -203,7 +216,8 @@ def content_rect(page: fitz.Page) -> fitz.Rect:
     # 이 정상 문제 앵커를 머리말로 오판해 통째로 버렸다(홀수 문제 누락 버그).
     # 3%(≈25pt, A4 기준 약 0.35인치) 로 낮추면 이런 상단 시작 문제를 살리면서도,
     # 페이지 최상단 밴드의 진짜 머리말은 계속 배제한다. 문제 번호 오탐은 어차피
-    # ANCHOR_RE(`\d{1,2}\.` 형태) 와 _longest_increasing(번호 단조증가) 필터가 잡는다.
+    # ANCHOR_RE(`\d{1,2}[.)]` 형태), _dominant_delimiter(구분자 통일),
+    # _longest_increasing(번호 단조증가) 필터가 잡는다.
     #
     # 하단은 6% 를 유지한다. 시험지 꼬리말(가운데 정렬 페이지 번호 "- N -")이
     # 하단에서 약 2.4%(841pt 페이지에서 y≈811pt) 지점에 오는 사례가 있어, 하단을
@@ -264,11 +278,11 @@ def find_anchors(
     읽는 순서는 페이지 → 좌측 칼럼 위에서 아래 → 우측 칼럼 위에서 아래.
     번호가 오름차순이 되도록 오탐 앵커는 버린다.
     """
-    candidates: list[Anchor] = []
+    candidates: list[tuple[Anchor, str]] = []
     for page_no in range(doc.page_count):
         page = doc[page_no]
         content = content_rect(page)
-        page_candidates: list[Anchor] = []
+        page_candidates: list[tuple[Anchor, str]] = []
         for line in _page_lines(page):
             match = ANCHOR_RE.match(line.text)
             if match is None:
@@ -285,19 +299,61 @@ def find_anchors(
             if x0 - col_x0 > indent_tol:
                 continue
             page_candidates.append(
-                Anchor(
-                    no=int(match.group(1)),
-                    page=page_no,
-                    column=column,
-                    x0=x0,
-                    y0=y0,
+                (
+                    Anchor(
+                        no=int(match.group(1)),
+                        page=page_no,
+                        column=column,
+                        x0=x0,
+                        y0=y0,
+                    ),
+                    match.group(2),
                 )
             )
-        page_candidates.sort(key=lambda a: (0 if a.column == "left" else 1, a.y0, a.x0))
+        page_candidates.sort(
+            key=lambda item: (
+                0 if item[0].column == "left" else 1,
+                item[0].y0,
+                item[0].x0,
+            )
+        )
         candidates.extend(page_candidates)
 
-    keep = _longest_increasing([a.no for a in candidates])
-    return [candidates[i] for i in keep]
+    delimiter = _dominant_delimiter(candidates)
+    kept = [anchor for anchor, delim in candidates if delim == delimiter]
+
+    keep = _longest_increasing([a.no for a in kept])
+    return [kept[i] for i in keep]
+
+
+def _dominant_delimiter(candidates: Sequence[tuple[Anchor, str]]) -> str:
+    """문서의 문제 번호 구분자(`.` 또는 `)`)를 고른다.
+
+    한 시험지는 번호 형식이 하나다. 둘이 섞여 잡혔다면 한쪽은 오탐이다.
+
+    **개수로 비교하면 안 된다.** 객관식 선택지 `1) 2) 3) 4) 5)` 는 문제마다
+    반복되므로 문제 번호보다 항상 많다. 20문항 5지선다면 `.` 20개 대 `)` 100개라
+    개수 기준은 선택지 쪽을 고르고 추출이 통째로 무너진다.
+
+    대신 **번호가 단조증가하는 사슬의 길이**로 비교한다. 문제 번호는 문서 전체에서
+    1,2,3… 으로 이어지지만 선택지는 문제마다 1 로 되돌아가므로 사슬이 선택지 개수
+    (보통 5)를 넘지 못한다.
+
+    사슬 길이가 같거나 후보가 없으면 `.` 을 고른다. 마침표가 기존 검증된 경로다.
+
+    Args:
+        candidates: (앵커, 구분자) 후보 목록. 읽는 순서여야 한다.
+
+    Returns:
+        `"."` 또는 `")"`.
+    """
+    dot_chain = len(
+        _longest_increasing([a.no for a, delim in candidates if delim == "."])
+    )
+    paren_chain = len(
+        _longest_increasing([a.no for a, delim in candidates if delim == ")"])
+    )
+    return ")" if paren_chain > dot_chain else "."
 
 
 def _merge_type_number_glyphs(
