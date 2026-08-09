@@ -310,6 +310,89 @@ def register_pdf(
     return node, extract_error
 
 
+def reextract_pdf(node_id: str) -> tuple[dict[str, Any], str | None, int]:
+    """이미 등록된 PDF 를 **원본 그대로** 다시 추출한다 (AI 호출 0회).
+
+    extractor 를 고친 뒤 기존 업로드분에 반영하려면 예전에는 파일을 지우고 다시
+    올려야 했다. 이 함수가 그 왕복을 없앤다. 원본 PDF(`files/{node_id}.pdf`)는
+    건드리지 않고 문항만 다시 뽑는다.
+
+    **기존 풀이는 지운다.** 재추출로 문항 번호와 크롭 영역이 달라질 수 있어
+    (예: 0문항 → 15문항) 예전 풀이가 다른 문제에 붙을 수 있기 때문이다.
+    오답노트 항목은 추가 시점의 크롭을 스냅샷으로 갖고 있으므로 그대로 둔다.
+
+    Args:
+        node_id: 시험지 파일 노드 id.
+
+    Returns:
+        (파일 상세, 추출 실패 사유 또는 None, 삭제된 풀이 건수).
+
+    Raises:
+        ApiError: 파일 노드가 아니거나 없을 때(400/404), 원본 PDF 가
+            사라졌을 때(400).
+    """
+    with storage.transaction() as conn:
+        require_file_node(conn, node_id)
+
+    stored_path = config.files_dir() / f"{node_id}.pdf"
+    if not stored_path.is_file():
+        raise bad_request(
+            "raw_missing",
+            "원본 PDF 파일을 찾을 수 없습니다.",
+            "파일을 삭제한 뒤 다시 업로드해 주세요.",
+        )
+    raw = stored_path.read_bytes()
+
+    extract_error: str | None = None
+    pages = 0
+    mode = "text"
+    pua_ratio = 0.0
+    problem_rows: list[dict[str, Any]] = []
+
+    try:
+        result = extractor.extract_problems(pdf_bytes=raw)
+    except (extractor.ExtractionError, ValueError) as exc:
+        extract_error = f"문제 추출에 실패했습니다: {exc}"
+    except Exception as exc:
+        extract_error = f"문제 추출 중 예상치 못한 오류가 발생했습니다: {exc}"
+    else:
+        pages = result.page_count
+        mode = result.mode
+        pua_ratio = result.pua_ratio
+        # 문항 수가 줄면 예전 크롭이 남아 다음 추출 결과와 섞인다. 먼저 비운다.
+        _clear_crops(node_id)
+        problem_rows = _write_crops(node_id, result)
+        if not problem_rows:
+            extract_error = (
+                "문제 번호 앵커를 찾지 못했습니다. "
+                "'1.' '2.' 형태의 문항 번호가 있는 시험지인지 확인하세요."
+            )
+
+    with storage.transaction() as conn:
+        deleted_solutions = storage.delete_solutions(conn, node_id)
+        storage.upsert_file(
+            conn,
+            node_id=node_id,
+            stored_path=f"files/{node_id}.pdf",
+            pages=pages,
+            mode=mode,
+            pua_ratio=pua_ratio,
+            problem_count=len(problem_rows),
+        )
+        storage.replace_problems(conn, node_id, problem_rows)
+
+    return file_detail(node_id), extract_error, deleted_solutions
+
+
+def _clear_crops(node_id: str) -> None:
+    """그 시험지의 크롭 PNG 를 모두 지운다(디렉터리는 남긴다)."""
+    crop_dir = config.crops_dir() / node_id
+    if not crop_dir.is_dir():
+        return
+    for path in crop_dir.glob("*.png"):
+        path.unlink(missing_ok=True)
+
+
 def _write_crops(
     node_id: str, result: extractor.ExtractResult
 ) -> list[dict[str, Any]]:
@@ -928,6 +1011,7 @@ __all__ = [
     "note_detail",
     "problems_docx",
     "raw_pdf_path",
+    "reextract_pdf",
     "register_pdf",
     "rename_conversation",
     "require_file_node",

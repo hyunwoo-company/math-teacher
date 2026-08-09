@@ -622,6 +622,23 @@ def solved_numbers(conn: sqlite3.Connection, node_id: str) -> set[int]:
     return {int(row["no"]) for row in rows}
 
 
+def delete_solutions(conn: sqlite3.Connection, node_id: str) -> int:
+    """그 시험지의 풀이를 모두 지우고 지운 건수를 돌려준다.
+
+    재추출로 문항 번호·영역이 달라지면 기존 풀이가 엉뚱한 문항에 붙는다.
+    그래서 재추출은 풀이를 남기지 않는다.
+
+    Args:
+        conn: 열린 커넥션.
+        node_id: 시험지 노드 id.
+
+    Returns:
+        삭제된 풀이 건수.
+    """
+    cursor = conn.execute("DELETE FROM solutions WHERE node_id = ?", (node_id,))
+    return int(cursor.rowcount or 0)
+
+
 def get_solution(
     conn: sqlite3.Connection, node_id: str, no: int
 ) -> dict[str, Any] | None:

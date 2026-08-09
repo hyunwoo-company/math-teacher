@@ -137,6 +137,14 @@ export interface FileDetail {
   problems: Problem[];
 }
 
+/** `POST /api/files/{id}/reextract` 응답. 원본 PDF 를 그대로 다시 추출한 결과. */
+export interface ReextractResult extends FileDetail {
+  /** 추출 실패/문항 미검출 사유. 성공이면 null. */
+  extract_error: string | null;
+  /** 재추출로 지워진 기존 풀이 건수. */
+  deleted_solutions: number;
+}
+
 /**
  * Anthropic usage. 구독 모드에서는 null 이 올 수 있다.
  * 필드가 빠질 수 있으므로 전부 optional 로 둔다.

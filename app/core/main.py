@@ -75,6 +75,7 @@ from schemas import (
     OkResponse,
     ProviderModelInfo,
     ProvidersInfo,
+    ReextractResponse,
     Section,
     SolutionContentSave,
     SolutionOut,
@@ -423,6 +424,27 @@ async def upload_file(
 def read_file(node_id: NodeId) -> FileDetailResponse:
     """파일 노드와 문항 목록(풀이 존재 여부 포함)."""
     return FileDetailResponse.model_validate(service.file_detail(node_id))
+
+
+@app.post(
+    "/api/files/{node_id}/reextract",
+    response_model=ReextractResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def reextract_file(node_id: NodeId) -> ReextractResponse:
+    """등록된 PDF 를 원본 그대로 다시 추출한다 (AI 호출 0회).
+
+    extractor 를 고친 뒤 기존 업로드분에 반영할 때 쓴다. 파일을 지우고 다시
+    올릴 필요가 없다. **기존 풀이는 지워진다**(문항 번호가 달라질 수 있어서).
+    오답노트 항목은 스냅샷을 갖고 있으므로 그대로 남는다.
+    """
+    detail, extract_error, deleted = await run_in_threadpool(
+        service.reextract_pdf, node_id
+    )
+    return ReextractResponse.model_validate(
+        {**detail, "extract_error": extract_error, "deleted_solutions": deleted}
+    )
 
 
 @app.get(

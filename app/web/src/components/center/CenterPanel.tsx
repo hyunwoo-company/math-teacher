@@ -8,6 +8,7 @@ import { NoteView } from '@/components/center/NoteView';
 import { AddToNoteButton } from '@/components/center/AddToNoteButton';
 import { DownloadPdfButton } from '@/components/center/DownloadPdfButton';
 import { DownloadDocxButton } from '@/components/center/DownloadDocxButton';
+import { ReextractButton } from '@/components/center/ReextractButton';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { formatDate } from '@/lib/format';
 import { nodePath } from '@/lib/tree';
@@ -95,6 +96,7 @@ export function CenterPanel() {
           <div className="ml-auto flex shrink-0 items-center gap-2">
             {node.file ? (
               <>
+                <ReextractButton fileId={node.id} problemCount={node.file.problem_count} />
                 <DownloadPdfButton url={api.fileRawUrl(node.id)} fileName={node.name} />
                 <DownloadDocxButton fileId={node.id} fileName={node.name} />
               </>

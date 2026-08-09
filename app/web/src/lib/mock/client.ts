@@ -44,6 +44,7 @@ import type {
   NoteItem,
   Problem,
   ProviderChoice,
+  ReextractResult,
   Section,
   Solution,
   SolutionsResponse,
@@ -639,6 +640,26 @@ export const mockClient: ApiClient = {
     }
     const problems = state.problems.get(id) ?? [];
     return { node: { ...node }, problems: problems.map((problem) => ({ ...problem })) };
+  },
+
+  async reextractFile(id: string): Promise<ReextractResult> {
+    // 업로드처럼 추출에 시간이 걸린다 -> 진행 상태 확인용으로 느리게.
+    await sleep(900);
+    requireAuth();
+    const node = findNode(id);
+    if (node.type !== 'file') {
+      throw new ApiError('not_a_file', '파일이 아닙니다.', null, 400);
+    }
+    // 목은 같은 원본을 다시 읽는 셈이므로 문항은 그대로다. 풀이만 지운다.
+    const deleted = state.solutions.get(id)?.size ?? 0;
+    state.solutions.delete(id);
+    const problems = state.problems.get(id) ?? [];
+    return {
+      node: { ...node },
+      problems: problems.map((problem) => ({ ...problem })),
+      extract_error: problems.length === 0 ? '문제 번호 앵커를 찾지 못했습니다.' : null,
+      deleted_solutions: deleted,
+    };
   },
 
   fileRawUrl() {

@@ -107,6 +107,19 @@ class FileDetailResponse(BaseModel):
     problems: list[ProblemOut]
 
 
+class ReextractResponse(BaseModel):
+    """`POST /api/files/{id}/reextract` 응답.
+
+    `extract_error` 는 추출이 실패했거나 문항을 못 찾았을 때의 사유다(성공이면 None).
+    `deleted_solutions` 는 재추출로 지워진 기존 풀이 건수다.
+    """
+
+    node: NodeOut
+    problems: list[ProblemOut]
+    extract_error: str | None = None
+    deleted_solutions: int = 0
+
+
 class ModelInfo(BaseModel):
     """모델 목록 항목(단가 포함)."""
 

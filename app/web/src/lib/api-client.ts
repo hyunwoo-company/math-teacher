@@ -15,6 +15,7 @@ import type {
   FileDetail,
   NoteDetail,
   ProviderChoice,
+  ReextractResult,
   Section,
   Solution,
   SolutionsResponse,
@@ -51,6 +52,14 @@ export interface ApiClient {
   uploadFile(file: File, parentId: string | null): Promise<TreeNode>;
 
   getFile(id: string): Promise<FileDetail>;
+  /**
+   * 등록된 PDF 를 원본 그대로 다시 추출한다 (계약:
+   * `POST /api/files/{id}/reextract`, AI 호출 0회).
+   *
+   * extractor 를 고친 뒤 기존 업로드분에 반영할 때 쓴다. 파일을 지우고 다시
+   * 올릴 필요가 없다. **기존 풀이는 지워진다**(문항 번호가 달라질 수 있어서).
+   */
+  reextractFile(id: string): Promise<ReextractResult>;
   /** PDF 뷰어가 열 URL. */
   fileRawUrl(id: string): string;
   /** 문제 크롭 PNG URL. */

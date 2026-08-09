@@ -24,6 +24,7 @@ import type {
   FileDetail,
   NoteDetail,
   ProviderChoice,
+  ReextractResult,
   Section,
   Solution,
   SolutionsResponse,
@@ -261,6 +262,13 @@ export const httpClient: ApiClient = {
 
   getFile(id: string) {
     return requestJson<FileDetail>(`/api/files/${encodeURIComponent(id)}`);
+  },
+
+  reextractFile(id: string) {
+    return requestJson<ReextractResult>(
+      `/api/files/${encodeURIComponent(id)}/reextract`,
+      { method: 'POST' },
+    );
   },
 
   fileRawUrl(id: string) {

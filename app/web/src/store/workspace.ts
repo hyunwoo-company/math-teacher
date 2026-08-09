@@ -316,6 +316,14 @@ interface WorkspaceState {
   deleteNode: (id: string) => Promise<boolean>;
   uploadFiles: (files: File[], parentId: string | null) => Promise<void>;
 
+  /**
+   * 열려 있는 시험지를 원본 그대로 다시 추출한다(AI 호출 0회).
+   * 성공하면 문항 목록과 트리를 갱신하고 **기존 풀이는 사라진다**.
+   */
+  reextractFile: (id: string) => Promise<void>;
+  /** 재추출 진행 중인 파일 id (버튼 비활성/스피너용). */
+  reextracting: string | null;
+
   /** 트리에서 파일형 노드를 열 때. 섹션에 따라 시험지/노트로 분기. */
   openNode: (id: string) => Promise<void>;
   selectFile: (id: string) => Promise<void>;
@@ -580,6 +588,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   expanded: {},
   focusedNodeId: null,
   pendingOp: null,
+  reextracting: null,
 
   openKind: 'none',
   selectedFileId: null,
@@ -994,6 +1003,50 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       set({ pendingOp: null });
     }
     if (lastId) await get().selectFile(lastId);
+  },
+
+  async reextractFile(id: string) {
+    if (get().reextracting) return;
+    set({ reextracting: id, pendingOp: '문제를 다시 추출하는 중… (AI 호출 없음)' });
+    try {
+      const result = await api.reextractFile(id);
+      // 이미 다른 파일로 옮겨갔으면 화면 상태는 건드리지 않는다(트리만 갱신).
+      const stillOpen = get().selectedFileId === id && get().openKind === 'exam';
+      const solutions: Record<number, SolutionEntry> = {};
+      for (const problem of result.problems) solutions[problem.no] = emptyEntry(problem.no);
+      set((state) => ({
+        nodes: state.nodes.map((node) => (node.id === id ? result.node : node)),
+        ...(stillOpen
+          ? {
+              fileDetail: { node: result.node, problems: result.problems },
+              fileStatus: 'ready' as const,
+              fileError: null,
+              // 풀이는 서버에서 지워졌다. 화면 캐시도 함께 비운다.
+              solutions,
+              solutionsStatus: 'ready' as const,
+              selectedProblemNo: null,
+              solve: emptySolve,
+            }
+          : {}),
+      }));
+
+      if (result.extract_error) {
+        get().showToast({ kind: 'error', message: result.extract_error });
+        return;
+      }
+      const removed =
+        result.deleted_solutions > 0
+          ? ` (기존 풀이 ${result.deleted_solutions}건은 지워졌습니다)`
+          : '';
+      get().showToast({
+        kind: 'success',
+        message: `${result.problems.length}문항을 다시 추출했습니다.${removed}`,
+      });
+    } catch (error) {
+      get().showToast({ kind: 'error', message: toUserMessage(error) });
+    } finally {
+      set({ reextracting: null, pendingOp: null });
+    }
   },
 
   async openNode(id: string) {

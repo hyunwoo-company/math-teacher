@@ -6,6 +6,7 @@ import { MathText } from '@/components/MathText';
 import { plainPreview } from '@/lib/math-text';
 import { ProblemCrop } from '@/components/center/ProblemCrop';
 import { VariantPanel } from '@/components/center/VariantPanel';
+import { ReextractButton } from '@/components/center/ReextractButton';
 import { CopyButton } from '@/components/ui/CopyButton';
 import { toPlainText } from '@/lib/to-plain-text';
 import { EmptyState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
@@ -59,8 +60,9 @@ export function SolutionsTab() {
     return (
       <EmptyState
         title="이 파일에서 문제를 찾지 못했습니다"
-        description="업로드한 PDF가 시험지 형식이 아니거나 문제 번호를 인식하지 못했을 수 있습니다. 원본을 PDF 탭에서 확인해 보세요."
+        description="업로드한 PDF가 시험지 형식이 아니거나 문제 번호를 인식하지 못했을 수 있습니다. 원본을 PDF 탭에서 확인해 보세요. 추출 규칙이 개선된 뒤라면 아래 버튼으로 다시 시도할 수 있습니다(파일을 다시 올릴 필요 없음)."
         icon="🔍"
+        action={<ReextractButton fileId={fileId} problemCount={0} />}
       />
     );
   }
