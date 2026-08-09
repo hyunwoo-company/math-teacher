@@ -4,6 +4,8 @@ python-multipart
 pymupdf
 pillow
 python-docx
+# 한글(HWPX) 내보내기. 한컴 오피스 설치 없이 순수 파이썬으로 생성한다.
+python-hwpx
 anthropic
 # 구독 모드(데스크톱 전용). 웹 배포에서는 없어도 동작한다.
 claude-agent-sdk

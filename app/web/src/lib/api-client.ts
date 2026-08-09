@@ -14,19 +14,19 @@ import type {
   EnvResponse,
   FileDetail,
   NoteDetail,
-  ProviderChoice,
   ReextractResult,
   Section,
   Solution,
   SolutionsResponse,
-  SolveRequest,
   StreamEvent,
   ThreadsResponse,
   TreeNode,
   TreeResponse,
   Usage,
   UsageSummaryResponse,
-  VariantMode,
+  JobCreateRequest,
+  JobCreated,
+  JobsResponse,
 } from '@/types/api';
 
 export interface ApiClient {
@@ -113,19 +113,19 @@ export interface ApiClient {
   /** 노트 항목 크롭 스냅샷 URL. */
   noteCropUrl(noteId: string, itemId: string): string;
 
-  solve(id: string, body: SolveRequest, signal?: AbortSignal): AsyncIterable<StreamEvent>;
   chat(id: string, body: ChatRequest, signal?: AbortSignal): AsyncIterable<StreamEvent>;
 
-  /**
-   * 동일 유형 변형 문제를 생성한다(계약:
-   * `POST /api/files/{fileId}/problems/{no}/variant`). solve/chat 과 동일한
-   * SSE(delta/done) 를 흘리며, done 본문(`solution`)에 최종 마크다운이 담긴다.
+  /* ── 작업 큐 ──────────────────────────────────────────────────────
+   * 풀이·변형은 전부 여기로 간다. 예전 `/solve`·`/variant` 는 HTTP 응답이 곧
+   * 작업이라 화면을 떠나면 끊겼다. 이제 작업은 서버에서 돌고, 구독은 선택이다.
    */
-  generateVariant(
-    fileId: string,
-    no: number,
-    mode: VariantMode,
-    opts?: { provider?: ProviderChoice; model?: string; effort?: string },
-    signal?: AbortSignal,
-  ): AsyncIterable<StreamEvent>;
+
+  /** 작업을 큐에 넣고 즉시 돌려받는다(스트림을 기다리지 않는다). */
+  createJob(body: JobCreateRequest): Promise<JobCreated>;
+  /** 진행 중 작업 전부 + 최근 종료분. 앱이 뜰 때 복구용으로 부른다. */
+  listJobs(): Promise<JobsResponse>;
+  /** 작업 진행 구독. 붙는 즉시 `snapshot` 이 온다. 끊어도 작업은 계속된다. */
+  jobEvents(jobId: string, signal?: AbortSignal): AsyncIterable<StreamEvent>;
+  /** 작업 취소. 대기 중이면 큐에서 빠지고, 실행 중이면 현재 문항 뒤 멈춘다. */
+  cancelJob(jobId: string): Promise<void>;
 }

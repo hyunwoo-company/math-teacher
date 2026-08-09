@@ -355,6 +355,60 @@ export interface VariantRequest {
   effort?: string;
 }
 
+/* ── 작업 큐 ─────────────────────────────────────────────────────── */
+
+export type JobKind = 'solve' | 'variant';
+export type JobStatus =
+  | 'queued'
+  | 'running'
+  | 'done'
+  | 'error'
+  | 'canceled'
+  /** 서버가 재시작되어 끊긴 작업. 자동 재개하지 않는다. */
+  | 'interrupted';
+
+/** 작업 1건의 진행 상태. */
+export interface Job {
+  id: string;
+  kind: JobKind;
+  node_id: string;
+  /** 표시용 시험지 이름 스냅샷(원본이 지워져도 배너에 남는다). */
+  node_name: string;
+  status: JobStatus;
+  total: number;
+  done_count: number;
+  current_no: number | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `POST /api/jobs` 요청. */
+export interface JobCreateRequest {
+  kind: JobKind;
+  node_id: string;
+  problem_numbers?: number[] | null;
+  no?: number;
+  modes?: VariantMode[];
+  force?: boolean;
+  provider?: ProviderChoice;
+  model?: string;
+  effort?: string;
+}
+
+/** `POST /api/jobs` 응답. `existing` 이면 이미 있던 작업을 돌려준 것이다. */
+export interface JobCreated {
+  job: Job;
+  existing: boolean;
+  position: number;
+}
+
+/** `GET /api/jobs` 응답. */
+export interface JobsResponse {
+  active: Job[];
+  recent: Job[];
+}
+
 /* ── SSE 이벤트 (5항) ────────────────────────────────────────────── */
 
 export interface SolveStartEvent {
@@ -370,6 +424,8 @@ export interface SolveDeltaEvent {
   type: 'delta';
   no: number | null;
   text: string;
+  /** 변형 작업일 때 어떤 변형 종류인지(백엔드가 함께 실어 준다). */
+  mode?: VariantMode;
 }
 export interface SolveDoneEvent {
   type: 'done';
@@ -381,17 +437,36 @@ export interface SolveDoneEvent {
   /** 계약 6-B: 이 스레드 이력이 잘려서 보내졌는지, 몇 개 생략됐는지. 채팅에서만 온다. */
   history_truncated?: boolean;
   truncated_before?: number;
+  /** 변형 작업일 때 어떤 변형 종류인지. */
+  mode?: VariantMode;
 }
 export interface SolveErrorEvent {
   type: 'error';
   no: number | null;
   error_code: string;
   message: string;
+  /** 변형 작업일 때 어떤 변형 종류인지. */
+  mode?: VariantMode;
 }
 export interface SolveEndEvent {
   type: 'end';
   total_usage: Usage | null;
   total_cost: Cost | null;
+  /** 작업 큐가 내려주는 최종 상태(done/error/canceled). 채팅에는 없다. */
+  status?: JobStatus;
+}
+
+/**
+ * 작업 구독에 붙는 순간 한 번 오는 현재 상태.
+ * 늦게 붙어도 진행률과 "지금 쓰고 있는 문항의 여기까지" 를 알 수 있다.
+ */
+export interface JobSnapshotEvent {
+  type: 'snapshot';
+  status: JobStatus;
+  total: number;
+  done_count: number;
+  current_no: number | null;
+  partial_text: string;
 }
 
 /** 알 수 없는 이벤트 이름이나 JSON 파싱 실패는 버리지 않고 이 형태로 넘긴다. */
@@ -402,6 +477,7 @@ export interface UnknownStreamEvent {
 }
 
 export type StreamEvent =
+  | JobSnapshotEvent
   | SolveStartEvent
   | SolveProblemEvent
   | SolveDeltaEvent

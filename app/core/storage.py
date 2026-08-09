@@ -28,8 +28,9 @@ KST: Final[timezone] = timezone(timedelta(hours=9))
 SECTION_EXAM: Final[str] = "exam"
 SECTION_NOTE: Final[str] = "note"
 
-# 스키마 버전. 1 = 최초, 2 = nodes.section / chat_messages.problem_no / note_items.
-SCHEMA_VERSION: Final[int] = 2
+# 스키마 버전. 1 = 최초, 2 = nodes.section / chat_messages.problem_no / note_items,
+# 3 = jobs(작업 큐), 4 = variants(변형 저장).
+SCHEMA_VERSION: Final[int] = 4
 
 SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -121,6 +122,40 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_conv_messages
     ON conversation_messages(conversation_id, created_at, id);
+
+-- 풀이·변형 작업 큐. 진행 상태만 갖고, 결과는 solutions/variants 에 저장된다.
+-- 서버가 재시작해도 이력이 남도록 영속한다(실행 상태는 jobs.py 가 메모리에 든다).
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    node_name TEXT NOT NULL,
+    targets_json TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    total INTEGER NOT NULL DEFAULT 0,
+    done_count INTEGER NOT NULL DEFAULT 0,
+    current_no INTEGER NULL,
+    error TEXT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_node ON jobs(node_id, status);
+
+-- 변형 문항. (시험지, 문항, 변형종류) 당 **최신 1건**만 둔다.
+-- "다시 생성" 은 같은 키를 덮어쓴다(upsert). 이력을 쌓으면 내보낼 때 어느 것을
+-- 고를지 정해야 하는 문제가 생기는데, 선생님이 원하는 건 최신 한 벌이다.
+CREATE TABLE IF NOT EXISTS variants (
+    node_id TEXT NOT NULL,
+    no INTEGER NOT NULL,
+    mode TEXT NOT NULL,
+    text TEXT NOT NULL,
+    usage_json TEXT NULL,
+    cost_json TEXT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (node_id, no, mode)
+);
 """
 
 # `SCHEMA` 뒤(= 컬럼 추가 뒤)에만 만들 수 있는 인덱스.
@@ -183,8 +218,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     if node_columns and "section" not in node_columns:
         # SQLite 는 NOT NULL 컬럼 추가 시 기본값이 있으면 기존 행을 그 값으로 채운다.
         conn.execute(
-            f"ALTER TABLE nodes ADD COLUMN section TEXT NOT NULL"
-            f" DEFAULT '{SECTION_EXAM}'"
+            f"ALTER TABLE nodes ADD COLUMN section TEXT NOT NULL DEFAULT '{SECTION_EXAM}'"
         )
     if node_columns:
         # 방어적 백필: 과거에 NULL/빈 값으로 들어간 행이 있어도 'exam' 으로 맞춘다.
@@ -369,9 +403,7 @@ def list_nodes(
     한글 음절은 유니코드 코드포인트 순서가 가나다 순서와 일치하므로
     별도 collation 없이 파이썬 기본 문자열 정렬을 쓴다.
     """
-    rows = conn.execute(
-        f"{_NODE_SELECT} WHERE n.section = ?", (section,)
-    ).fetchall()
+    rows = conn.execute(f"{_NODE_SELECT} WHERE n.section = ?", (section,)).fetchall()
     nodes = [_node_row_to_dict(row) for row in rows]
     nodes.sort(key=lambda node: (0 if node["type"] == "folder" else 1, node["name"]))
     return nodes
@@ -446,7 +478,7 @@ def subtree_ids(conn: sqlite3.Connection, node_id: str) -> list[str]:
 
 
 def delete_nodes(conn: sqlite3.Connection, node_ids: Sequence[str]) -> None:
-    """노드와 딸린 파일/문제/풀이/채팅/노트항목 레코드를 지운다.
+    """노드와 딸린 파일/문제/풀이/변형/채팅/노트항목 레코드를 지운다.
 
     노트 항목 처리는 두 규칙이 다르다(ARCHITECTURE 7항).
       1. **노트 노드**(`note_node_id`)가 지워지면 그 안의 항목도 지운다.
@@ -460,11 +492,10 @@ def delete_nodes(conn: sqlite3.Connection, node_ids: Sequence[str]) -> None:
     params = tuple(node_ids)
     conn.execute(f"DELETE FROM note_items WHERE note_node_id IN ({marks})", params)
     conn.execute(
-        f"UPDATE note_items SET source_node_id = NULL"
-        f" WHERE source_node_id IN ({marks})",
+        f"UPDATE note_items SET source_node_id = NULL WHERE source_node_id IN ({marks})",
         params,
     )
-    for table in ("chat_messages", "solutions", "problems", "files"):
+    for table in ("chat_messages", "solutions", "variants", "problems", "files"):
         conn.execute(f"DELETE FROM {table} WHERE node_id IN ({marks})", params)
     conn.execute(f"DELETE FROM nodes WHERE id IN ({marks})", params)
 
@@ -498,9 +529,7 @@ def upsert_file(
 
 def get_file(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None:
     """파일 메타(없으면 None)."""
-    row = conn.execute(
-        "SELECT * FROM files WHERE node_id = ?", (node_id,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM files WHERE node_id = ?", (node_id,)).fetchone()
     return None if row is None else dict(row)
 
 
@@ -552,9 +581,7 @@ def list_problems(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]
     return [_problem_row_to_dict(row) for row in rows]
 
 
-def get_problem(
-    conn: sqlite3.Connection, node_id: str, no: int
-) -> dict[str, Any] | None:
+def get_problem(conn: sqlite3.Connection, node_id: str, no: int) -> dict[str, Any] | None:
     """문항 1건(없으면 None)."""
     row = conn.execute(
         "SELECT * FROM problems WHERE node_id = ? AND no = ?", (node_id, no)
@@ -658,6 +685,106 @@ def get_solution(
     }
 
 
+# ---------------------------------------------------------------- variants
+# 변형 문항. (node_id, no, mode) 당 최신 1건만 남긴다(이력 없음).
+def upsert_variant(
+    conn: sqlite3.Connection,
+    *,
+    node_id: str,
+    no: int,
+    mode: str,
+    text: str,
+    usage: dict[str, Any] | None = None,
+    cost: dict[str, Any] | None = None,
+) -> None:
+    """변형 문항을 넣거나 갱신한다(같은 키는 덮어쓴다).
+
+    Args:
+        conn: 열린 커넥션.
+        node_id: 시험지 노드 id.
+        no: 원본 문항 번호.
+        mode: 변형 종류(`number` / `condition` / `number_condition`).
+        text: 변형 응답 원문(`## 문제 / ## 정답 / ## 풀이` 마크다운).
+        usage: 토큰 사용량(없으면 None).
+        cost: 비용(없으면 None).
+    """
+    conn.execute(
+        """
+        INSERT INTO variants
+            (node_id, no, mode, text, usage_json, cost_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(node_id, no, mode) DO UPDATE SET
+            text = excluded.text,
+            usage_json = excluded.usage_json,
+            cost_json = excluded.cost_json,
+            created_at = excluded.created_at
+        """,
+        (node_id, no, mode, text, _dumps(usage), _dumps(cost), now_iso()),
+    )
+
+
+def _variant_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "no": int(row["no"]),
+        "mode": row["mode"],
+        "text": row["text"],
+        "usage": _loads(row["usage_json"]),
+        "cost": _loads(row["cost_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def list_variants(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]]:
+    """저장된 변형 목록(문항 번호 → mode 순).
+
+    mode 정렬은 프론트 탭 순서(`number` → `condition` → `number_condition`)를
+    따른다. 알파벳 순은 `condition` 이 먼저 와 탭 순서와 어긋난다.
+    """
+    rows = conn.execute(
+        """
+        SELECT * FROM variants WHERE node_id = ?
+         ORDER BY no,
+               CASE mode
+                   WHEN 'number' THEN 0
+                   WHEN 'condition' THEN 1
+                   WHEN 'number_condition' THEN 2
+                   ELSE 3
+               END,
+               mode
+        """,
+        (node_id,),
+    ).fetchall()
+    return [_variant_row_to_dict(row) for row in rows]
+
+
+def get_variant(
+    conn: sqlite3.Connection, node_id: str, no: int, mode: str
+) -> dict[str, Any] | None:
+    """변형 1건(없으면 None)."""
+    row = conn.execute(
+        "SELECT * FROM variants WHERE node_id = ? AND no = ? AND mode = ?",
+        (node_id, no, mode),
+    ).fetchone()
+    return None if row is None else _variant_row_to_dict(row)
+
+
+def delete_variants(conn: sqlite3.Connection, node_id: str) -> int:
+    """그 시험지의 변형을 모두 지우고 지운 건수를 돌려준다.
+
+    재추출로 문항 번호·영역이 달라지면 기존 변형이 엉뚱한 문항에 붙는다
+    (`delete_solutions` 와 같은 이유).
+
+    Args:
+        conn: 열린 커넥션.
+        node_id: 시험지 노드 id.
+
+    Returns:
+        삭제된 변형 건수.
+    """
+    cursor = conn.execute("DELETE FROM variants WHERE node_id = ?", (node_id,))
+    return int(cursor.rowcount or 0)
+
+
 # ---------------------------------------------------------------- chat
 # 스레드 = (node_id, problem_no). `problem_no IS NULL` 이 시험지 전역 스레드다.
 # `problem_no IS ?` 는 SQLite 에서 NULL 바인딩도 올바르게 비교한다(`= NULL` 은 안 된다).
@@ -715,8 +842,7 @@ def list_chat_messages(
     호출자는 그 사실을 사용자에게 알려야 한다.
     """
     rows = conn.execute(
-        "SELECT * FROM chat_messages"
-        " WHERE node_id = ? AND problem_no IS ? ORDER BY id",
+        "SELECT * FROM chat_messages WHERE node_id = ? AND problem_no IS ? ORDER BY id",
         (node_id, problem_no),
     ).fetchall()
     if limit is not None:
@@ -729,8 +855,7 @@ def count_chat_messages(
 ) -> int:
     """한 스레드의 전체 메시지 수."""
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM chat_messages"
-        " WHERE node_id = ? AND problem_no IS ?",
+        "SELECT COUNT(*) AS n FROM chat_messages WHERE node_id = ? AND problem_no IS ?",
         (node_id, problem_no),
     ).fetchone()
     return 0 if row is None else int(row["n"])
@@ -937,9 +1062,7 @@ def list_conversation_messages(
     return [_conversation_message_to_dict(row) for row in rows]
 
 
-def count_conversation_messages(
-    conn: sqlite3.Connection, conversation_id: str
-) -> int:
+def count_conversation_messages(conn: sqlite3.Connection, conversation_id: str) -> int:
     """대화의 전체 메시지 수."""
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM conversation_messages WHERE conversation_id = ?",
@@ -1008,9 +1131,7 @@ def insert_note_item(
     return cursor.rowcount > 0
 
 
-def list_note_items(
-    conn: sqlite3.Connection, note_node_id: str
-) -> list[dict[str, Any]]:
+def list_note_items(conn: sqlite3.Connection, note_node_id: str) -> list[dict[str, Any]]:
     """노트 항목 목록(추가한 순서)."""
     rows = conn.execute(
         "SELECT * FROM note_items WHERE note_node_id = ? ORDER BY created_at, rowid",
@@ -1021,9 +1142,7 @@ def list_note_items(
 
 def get_note_item(conn: sqlite3.Connection, item_id: str) -> dict[str, Any] | None:
     """노트 항목 1건(없으면 None)."""
-    row = conn.execute(
-        "SELECT * FROM note_items WHERE id = ?", (item_id,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM note_items WHERE id = ?", (item_id,)).fetchone()
     return None if row is None else _note_item_to_dict(row)
 
 
@@ -1044,3 +1163,147 @@ def note_item_ids_for_notes(
 def delete_note_item(conn: sqlite3.Connection, item_id: str) -> None:
     """노트 항목 1건을 지운다."""
     conn.execute("DELETE FROM note_items WHERE id = ?", (item_id,))
+
+
+# --------------------------------------------------------------------- jobs
+# 작업 큐. 상태만 영속하고 실행은 `jobs.py` 의 인메모리 러너가 맡는다.
+
+
+def _job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """작업 행을 API 응답용 dict 로. JSON 컬럼은 파싱해 돌려준다."""
+    return {
+        "id": str(row["id"]),
+        "kind": str(row["kind"]),
+        "node_id": str(row["node_id"]),
+        "node_name": str(row["node_name"]),
+        "targets": json.loads(str(row["targets_json"])),
+        "params": json.loads(str(row["params_json"])),
+        "status": str(row["status"]),
+        "total": int(row["total"]),
+        "done_count": int(row["done_count"]),
+        "current_no": None if row["current_no"] is None else int(row["current_no"]),
+        "error": None if row["error"] is None else str(row["error"]),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def insert_job(
+    conn: sqlite3.Connection,
+    *,
+    job_id: str,
+    kind: str,
+    node_id: str,
+    node_name: str,
+    targets: Any,
+    params: dict[str, Any],
+    total: int,
+) -> dict[str, Any]:
+    """작업을 `queued` 상태로 넣고 그 행을 돌려준다."""
+    stamp = now_iso()
+    conn.execute(
+        """
+        INSERT INTO jobs
+            (id, kind, node_id, node_name, targets_json, params_json,
+             status, total, done_count, current_no, error, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 0, NULL, NULL, ?, ?)
+        """,
+        (
+            job_id,
+            kind,
+            node_id,
+            node_name,
+            json.dumps(targets, ensure_ascii=False),
+            json.dumps(params, ensure_ascii=False),
+            total,
+            stamp,
+            stamp,
+        ),
+    )
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert row is not None
+    return _job_row_to_dict(row)
+
+
+def get_job(conn: sqlite3.Connection, job_id: str) -> dict[str, Any] | None:
+    """작업 1건(없으면 None)."""
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return None if row is None else _job_row_to_dict(row)
+
+
+def update_job(
+    conn: sqlite3.Connection,
+    job_id: str,
+    **fields: Any,
+) -> None:
+    """작업의 일부 컬럼만 갱신한다(`updated_at` 은 자동).
+
+    허용 컬럼: status, total, done_count, current_no, error.
+    """
+    allowed = {"status", "total", "done_count", "current_no", "error"}
+    sets = [f"{key} = ?" for key in fields if key in allowed]
+    values = [fields[key] for key in fields if key in allowed]
+    if not sets:
+        return
+    sets.append("updated_at = ?")
+    values.append(now_iso())
+    values.append(job_id)
+    conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id = ?", tuple(values))
+
+
+def list_active_jobs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """대기·실행 중인 작업(오래된 순)."""
+    rows = conn.execute(
+        """
+        SELECT * FROM jobs WHERE status IN ('queued', 'running')
+        ORDER BY created_at, id
+        """
+    ).fetchall()
+    return [_job_row_to_dict(row) for row in rows]
+
+
+def list_recent_jobs(conn: sqlite3.Connection, limit: int = 10) -> list[dict[str, Any]]:
+    """최근 종료된 작업(최신 순)."""
+    rows = conn.execute(
+        """
+        SELECT * FROM jobs WHERE status NOT IN ('queued', 'running')
+        ORDER BY updated_at DESC, id DESC LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [_job_row_to_dict(row) for row in rows]
+
+
+def find_active_job_for(
+    conn: sqlite3.Connection, node_id: str, kind: str
+) -> list[dict[str, Any]]:
+    """그 시험지에 대해 진행 중인 같은 종류의 작업들(중복 요청 판정용)."""
+    rows = conn.execute(
+        """
+        SELECT * FROM jobs
+        WHERE node_id = ? AND kind = ? AND status IN ('queued', 'running')
+        ORDER BY created_at, id
+        """,
+        (node_id, kind),
+    ).fetchall()
+    return [_job_row_to_dict(row) for row in rows]
+
+
+def interrupt_unfinished_jobs(conn: sqlite3.Connection) -> int:
+    """서버 시작 시 남아 있던 대기·실행 작업을 `interrupted` 로 표시한다.
+
+    프로세스가 죽으면 인메모리 큐도 사라진다. 자동 재개는 하지 않는다 —
+    중단 지점 추적과 중복 과금 위험이 있고, 사용자가 다시 걸면 이미 저장된
+    문항은 건너뛰므로 손실이 적다.
+
+    Returns:
+        표시된 작업 수.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE jobs SET status = 'interrupted', current_no = NULL, updated_at = ?
+        WHERE status IN ('queued', 'running')
+        """,
+        (now_iso(),),
+    )
+    return int(cursor.rowcount or 0)

@@ -76,6 +76,32 @@ def test_login_validates_password(auth_client: TestClient) -> None:
     assert auth_client.post("/api/login", json={"password": "nope"}).status_code == 401
 
 
+def test_binary_assets_allow_access_query(auth_client: TestClient) -> None:
+    """헤더를 못 붙이는 바이너리 GET 만 `?access=` 쿼리 인증을 허용한다.
+
+    401(게이트에 막힘)이 아니라 404(라우트까지 도달)면 미들웨어를 통과한 것이다.
+    `.hwpx` 를 빠뜨리면 배포 환경에서 한글 내보내기가 401 로 막힌다.
+    """
+    for path in (
+        "/api/files/nope/raw",
+        "/api/files/nope/problems/1/crop",
+        "/api/files/nope/export.docx",
+        "/api/files/nope/export.hwpx",
+        "/api/files/nope/variants/export.docx",
+        "/api/files/nope/variants/export.hwpx",
+        "/api/notes/nope/export.docx",
+        "/api/notes/nope/export.hwpx",
+    ):
+        assert auth_client.get(path).status_code == 401, path
+        assert auth_client.get(f"{path}?access={PW}").status_code == 404, path
+
+
+def test_access_query_is_not_allowed_for_json_routes(auth_client: TestClient) -> None:
+    """일반 JSON 라우트는 쿼리 인증을 허용하지 않는다(헤더 전용)."""
+    assert auth_client.get(f"/api/files/nope/variants?access={PW}").status_code == 401
+    assert auth_client.get(f"/api/tree?access={PW}").status_code == 401
+
+
 def test_local_mode_disables_auth(open_client: TestClient) -> None:
     # 비번 미설정: auth_required=false, 보호 라우트도 헤더 없이 통과.
     assert open_client.get("/api/env").json()["auth_required"] is False

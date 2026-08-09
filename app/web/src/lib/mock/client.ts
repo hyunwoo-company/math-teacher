@@ -44,11 +44,14 @@ import type {
   NoteItem,
   Problem,
   ProviderChoice,
+  Job,
+  JobCreateRequest,
+  JobCreated,
+  JobsResponse,
   ReextractResult,
   Section,
   Solution,
   SolutionsResponse,
-  SolveRequest,
   StreamEvent,
   ThreadsResponse,
   TreeNode,
@@ -89,7 +92,22 @@ interface MockState {
   conversations: MockConversation[];
   /** noteId -> items. */
   noteItems: Map<string, NoteItem[]>;
+  /** 작업 큐. 실제 서버처럼 구독과 무관하게 진행한다. */
+  jobs: Map<string, MockJob>;
   counter: number;
+}
+
+/** 목 작업. `script` 는 미리 만들어 둔 대본이고 워커가 하나씩 소비한다. */
+interface MockJob {
+  record: Job;
+  /** 중복 판정을 위해 무엇을 대상으로 하는지 기억한다. */
+  targets: { numbers?: number[]; no?: number; modes?: VariantMode[] };
+  script: MockSseEvent[];
+  cursor: number;
+  partialText: string;
+  canceled: boolean;
+  timer: ReturnType<typeof setInterval> | null;
+  listeners: Set<(event: MockSseEvent | null) => void>;
 }
 
 function initialState(): MockState {
@@ -108,6 +126,7 @@ function initialState(): MockState {
     chats: new Map(),
     conversations: [],
     noteItems: new Map([[MOCK_NOTE_ID, []]]),
+    jobs: new Map(),
     counter: 0,
   };
 }
@@ -137,8 +156,21 @@ function findConversation(id: string): MockConversation {
 
 let state = initialState();
 
-/** 테스트에서 상태를 초기화한다. */
+/** 테스트에서 상태를 초기화한다.
+ *
+ * 진행 중인 작업 워커(setInterval)를 반드시 먼저 멈춘다. 워커 클로저는 모듈
+ * 변수 `state` 를 참조하므로, 살려 두면 **다음 테스트의 상태에** 풀이를 써 넣어
+ * 원인을 알기 어려운 간섭을 만든다.
+ */
 export function resetMockState(): void {
+  for (const job of state.jobs.values()) {
+    job.canceled = true;
+    if (job.timer != null) {
+      clearInterval(job.timer);
+      job.timer = null;
+    }
+    job.listeners.clear();
+  }
   state = initialState();
 }
 
@@ -256,7 +288,12 @@ function chunkText(text: string, size: number): string[] {
 
 async function* solveScript(
   fileId: string,
-  body: SolveRequest,
+  body: {
+    problem_numbers?: number[] | null;
+    provider?: ProviderChoice;
+    model?: string;
+    effort?: string;
+  },
 ): AsyncGenerator<MockSseEvent, void, void> {
   const problems = state.problems.get(fileId) ?? [];
   const targets =
@@ -265,7 +302,7 @@ async function* solveScript(
       : body.problem_numbers;
 
   const model = body.model ?? 'claude-opus-5';
-  const subscription = isSubscriptionCall(body.provider);
+  const subscription = isSubscriptionCall(body.provider ?? 'subscription');
 
   yield { event: 'start', data: { total: targets.length }, delayMs: 120 };
 
@@ -920,11 +957,6 @@ export const mockClient: ApiClient = {
     return withAccess(mockCropUrl(match ? Number(match[1]) % 22 || 1 : 1));
   },
 
-  solve(id: string, body: SolveRequest, signal?: AbortSignal) {
-    requireAuth();
-    return streamFrom(solveScript(id, body), signal);
-  },
-
   chat(id: string, body: ChatRequest, signal?: AbortSignal) {
     requireAuth();
     const key = threadKey(id, body.problem_no ?? null);
@@ -934,16 +966,265 @@ export const mockClient: ApiClient = {
     return streamFrom(chatScript(id, body), signal);
   },
 
-  generateVariant(
-    fileId: string,
-    no: number,
-    mode: VariantMode,
-    opts?: { provider?: ProviderChoice; model?: string; effort?: string },
-    signal?: AbortSignal,
-  ) {
+  async createJob(body: JobCreateRequest): Promise<JobCreated> {
+    await sleep(LATENCY_MS);
     requireAuth();
-    // 원본 시험지가 존재하는지 확인한다(오답노트에서 원본이 지워진 항목 방어).
-    findNode(fileId);
-    return streamFrom(variantScript(no, mode, opts ?? {}), signal);
+    const node = findNode(body.node_id);
+
+    // 같은 **대상** 을 이미 처리 중이면 그것을 돌려준다(버튼 두 번 방지).
+    // 시험지 단위로만 막으면 다른 문항·다른 변형이 통째로 무시된다.
+    for (const existing of state.jobs.values()) {
+      if (
+        existing.record.node_id !== body.node_id ||
+        existing.record.kind !== body.kind ||
+        (existing.record.status !== 'queued' && existing.record.status !== 'running')
+      ) {
+        continue;
+      }
+      if (overlapsTarget(existing, body)) {
+        return { job: { ...existing.record }, existing: true, position: 0 };
+      }
+    }
+
+    const script: MockSseEvent[] = [];
+    let total = 0;
+    let solveTargets: number[] = [];
+    if (body.kind === 'solve') {
+      const problems = state.problems.get(body.node_id) ?? [];
+      const solved = state.solutions.get(body.node_id) ?? new Map<number, Solution>();
+      const requested =
+        body.problem_numbers == null || body.problem_numbers.length === 0
+          ? problems.map((problem) => problem.no)
+          : body.problem_numbers;
+      const targets = body.force ? requested : requested.filter((no) => !solved.has(no));
+      solveTargets = targets;
+      if (targets.length === 0) {
+        throw new ApiError(
+          'already_solved',
+          '요청한 문항은 이미 모두 풀려 있습니다.',
+          '다시 풀려면 "다시 풀기" 를 눌러 주세요.',
+          400,
+        );
+      }
+      total = targets.length;
+      for await (const event of solveScript(body.node_id, {
+        problem_numbers: targets,
+        provider: body.provider,
+        model: body.model,
+        effort: body.effort,
+      })) {
+        script.push(event);
+      }
+    } else {
+      const no = body.no ?? 1;
+      const modes = body.modes ?? ['number'];
+      total = modes.length;
+      script.push({ event: 'start', data: { total }, delayMs: 40 });
+      for (const mode of modes) {
+        for await (const event of variantScript(no, mode, {
+          provider: body.provider,
+          model: body.model,
+        })) {
+          const data = (event.data ?? {}) as Record<string, unknown>;
+          script.push({ ...event, data: { ...data, mode } });
+        }
+      }
+      script.push({
+        event: 'end',
+        data: { total_usage: null, total_cost: null },
+        delayMs: 20,
+      });
+    }
+
+    const id = `job-${++state.counter}`;
+    const record: Job = {
+      id,
+      kind: body.kind,
+      node_id: body.node_id,
+      node_name: node.name,
+      status: 'running',
+      total,
+      done_count: 0,
+      current_no: null,
+      error: null,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    const job: MockJob = {
+      record,
+      targets:
+        body.kind === 'solve'
+          ? { numbers: solveTargets }
+          : { no: body.no ?? 1, modes: body.modes ?? ['number'] },
+      script,
+      cursor: 0,
+      partialText: '',
+      canceled: false,
+      timer: null,
+      listeners: new Set(),
+    };
+    state.jobs.set(id, job);
+    startMockJob(job);
+    return { job: { ...record }, existing: false, position: 0 };
+  },
+
+  async listJobs(): Promise<JobsResponse> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    const all = [...state.jobs.values()].map((job) => ({ ...job.record }));
+    return {
+      active: all.filter((job) => job.status === 'queued' || job.status === 'running'),
+      recent: all.filter((job) => job.status !== 'queued' && job.status !== 'running'),
+    };
+  },
+
+  jobEvents(jobId: string, signal?: AbortSignal) {
+    requireAuth();
+    return mockJobEvents(jobId, signal);
+  },
+
+  async cancelJob(jobId: string) {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    const job = state.jobs.get(jobId);
+    if (!job) throw new ApiError('not_found', '작업을 찾을 수 없습니다.', null, 404);
+    job.canceled = true;
   },
 };
+
+/** 진행 중 작업과 새 요청의 대상이 겹치는지(백엔드 `_find_overlapping_job` 과 같은 규칙). */
+function overlapsTarget(existing: MockJob, body: JobCreateRequest): boolean {
+  if (body.kind === 'solve') {
+    if (body.problem_numbers == null) return true;
+    const wanted = new Set(body.problem_numbers);
+    return existing.targets.numbers?.some((no) => wanted.has(no)) ?? false;
+  }
+  if (existing.targets.no !== body.no) return false;
+  const wanted = new Set(body.modes ?? ['number']);
+  return existing.targets.modes?.some((mode) => wanted.has(mode)) ?? false;
+}
+
+/** 목 작업 워커. 구독자가 없어도 대본을 소비해 진행한다(실서버와 같은 성질). */
+function startMockJob(job: MockJob): void {
+  const step = () => {
+    if (job.canceled) {
+      finishMockJob(job, 'canceled');
+      return;
+    }
+    const event = job.script[job.cursor];
+    if (event === undefined) {
+      finishMockJob(job, 'done');
+      return;
+    }
+    job.cursor += 1;
+    applyMockEvent(job, event);
+    for (const listener of job.listeners) listener(event);
+    if (event.event === 'end') finishMockJob(job, 'done');
+  };
+  // 실제 스트리밍처럼 조금씩 진행시킨다.
+  job.timer = setInterval(step, 12);
+}
+
+function applyMockEvent(job: MockJob, event: MockSseEvent): void {
+  const data = event.data as Record<string, unknown>;
+  if (event.event === 'problem') {
+    job.record.current_no = typeof data.no === 'number' ? data.no : null;
+    job.partialText = '';
+  } else if (event.event === 'delta') {
+    job.partialText += typeof data.text === 'string' ? data.text : '';
+  } else if (event.event === 'done' || event.event === 'error') {
+    job.record.done_count += 1;
+    job.partialText = '';
+    // 풀이는 목 저장소에도 남긴다(실서버가 문항마다 저장하는 것과 같다).
+    if (job.record.kind === 'solve' && event.event === 'done') {
+      const no = typeof data.no === 'number' ? data.no : null;
+      if (no != null) {
+        const solutions =
+          state.solutions.get(job.record.node_id) ?? new Map<number, Solution>();
+        solutions.set(no, {
+          no,
+          solution: typeof data.solution === 'string' ? data.solution : '',
+          usage: (data.usage as Usage | null) ?? null,
+          cost: (data.cost as Cost | null) ?? null,
+          truncated: false,
+          created_at: nowIso(),
+        });
+        state.solutions.set(job.record.node_id, solutions);
+      }
+    }
+  }
+  job.record.updated_at = nowIso();
+}
+
+function finishMockJob(job: MockJob, status: Job['status']): void {
+  if (job.timer != null) {
+    clearInterval(job.timer);
+    job.timer = null;
+  }
+  if (job.record.status !== 'running' && job.record.status !== 'queued') return;
+  job.record.status = status;
+  job.record.current_no = null;
+  job.record.updated_at = nowIso();
+  const end: MockSseEvent = {
+    event: 'end',
+    data: { total_usage: null, total_cost: null, status },
+    delayMs: 0,
+  };
+  for (const listener of job.listeners) {
+    listener(end);
+    listener(null);
+  }
+  job.listeners.clear();
+}
+
+/** 작업 구독: snapshot 을 먼저 주고 이후 이벤트를 흘린다. */
+async function* mockJobEvents(
+  jobId: string,
+  signal?: AbortSignal,
+): AsyncGenerator<StreamEvent, void, void> {
+  const job = state.jobs.get(jobId);
+  if (!job) throw new ApiError('not_found', '작업을 찾을 수 없습니다.', null, 404);
+
+  yield {
+    type: 'snapshot',
+    status: job.record.status,
+    total: job.record.total,
+    done_count: job.record.done_count,
+    current_no: job.record.current_no,
+    partial_text: job.partialText,
+  };
+  if (job.record.status !== 'running' && job.record.status !== 'queued') {
+    yield { type: 'end', total_usage: null, total_cost: null, status: job.record.status };
+    return;
+  }
+
+  const queue: (MockSseEvent | null)[] = [];
+  let wake: (() => void) | null = null;
+  const listener = (event: MockSseEvent | null) => {
+    queue.push(event);
+    wake?.();
+  };
+  job.listeners.add(listener);
+  try {
+    while (!signal?.aborted) {
+      if (queue.length === 0) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        continue;
+      }
+      const event = queue.shift();
+      if (event === undefined) continue;
+      if (event === null) return;
+      yield toStreamEvent({
+        event: event.event,
+        data: JSON.stringify(event.data),
+        id: null,
+        retry: null,
+      });
+      if (event.event === 'end') return;
+    }
+  } finally {
+    job.listeners.delete(listener);
+  }
+}

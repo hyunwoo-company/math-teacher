@@ -10,6 +10,7 @@ dependencies = [
     "pymupdf",
     "pillow",
     "python-docx",
+    "python-hwpx",
     "anthropic",
     "claude-agent-sdk",
 ]
@@ -34,6 +35,9 @@ ignore = [
 "extractor.py" = ["D", "ANN", "B", "SIM"]
 "pricing.py" = ["D", "ANN"]
 "tests/*" = ["D", "ANN"]
+# LaTeX -> 유니코드 매핑표. 기호가 라틴 문자와 닮은 것이 이 표의 존재 이유다.
+"to_plain_text.py" = ["RUF001"]
+"tests/test_to_plain_text.py" = ["RUF001"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

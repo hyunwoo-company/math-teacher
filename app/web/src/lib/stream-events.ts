@@ -4,7 +4,7 @@
  */
 
 import type { SSEMessage } from '@/lib/sse';
-import type { StreamEvent, Usage, Cost } from '@/types/api';
+import type { StreamEvent, Usage, Cost, JobStatus, VariantMode } from '@/types/api';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
@@ -65,6 +65,14 @@ function readCost(source: Record<string, unknown>, key: string): Cost | null {
   return cost;
 }
 
+/** 변형 작업 이벤트에 실린 `mode`. 없으면 빈 객체(스프레드해도 필드가 안 생긴다). */
+function variantMode(source: Record<string, unknown>): { mode?: VariantMode } {
+  const mode = source['mode'];
+  return mode === 'number' || mode === 'condition' || mode === 'number_condition'
+    ? { mode }
+    : {};
+}
+
 /** SSE 메시지 -> StreamEvent. */
 export function toStreamEvent(message: SSEMessage): StreamEvent {
   const unknown: StreamEvent = { type: 'unknown', event: message.event, raw: message.data };
@@ -79,6 +87,15 @@ export function toStreamEvent(message: SSEMessage): StreamEvent {
   if (!data) return unknown;
 
   switch (message.event) {
+    case 'snapshot':
+      return {
+        type: 'snapshot',
+        status: (readString(data, 'status') ?? 'running') as JobStatus,
+        total: readNumber(data, 'total') ?? 0,
+        done_count: readNumber(data, 'done_count') ?? 0,
+        current_no: readNumber(data, 'current_no'),
+        partial_text: readString(data, 'partial_text') ?? '',
+      };
     case 'start':
       return { type: 'start', total: readNumber(data, 'total') ?? 0 };
     case 'problem':
@@ -92,6 +109,7 @@ export function toStreamEvent(message: SSEMessage): StreamEvent {
         type: 'delta',
         no: readNumber(data, 'no'),
         text: readString(data, 'text') ?? '',
+        ...variantMode(data),
       };
     case 'done': {
       const truncatedBefore = readNumber(data, 'truncated_before');
@@ -105,6 +123,7 @@ export function toStreamEvent(message: SSEMessage): StreamEvent {
         truncated: data['truncated'] === true,
         history_truncated: data['history_truncated'] === true,
         truncated_before: truncatedBefore ?? 0,
+        ...variantMode(data),
       };
     }
     case 'error':
@@ -113,13 +132,18 @@ export function toStreamEvent(message: SSEMessage): StreamEvent {
         no: readNumber(data, 'no'),
         error_code: readString(data, 'error_code') ?? 'unknown',
         message: readString(data, 'message') ?? '알 수 없는 오류가 발생했습니다.',
+        ...variantMode(data),
       };
-    case 'end':
+    case 'end': {
+      // 작업 큐가 내려주는 end 에는 최종 상태가 실린다(채팅에는 없다).
+      const status = readString(data, 'status');
       return {
         type: 'end',
         total_usage: readUsage(data, 'total_usage'),
         total_cost: readCost(data, 'total_cost'),
+        ...(status ? { status: status as JobStatus } : {}),
       };
+    }
     default:
       return unknown;
   }

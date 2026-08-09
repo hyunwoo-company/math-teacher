@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from conftest import StubProvider, parse_sse, upload_test_pdf
+from conftest import (
+    StubProvider,
+    create_job,
+    parse_sse,
+    upload_test_pdf,
+    wait_job,
+)
 from fastapi.testclient import TestClient
 
 import ai_service
@@ -164,35 +170,28 @@ def test_subscription_provider_supports_images() -> None:
 
 
 # ---------------------------------------------------------------- SSE
-def test_solve_stream_events(client: TestClient, stub_provider: StubProvider) -> None:
+def test_solve_job_saves_every_problem(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """작업이 끝나면 대상 문항 풀이가 모두 저장돼 있다."""
     node_id = upload_test_pdf(client)["node"]["id"]
-    response = client.post(
-        f"/api/files/{node_id}/solve",
-        json={"problem_numbers": [1, 2], "provider": "auto", "effort": "low"},
+    job = create_job(
+        client,
+        kind="solve",
+        node_id=node_id,
+        problem_numbers=[1, 2],
+        provider="auto",
+        effort="low",
     )
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
-
-    events = parse_sse(response.text)
-    names = [name for name, _ in events]
-    assert names[0] == "start"
-    assert names[-1] == "end"
-    assert events[0][1] == {"total": 2}
-    assert ("problem", {"no": 1, "status": "running"}) in events
-
-    done = [data for name, data in events if name == "done"]
-    assert [item["no"] for item in done] == [1, 2]
-    assert done[0]["solution"] == "풀이 완료"
-    assert done[0]["usage"] is None
-    assert done[0]["cost"] is None
-    assert done[0]["truncated"] is False
-
-    end_data = events[-1][1]
-    assert end_data == {"total_usage": None, "total_cost": None}
+    final = wait_job(client, job["job"]["id"])
+    assert final["status"] == "done"
 
     saved = client.get(f"/api/files/{node_id}/solutions").json()["solutions"]
     assert [item["no"] for item in saved] == [1, 2]
     assert saved[0]["solution"] == "풀이 완료"
+    assert saved[0]["usage"] is None
+    assert saved[0]["cost"] is None
+    assert saved[0]["truncated"] is False
 
     detail = client.get(f"/api/files/{node_id}").json()
     assert detail["problems"][0]["has_solution"] is True
@@ -202,12 +201,11 @@ def test_solve_all_problems_when_numbers_null(
     client: TestClient, stub_provider: StubProvider
 ) -> None:
     node_id = upload_test_pdf(client)["node"]["id"]
-    response = client.post(
-        f"/api/files/{node_id}/solve",
-        json={"problem_numbers": None, "provider": "auto"},
+    job = create_job(
+        client, kind="solve", node_id=node_id, problem_numbers=None, provider="auto"
     )
-    events = parse_sse(response.text)
-    assert events[0][1] == {"total": 22}
+    assert job["job"]["total"] == 22
+    wait_job(client, job["job"]["id"])
     assert len(stub_provider.calls) == 22
 
 
@@ -222,16 +220,17 @@ def test_solve_reports_usage_and_cost_totals(
         ai_service, "resolve_provider", lambda requested, api_key: provider
     )
     node_id = upload_test_pdf(client)["node"]["id"]
-    response = client.post(
-        f"/api/files/{node_id}/solve",
-        json={"problem_numbers": [1, 2], "provider": "auto"},
+    job = create_job(
+        client, kind="solve", node_id=node_id, problem_numbers=[1, 2], provider="auto"
     )
-    events = parse_sse(response.text)
-    end_data = events[-1][1]
-    assert end_data["total_usage"]["input_tokens"] == 200
-    assert end_data["total_usage"]["output_tokens"] == 100
-    assert end_data["total_cost"]["total_usd"] == pytest.approx(0.002)
-    assert end_data["total_cost"]["total_krw"] > 0
+    wait_job(client, job["job"]["id"])
+
+    saved = client.get(f"/api/files/{node_id}/solutions").json()["solutions"]
+    assert len(saved) == 2
+    # 문항마다 실측 usage/cost 가 그대로 저장된다(합산은 프론트가 누적한다).
+    assert saved[0]["usage"]["input_tokens"] == 100
+    assert saved[0]["usage"]["output_tokens"] == 50
+    assert saved[0]["cost"]["total_usd"] == pytest.approx(0.001)
 
 
 def test_solve_provider_error_becomes_error_event(
@@ -242,12 +241,11 @@ def test_solve_provider_error_becomes_error_event(
         ai_service, "resolve_provider", lambda requested, api_key: provider
     )
     node_id = upload_test_pdf(client)["node"]["id"]
-    response = client.post(
-        f"/api/files/{node_id}/solve", json={"problem_numbers": [1]}
-    )
-    events = dict(parse_sse(response.text))
-    assert events["error"]["error_code"] == "boom"
-    assert events["error"]["message"] == "호출이 실패했습니다."
+    job = create_job(client, kind="solve", node_id=node_id, problem_numbers=[1])
+    final = wait_job(client, job["job"]["id"])
+
+    # 문항 실패는 작업 실패가 아니다(다음 문항을 계속 푼다). 저장은 없다.
+    assert final["status"] == "done"
     assert client.get(f"/api/files/{node_id}/solutions").json()["solutions"] == []
 
 
@@ -256,7 +254,8 @@ def test_solve_unknown_problem_number_400(
 ) -> None:
     node_id = upload_test_pdf(client)["node"]["id"]
     response = client.post(
-        f"/api/files/{node_id}/solve", json={"problem_numbers": [99]}
+        "/api/jobs",
+        json={"kind": "solve", "node_id": node_id, "problem_numbers": [99]},
     )
     assert response.status_code == 400
     assert response.json()["error_code"] == "problem_not_found"
@@ -267,7 +266,13 @@ def test_solve_unknown_model_400(
 ) -> None:
     node_id = upload_test_pdf(client)["node"]["id"]
     response = client.post(
-        f"/api/files/{node_id}/solve", json={"model": "gpt-9", "problem_numbers": [1]}
+        "/api/jobs",
+        json={
+            "kind": "solve",
+            "node_id": node_id,
+            "model": "gpt-9",
+            "problem_numbers": [1],
+        },
     )
     assert response.status_code == 400
     assert response.json()["error_code"] == "unknown_model"
@@ -278,7 +283,10 @@ def test_solve_without_provider_returns_409(
 ) -> None:
     monkeypatch.setattr(subscription_provider, "is_available", lambda: False)
     node_id = upload_test_pdf(client)["node"]["id"]
-    response = client.post(f"/api/files/{node_id}/solve", json={"problem_numbers": [1]})
+    response = client.post(
+        "/api/jobs",
+        json={"kind": "solve", "node_id": node_id, "problem_numbers": [1]},
+    )
     assert response.status_code == 409
     body = response.json()
     assert body["error_code"] == "no_provider"
@@ -376,10 +384,15 @@ def test_chat_unknown_problem_400(
     assert response.json()["error_code"] == "problem_not_found"
 
 
-async def test_solve_stream_over_asgi_transport(
+async def test_chat_stream_over_asgi_transport(
     stub_provider: StubProvider,
 ) -> None:
-    """httpx.AsyncClient + ASGITransport 로도 SSE 가 흐르는지 확인한다."""
+    """httpx.AsyncClient + ASGITransport 로도 SSE 가 흐르는지 확인한다.
+
+    풀이는 작업 큐로 옮겨가 더 이상 응답 스트림이 아니다. SSE 전송 자체는
+    채팅 라우트로 검증한다(배포 프록시가 스트림을 버퍼링하지 않는지 확인하려는
+    원래 의도는 그대로다).
+    """
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://test"
@@ -389,18 +402,11 @@ async def test_solve_stream_over_asgi_transport(
         chunks: list[str] = []
         async with async_client.stream(
             "POST",
-            f"/api/files/{node_id}/solve",
-            json={"problem_numbers": [1]},
+            f"/api/files/{node_id}/chat",
+            json={"message": "1번 풀이 알려주세요", "problem_no": 1},
         ) as response:
             assert response.status_code == 200
             async for chunk in response.aiter_text():
                 chunks.append(chunk)
     events = parse_sse("".join(chunks))
-    assert [name for name, _ in events] == [
-        "start",
-        "problem",
-        "delta",
-        "delta",
-        "done",
-        "end",
-    ]
+    assert [name for name, _ in events] == ["delta", "delta", "done"]

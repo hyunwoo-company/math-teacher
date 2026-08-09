@@ -38,6 +38,13 @@ from providers.base import (
 
 logger: Final[logging.Logger] = logging.getLogger("math_teacher.core.ai")
 
+# 풀이·변형 진행 이벤트: (이벤트명, 데이터). SSE 직렬화는 소비하는 쪽에서 한다.
+#
+# 예전에는 이 함수들이 SSE 문자열을 그대로 흘렸고 HTTP 응답이 곧 작업이었다.
+# 그래서 브라우저가 연결을 끊으면 작업도 멈췄다. 이제 작업 큐(`jobs.py`)가
+# 이 이벤트를 소비하며 진행 상태를 추적하고, 구독자가 없어도 끝까지 돈다.
+Event = tuple[str, dict[str, Any]]
+
 _USAGE_KEYS: Final[tuple[str, ...]] = (
     "input_tokens",
     "output_tokens",
@@ -223,7 +230,7 @@ def _accumulate(total: dict[str, int], usage: dict[str, Any] | None) -> bool:
 
 
 # ------------------------------------------------------------------ solve
-async def solve_stream(
+async def solve_events(
     *,
     node_id: str,
     provider: Provider,
@@ -231,7 +238,7 @@ async def solve_stream(
     targets: Sequence[dict[str, Any]],
     model: str,
     effort: Effort,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[Event]:
     """문항들을 순차로 풀며 SSE 문자열을 흘린다.
 
     캐시 히트를 노리려면 순차 호출이어야 한다(첫 호출이 캐시를 쓰고 이후가 읽는다).
@@ -242,11 +249,11 @@ async def solve_stream(
     has_cost = False
 
     try:
-        yield sse.event("start", {"total": len(targets)})
+        yield ("start", {"total": len(targets)})
 
         for problem in targets:
             no = int(problem["no"])
-            yield sse.event("problem", {"no": no, "status": "running"})
+            yield ("problem", {"no": no, "status": "running"})
             try:
                 image_b64 = (
                     await run_in_threadpool(_read_crop_b64, problem)
@@ -263,7 +270,7 @@ async def solve_stream(
                     max_tokens=config.DEFAULT_MAX_TOKENS,
                 ):
                     if chunk["type"] == "delta":
-                        yield sse.event("delta", {"no": no, "text": chunk["text"]})
+                        yield ("delta", {"no": no, "text": chunk["text"]})
                         continue
 
                     usage = chunk["usage"]
@@ -281,7 +288,7 @@ async def solve_stream(
                     if cost is not None:
                         has_cost = True
                         total_usd += float(cost.get("total_usd", 0.0) or 0.0)
-                    yield sse.event(
+                    yield (
                         "done",
                         {
                             "no": no,
@@ -293,7 +300,7 @@ async def solve_stream(
                     )
             except ProviderError as exc:
                 logger.warning("풀이 실패 (no=%s): %s", no, exc.message)
-                yield sse.event(
+                yield (
                     "error",
                     {
                         "no": no,
@@ -304,7 +311,7 @@ async def solve_stream(
                 )
             except Exception as exc:
                 logger.exception("풀이 중 예상치 못한 오류 (no=%s)", no)
-                yield sse.event(
+                yield (
                     "error",
                     {
                         "no": no,
@@ -314,7 +321,7 @@ async def solve_stream(
                     },
                 )
 
-        yield sse.event(
+        yield (
             "end",
             {
                 "total_usage": dict(total_usage) if has_usage else None,
@@ -357,7 +364,29 @@ def _save_solution(
 
 
 # ---------------------------------------------------------------- variant
-async def variant_stream(
+def _save_variant(
+    *,
+    node_id: str,
+    no: int,
+    kind: str,
+    text: str,
+    usage: dict[str, Any] | None,
+    cost: dict[str, Any] | None,
+) -> None:
+    """변형 결과를 저장한다 (블로킹). 같은 (시험지, 문항, 종류)는 덮어쓴다."""
+    with storage.transaction() as conn:
+        storage.upsert_variant(
+            conn,
+            node_id=node_id,
+            no=no,
+            mode=kind,
+            text=text,
+            usage=usage,
+            cost=cost,
+        )
+
+
+async def variant_events(
     *,
     node_id: str,
     provider: Provider,
@@ -366,12 +395,15 @@ async def variant_stream(
     kind: str,
     model: str,
     effort: Effort,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[Event]:
     """소스 문항을 바탕으로 동일 유형·유사 난이도의 변형 문제를 SSE 로 흘린다.
 
-    풀이(`solve_stream`)와 같은 문항 단위 이벤트 계약(delta / done / error)을
-    쓰되, v1 은 **생성·스트리밍만** 하고 결과를 저장하지 않는다. `kind` 는 변형
-    종류(`number`/`condition`/`number_condition`)로, 프롬프트에 그대로 반영된다.
+    풀이(`solve_events`)와 같은 문항 단위 이벤트 계약(delta / done / error)을
+    쓴다. `kind` 는 변형 종류(`number`/`condition`/`number_condition`)로,
+    프롬프트에 그대로 반영되고 저장 키의 일부가 된다.
+
+    `done` 시점에 `variants` 테이블에 저장한다(같은 키는 덮어쓴다). 새로고침해도
+    남고, 이미 만든 변형을 다시 생성해 쿼터를 낭비하지 않게 하기 위해서다.
     """
     no = int(problem["no"])
     text = str(problem.get("text") or "")
@@ -396,9 +428,18 @@ async def variant_stream(
                 ),
             ):
                 if chunk["type"] == "delta":
-                    yield sse.event("delta", {"no": no, "text": chunk["text"]})
+                    yield ("delta", {"no": no, "text": chunk["text"]})
                     continue
-                yield sse.event(
+                await run_in_threadpool(
+                    _save_variant,
+                    node_id=node_id,
+                    no=no,
+                    kind=kind,
+                    text=chunk["text"],
+                    usage=chunk["usage"],
+                    cost=chunk["cost"],
+                )
+                yield (
                     "done",
                     {
                         "no": no,
@@ -410,7 +451,7 @@ async def variant_stream(
                 )
         except ProviderError as exc:
             logger.warning("변형 생성 실패 (no=%s): %s", no, exc.message)
-            yield sse.event(
+            yield (
                 "error",
                 {
                     "no": no,
@@ -421,7 +462,7 @@ async def variant_stream(
             )
         except Exception as exc:
             logger.exception("변형 생성 중 예상치 못한 오류 (no=%s)", no)
-            yield sse.event(
+            yield (
                 "error",
                 {
                     "no": no,
@@ -491,9 +532,7 @@ def _file_summary_part(
     return TextPart(text=summary)
 
 
-def load_chat_context(
-    node_id: str, message: str, problem_no: int | None
-) -> ChatContext:
+def load_chat_context(node_id: str, message: str, problem_no: int | None) -> ChatContext:
     """채팅 턴을 만든다 (블로킹).
 
     `problem_no` 가 있으면 그 문항의 크롭 이미지 + 기존 풀이를 붙이고,
@@ -507,9 +546,7 @@ def load_chat_context(
         node = service.require_file_node(conn, node_id)
         meta = storage.get_file(conn, node_id)
         problems = storage.list_problems(conn, node_id)
-        total_history = storage.count_chat_messages(
-            conn, node_id, problem_no=problem_no
-        )
+        total_history = storage.count_chat_messages(conn, node_id, problem_no=problem_no)
         history = storage.list_chat_messages(
             conn,
             node_id,
@@ -517,9 +554,7 @@ def load_chat_context(
             limit=config.CHAT_HISTORY_LIMIT,
         )
         problem = (
-            None
-            if problem_no is None
-            else storage.get_problem(conn, node_id, problem_no)
+            None if problem_no is None else storage.get_problem(conn, node_id, problem_no)
         )
         solution = (
             None
@@ -556,9 +591,7 @@ def load_chat_context(
         )
     else:
         parts.append(
-            _file_summary_part(
-                node_name=str(node["name"]), mode=mode, problems=problems
-            )
+            _file_summary_part(node_name=str(node["name"]), mode=mode, problems=problems)
         )
 
     parts.append(TextPart(text=f"# 학생 질문\n{message}"))
@@ -847,7 +880,83 @@ async def conversation_chat_stream(
                 },
             )
     except (anyio.get_cancelled_exc_class(), GeneratorExit):
-        logger.info(
-            "SSE 연결이 끊겼습니다 (conversation, id=%s)", conversation_id
-        )
+        logger.info("SSE 연결이 끊겼습니다 (conversation, id=%s)", conversation_id)
         raise
+
+
+# ------------------------------------------------------------------- jobs
+def plan_solve_job(
+    node_id: str, numbers: Sequence[int] | None, *, force: bool
+) -> tuple[Mode, list[dict[str, Any]], str]:
+    """풀이 작업 대상을 정한다 (블로킹).
+
+    이미 풀린 문항을 건너뛰는 규칙을 **서버에서** 적용한다. 예전에는 프론트가
+    걸렀는데, 그러면 잡을 만든 창이 아닌 다른 창에서는 규칙이 적용되지 않았다.
+
+    Args:
+        node_id: 시험지 노드 id.
+        numbers: 대상 문항. None 이면 전체.
+        force: True 면 이미 풀린 문항도 다시 푼다.
+
+    Returns:
+        (모드, 대상 문항들, 표시용 시험지 이름).
+
+    Raises:
+        ApiError: 파일/문항이 없을 때. 남는 대상이 없으면 400 `already_solved`.
+    """
+    mode, targets = load_solve_targets(node_id, numbers)
+    with storage.transaction() as conn:
+        node = service.require_file_node(conn, node_id)
+        solved = set() if force else storage.solved_numbers(conn, node_id)
+    remaining = [item for item in targets if int(item["no"]) not in solved]
+    if not remaining:
+        raise bad_request(
+            "already_solved",
+            "요청한 문항은 이미 모두 풀려 있습니다.",
+            '다시 풀려면 "다시 풀기" 를 눌러 주세요.',
+        )
+    return mode, remaining, str(node["name"])
+
+
+def plan_variant_job(node_id: str, no: int) -> tuple[Mode, dict[str, Any], str]:
+    """변형 작업 대상을 정한다 (블로킹).
+
+    Returns:
+        (모드, 소스 문항, 표시용 시험지 이름).
+    """
+    mode, problem = load_variant_target(node_id, no)
+    with storage.transaction() as conn:
+        node = service.require_file_node(conn, node_id)
+    return mode, problem, str(node["name"])
+
+
+async def variant_batch_events(
+    *,
+    node_id: str,
+    provider: Provider,
+    mode: Mode,
+    problem: dict[str, Any],
+    kinds: Sequence[str],
+    model: str,
+    effort: Effort,
+) -> AsyncIterator[Event]:
+    """한 문항의 여러 변형 종류를 순차로 만들며 이벤트를 흘린다.
+
+    작업 하나가 여러 변형(숫자/조건/숫자+조건)을 담을 수 있게 감싼 것이다.
+    `done` / `error` 데이터에 어떤 종류인지 알 수 있도록 `mode` 키를 더한다.
+    """
+    yield ("start", {"total": len(kinds)})
+    for kind in kinds:
+        async for name, data in variant_events(
+            node_id=node_id,
+            provider=provider,
+            mode=mode,
+            problem=problem,
+            kind=kind,
+            model=model,
+            effort=effort,
+        ):
+            if name == "end":
+                continue  # 마지막에 한 번만 낸다
+            yield (name, {**data, "mode": kind})
+    yield ("end", {"total_usage": None, "total_cost": None})

@@ -23,19 +23,19 @@ import type {
   EnvResponse,
   FileDetail,
   NoteDetail,
-  ProviderChoice,
   ReextractResult,
   Section,
   Solution,
   SolutionsResponse,
-  SolveRequest,
   StreamEvent,
   ThreadsResponse,
   TreeNode,
   TreeResponse,
   Usage,
   UsageSummaryResponse,
-  VariantMode,
+  JobCreateRequest,
+  JobCreated,
+  JobsResponse,
 } from '@/types/api';
 
 /** 브라우저에 보관한 API 키(웹 모드). 서버에 저장하지 않는다. */
@@ -163,6 +163,43 @@ async function* openStream(
       body: JSON.stringify(body),
       signal,
       // 프록시/브라우저가 버퍼링하지 않게.
+      cache: 'no-store',
+    });
+  } catch (error) {
+    if (isAbortError(error)) return;
+    throw networkError(error);
+  }
+
+  if (!response.ok) {
+    handleUnauthorized(path, response.status);
+    throw await errorFromResponse(response);
+  }
+  if (!response.body) {
+    throw new ApiError('bad_response', '스트리밍 응답 본문이 비어 있습니다.', null, response.status);
+  }
+
+  for await (const message of iterateSSE(response.body, signal)) {
+    if (signal?.aborted) return;
+    yield toStreamEvent(message);
+  }
+}
+
+/**
+ * GET 으로 SSE 를 구독한다(작업 진행 구독용).
+ *
+ * 작업은 이미 서버에서 돌고 있고 여기서는 보기만 한다. 끊어도 작업은 계속되므로
+ * abort 는 "화면에서 그만 본다" 는 뜻이지 "작업을 멈춘다" 가 아니다.
+ */
+async function* openEventStream(
+  path: string,
+  signal?: AbortSignal,
+): AsyncGenerator<StreamEvent, void, void> {
+  let response: Response;
+  try {
+    response = await fetch(url(path), {
+      method: 'GET',
+      headers: { Accept: 'text/event-stream', ...authHeaders() },
+      signal,
       cache: 'no-store',
     });
   } catch (error) {
@@ -407,26 +444,23 @@ export const httpClient: ApiClient = {
     );
   },
 
-  solve(id: string, body: SolveRequest, signal?: AbortSignal) {
-    return openStream(`/api/files/${encodeURIComponent(id)}/solve`, body, signal);
-  },
-
   chat(id: string, body: ChatRequest, signal?: AbortSignal) {
     return openStream(`/api/files/${encodeURIComponent(id)}/chat`, body, signal);
   },
 
-  generateVariant(
-    fileId: string,
-    no: number,
-    mode: VariantMode,
-    opts?: { provider?: ProviderChoice; model?: string; effort?: string },
-    signal?: AbortSignal,
-  ) {
-    // provider/model/effort 는 undefined 면 JSON 에서 빠져 서버 기본값을 쓴다(계약).
-    return openStream(
-      `/api/files/${encodeURIComponent(fileId)}/problems/${no}/variant`,
-      { mode, provider: opts?.provider, model: opts?.model, effort: opts?.effort },
-      signal,
-    );
+  createJob(body: JobCreateRequest) {
+    return requestJson<JobCreated>('/api/jobs', jsonBody(body));
+  },
+
+  listJobs() {
+    return requestJson<JobsResponse>('/api/jobs');
+  },
+
+  jobEvents(jobId: string, signal?: AbortSignal) {
+    return openEventStream(`/api/jobs/${encodeURIComponent(jobId)}/events`, signal);
+  },
+
+  async cancelJob(jobId: string) {
+    await requestVoid(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
   },
 };

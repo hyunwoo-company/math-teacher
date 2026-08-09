@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { AccessGate } from '@/components/AccessGate';
+import { JobBanner } from '@/components/JobBanner';
 import { AiPanel } from '@/components/ai/AiPanel';
 import { CenterPanel } from '@/components/center/CenterPanel';
 import { FileTreePanel } from '@/components/tree/FileTreePanel';
@@ -35,6 +36,7 @@ export function Workspace() {
   const hydratePrefs = useWorkspace((state) => state.hydratePrefs);
   const loadEnv = useWorkspace((state) => state.loadEnv);
   const loadTree = useWorkspace((state) => state.loadTree);
+  const loadJobs = useWorkspace((state) => state.loadJobs);
   const loadUsageSummary = useWorkspace((state) => state.loadUsageSummary);
   const bootstrapConversations = useWorkspace((state) => state.bootstrapConversations);
   const logout = useWorkspace((state) => state.logout);
@@ -64,9 +66,11 @@ export function Workspace() {
         void bootstrapConversations();
         // agy 쿼터 사용량 요약을 초기 진입에 한 번 불러온다(실패는 조용히 무시).
         void loadUsageSummary();
+        // 진행 중인 작업을 되살린다. 새로고침해도 배너와 타이핑이 이어진다.
+        void loadJobs();
       }
     })();
-  }, [hydratePrefs, loadEnv, loadTree, loadUsageSummary, bootstrapConversations]);
+  }, [hydratePrefs, loadEnv, loadTree, loadJobs, loadUsageSummary, bootstrapConversations]);
 
   useEffect(() => {
     if (!toast) return;
@@ -162,6 +166,8 @@ export function Workspace() {
           <span>백엔드 없이 화면 흐름만 확인하는 중입니다. 데이터는 저장되지 않습니다.</span>
         </div>
       ) : null}
+      {/* 풀이·변형은 서버에서 도는 작업이라 어느 화면에 있든 진행 상황을 알려준다. */}
+      <JobBanner />
 
       {/*
         접속 비밀번호 게이트가 켜진 배포본에서만 상단 바에 로그아웃을 둔다.

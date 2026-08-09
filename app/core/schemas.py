@@ -230,6 +230,69 @@ class VariantRequest(BaseModel):
     effort: Effort = DEFAULT_EFFORT
 
 
+JobKind = Literal["solve", "variant"]
+JobStatus = Literal["queued", "running", "done", "error", "canceled", "interrupted"]
+
+
+class JobCreate(BaseModel):
+    """`POST /api/jobs` 요청.
+
+    `kind="solve"` 면 `problem_numbers`(null = 전체)를,
+    `kind="variant"` 면 `no` 와 `modes` 를 쓴다.
+    """
+
+    kind: JobKind
+    node_id: str
+    #: solve 전용. null 이면 전체 문항.
+    problem_numbers: list[int] | None = None
+    #: variant 전용. 소스 문항 번호.
+    no: int | None = None
+    #: variant 전용. 만들 변형 종류들.
+    modes: list[VariantKind] | None = None
+    #: 이미 결과가 있는 대상도 다시 실행할지.
+    force: bool = False
+    provider: ProviderName = "auto"
+    model: str | None = None
+    effort: Effort = DEFAULT_EFFORT
+
+
+class JobOut(BaseModel):
+    """작업 1건의 진행 상태."""
+
+    id: str
+    kind: JobKind
+    node_id: str
+    #: 표시용 시험지 이름 스냅샷(노드가 지워져도 배너에 이름이 남는다).
+    node_name: str
+    status: JobStatus
+    total: int
+    done_count: int
+    current_no: int | None = None
+    error: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class JobCreated(BaseModel):
+    """`POST /api/jobs` 응답.
+
+    `existing` 이 true 면 같은 대상의 작업이 이미 있어 새로 만들지 않고
+    그것을 돌려준 것이다(버튼 두 번 눌러 쿼터를 두 배로 쓰는 것을 막는다).
+    """
+
+    job: JobOut
+    existing: bool = False
+    #: 큐에서 앞에 있는 작업 수(0이면 바로 시작).
+    position: int = 0
+
+
+class JobsResponse(BaseModel):
+    """`GET /api/jobs` 응답. 진행 중 전부 + 최근 종료분."""
+
+    active: list[JobOut]
+    recent: list[JobOut]
+
+
 class ChatRequest(BaseModel):
     """채팅 요청. `problem_no` 가 있으면 그 문항을 컨텍스트로 건다."""
 
@@ -255,6 +318,23 @@ class SolutionsResponse(BaseModel):
     """`GET /api/files/{id}/solutions` 응답."""
 
     solutions: list[SolutionOut]
+
+
+class VariantOut(BaseModel):
+    """저장된 변형 1건. `mode` 는 변형 종류, `text` 는 마크다운 원문."""
+
+    no: int
+    mode: VariantKind
+    text: str
+    usage: dict[str, Any] | None = None
+    cost: dict[str, Any] | None = None
+    created_at: str
+
+
+class VariantsResponse(BaseModel):
+    """`GET /api/files/{id}/variants` 응답 (문항 번호 → 변형 종류 순)."""
+
+    variants: list[VariantOut]
 
 
 class SolutionContentSave(BaseModel):

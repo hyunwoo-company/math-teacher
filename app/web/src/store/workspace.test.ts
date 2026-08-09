@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { resetMockState } from '@/lib/mock/client';
 import { MOCK_FILE_ID, MOCK_PROBLEM_COUNT } from '@/lib/mock/data';
 import { buildTree } from '@/lib/tree';
-import { LEFT_MAX, LEFT_MIN, useWorkspace } from '@/store/workspace';
+import { LEFT_MAX, LEFT_MIN, useWorkspace, __internal } from '@/store/workspace';
 
 const initial = useWorkspace.getState();
 
@@ -20,6 +20,7 @@ function totalTokensOf(usage: { input_tokens?: number; output_tokens?: number } 
 }
 
 function reset() {
+  __internal.resetJobSubscriptions();
   useWorkspace.setState(initial, true);
   resetMockState();
   // 새로고침 복원(loadTree → restoreLastOpen)이 prefs 를 읽으므로 테스트 간 격리한다.
@@ -29,6 +30,22 @@ function reset() {
 async function selectMockFile() {
   await useWorkspace.getState().loadTree();
   await useWorkspace.getState().selectFile(MOCK_FILE_ID);
+}
+
+
+/**
+ * 작업이 끝날 때까지 기다린다.
+ *
+ * 작업 큐로 바뀐 뒤 생성 호출은 즉시 돌아오고 진행은 서버(목에서는 타이머)가
+ * 이어간다. 테스트는 상태가 목표에 닿을 때까지 폴링한다.
+ */
+async function until(check: () => boolean, timeoutMs = 25_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('작업이 시간 안에 끝나지 않았습니다.');
 }
 
 describe('워크스페이스 스토어 (목 API)', () => {
@@ -94,6 +111,7 @@ describe('워크스페이스 스토어 (목 API)', () => {
     await useWorkspace.getState().loadEnv();
     await selectMockFile();
     await useWorkspace.getState().startSolve([1]);
+    await until(() => useWorkspace.getState().solutions[1]?.status === 'done');
 
     const { solutions, totals } = useWorkspace.getState();
     // 백엔드 실측: 구독도 usage 는 실제 값이 오고 cost 만 null 이다.
@@ -158,6 +176,11 @@ describe('워크스페이스 스토어 (목 API)', () => {
       });
 
       await useWorkspace.getState().startSolve(null);
+      await until(
+        () =>
+          useWorkspace.getState().solve.doneCount === MOCK_PROBLEM_COUNT &&
+          !useWorkspace.getState().solve.running,
+      );
       unsubscribe();
 
       const { solve, solutions, totals, activeTab } = useWorkspace.getState();
@@ -175,10 +198,11 @@ describe('워크스페이스 스토어 (목 API)', () => {
       expect(progressSnapshots).toContain(11);
 
       // delta 가 조각조각 누적되는 중간 상태를 실제로 관찰했다.
+      // (문항이 바뀌면 누적 텍스트가 0 으로 돌아가므로 인덱스끼리 비교하지 않고
+      //  관찰된 길이의 최소/최대를 본다.)
       expect(sawStreamingText.length).toBeGreaterThan(20);
-      const first = sawStreamingText[0] ?? '';
-      const later = sawStreamingText[5] ?? '';
-      expect(later.length).toBeGreaterThan(first.length);
+      const lengths = sawStreamingText.map((text) => text.length);
+      expect(Math.max(...lengths)).toBeGreaterThan(Math.min(...lengths));
 
       // 모든 문제에 풀이 본문이 들어왔고 수식 구분자가 살아 있다.
       for (let no = 1; no <= MOCK_PROBLEM_COUNT; no += 1) {
@@ -204,6 +228,11 @@ describe('워크스페이스 스토어 (목 API)', () => {
       useWorkspace.getState().setProvider('apikey');
 
       await useWorkspace.getState().startSolve([1, 2]);
+      await until(
+        () =>
+          useWorkspace.getState().solutions[1]?.status === 'done' &&
+          useWorkspace.getState().solutions[2]?.status === 'done',
+      );
 
       const { totals, solutions } = useWorkspace.getState();
       expect(totals.billedCalls).toBe(2);
@@ -220,12 +249,16 @@ describe('워크스페이스 스토어 (목 API)', () => {
     async () => {
       await selectMockFile();
 
-      const promise = useWorkspace.getState().startSolve(null);
-      // 몇 개 처리될 때까지 기다렸다가 중단한다.
+      // 작업 생성은 즉시 끝난다(진행은 서버 큐에서 계속된다).
+      await useWorkspace.getState().startSolve(null);
+      // 몇 개 처리될 때까지 기다렸다가 취소한다.
       await new Promise((resolve) => setTimeout(resolve, 700));
       expect(useWorkspace.getState().solve.running).toBe(true);
-      useWorkspace.getState().abortSolve();
-      await promise;
+      const running = useWorkspace
+        .getState()
+        .jobs.find((job) => job.status === 'running' || job.status === 'queued');
+      expect(running).toBeDefined();
+      await useWorkspace.getState().cancelJob(running!.id);
 
       const { solve } = useWorkspace.getState();
       expect(solve.running).toBe(false);

@@ -52,7 +52,7 @@ describe('오답노트 인라인 풀이', () => {
     render(<NoteView />);
     expect(await screen.findByText('1번')).toBeInTheDocument();
 
-    const solveSpy = vi.spyOn(api, 'solve');
+    const solveSpy = vi.spyOn(api, 'createJob');
     await user.click(await screen.findByRole('button', { name: '풀이 보기' }));
 
     // 저장 풀이가 그대로 렌더된다(재풀이 없음).
@@ -72,7 +72,7 @@ describe('오답노트 인라인 풀이', () => {
     render(<NoteView />);
     expect(await screen.findByText('2번')).toBeInTheDocument();
 
-    const solveSpy = vi.spyOn(api, 'solve');
+    const solveSpy = vi.spyOn(api, 'createJob');
     await user.click(await screen.findByRole('button', { name: '풀이 보기' }));
 
     // 조회 후 저장분이 없으니 자동 풀이 없이 "풀이 만들기" 버튼만 보인다.
@@ -96,7 +96,7 @@ describe('오답노트 인라인 풀이', () => {
     const openButton = await screen.findByRole('button', { name: '풀이 보기' });
     expect(openButton).toHaveAttribute('aria-expanded', 'false');
 
-    const solveSpy = vi.spyOn(api, 'solve');
+    const solveSpy = vi.spyOn(api, 'createJob');
     await user.click(openButton);
     expect(await screen.findByText('이것은 저장된 풀이 본문입니다.')).toBeInTheDocument();
 

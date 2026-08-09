@@ -11,7 +11,13 @@ pip install -r requirements.txt
 uvicorn main:app --port 8100
 ```
 
+> **워커는 1개로 운영한다** (`--workers` 를 주지 마라). 풀이·변형 작업 큐(`jobs.py`)가
+> 프로세스 메모리에 있어서, 워커를 늘리면 프로세스마다 큐가 따로 생겨 진행 상황 구독과
+> 취소가 엉킨다. 처리량이 필요하면 워커가 아니라 큐를 DB 폴링 기반으로 바꿔야 한다.
+
 - 기동 시 `data/` 와 `data/app.db` 스키마를 자동으로 만들고 **마이그레이션**을 적용한다.
+- 기동 시 이전 실행에서 남은 `queued`/`running` 작업을 `interrupted` 로 표시한다.
+  자동 재개는 하지 않는다(중복 과금 위험). 사용자가 다시 걸면 이미 저장된 문항은 건너뛴다.
   (`storage.migrate` — `ALTER TABLE ADD COLUMN` / `CREATE ... IF NOT EXISTS` 만 쓰는
   비파괴·멱등 방식이다. 기존 `app.db` 를 drop 하지 않는다.)
 - 헬스체크: `GET /api/health` → `{"ok": true}`

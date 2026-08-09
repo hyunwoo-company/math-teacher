@@ -195,7 +195,7 @@ describe('http-client 헤더 자동첨부', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    const stream = httpClient.solve('file-1', { problem_numbers: null, provider: 'subscription' });
+    const stream = httpClient.jobEvents('job-1');
     // 스트림을 소비해 fetch 가 호출되게 한다(닫힌 스트림이라 즉시 끝난다).
     for await (const _event of stream) {
       // no-op

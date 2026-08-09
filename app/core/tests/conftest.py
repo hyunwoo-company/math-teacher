@@ -155,3 +155,33 @@ def parse_sse(body: str) -> list[tuple[str, dict[str, Any]]]:
         if name:
             events.append((name, json.loads(data)))
     return events
+
+
+def create_job(client: TestClient, **payload: Any) -> dict[str, Any]:
+    """작업을 만들고 응답 본문을 돌려준다."""
+    response = client.post("/api/jobs", json=payload)
+    assert response.status_code == 201, response.text
+    body: dict[str, Any] = response.json()
+    return body
+
+
+def wait_job(
+    client: TestClient, job_id: str, *, timeout: float = 30.0
+) -> dict[str, Any]:
+    """작업이 끝날 때까지 기다렸다가 최종 상태를 돌려준다.
+
+    TestClient 는 동기라 워커가 도는 사이 폴링으로 기다린다. 실서비스 프론트는
+    `GET /api/jobs/{id}/events` 를 구독한다.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        payload = client.get("/api/jobs").json()
+        for item in payload["active"] + payload["recent"]:
+            if item["id"] != job_id:
+                continue
+            if item["status"] in ("done", "error", "canceled", "interrupted"):
+                return dict(item)
+        time.sleep(0.05)
+    raise AssertionError(f"작업이 시간 안에 끝나지 않았습니다: {job_id}")

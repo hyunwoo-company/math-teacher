@@ -11,15 +11,17 @@ import re
 import shutil
 import sqlite3
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import config
-import docx_export
+import export
 import extractor
 import storage
 from errors import ApiError, bad_request, not_found
+from export import build as export_build
+from export.model import ExportDoc
 
 PDF_MAGIC: Final[bytes] = b"%PDF"
 
@@ -317,8 +319,8 @@ def reextract_pdf(node_id: str) -> tuple[dict[str, Any], str | None, int]:
     올려야 했다. 이 함수가 그 왕복을 없앤다. 원본 PDF(`files/{node_id}.pdf`)는
     건드리지 않고 문항만 다시 뽑는다.
 
-    **기존 풀이는 지운다.** 재추출로 문항 번호와 크롭 영역이 달라질 수 있어
-    (예: 0문항 → 15문항) 예전 풀이가 다른 문제에 붙을 수 있기 때문이다.
+    **기존 풀이와 변형은 지운다.** 재추출로 문항 번호와 크롭 영역이 달라질 수 있어
+    (예: 0문항 → 15문항) 예전 풀이·변형이 다른 문제에 붙을 수 있기 때문이다.
     오답노트 항목은 추가 시점의 크롭을 스냅샷으로 갖고 있으므로 그대로 둔다.
 
     Args:
@@ -370,6 +372,7 @@ def reextract_pdf(node_id: str) -> tuple[dict[str, Any], str | None, int]:
 
     with storage.transaction() as conn:
         deleted_solutions = storage.delete_solutions(conn, node_id)
+        storage.delete_variants(conn, node_id)
         storage.upsert_file(
             conn,
             node_id=node_id,
@@ -496,14 +499,47 @@ def _display_exam_name(name: str) -> str:
     return stripped or name.strip()
 
 
-def problems_docx(node_id: str) -> tuple[bytes, str]:
-    """시험지 문항 크롭 이미지를 '문제만' 담은 DOCX 바이트와 표시용 이름을 돌려준다.
+# 내보내기 형식(확장자)과 구성. `include` 기본값은 하위호환을 위해 `problems` 다.
+ExportFormat = Literal["docx", "hwpx"]
+ExportInclude = Literal["problems", "full"]
 
-    문항을 **번호 순서대로** 순회하며 크롭 PNG 를 삽입한다. 풀이/변형/정답은
-    넣지 않는다(문제만).
+_RENDERERS: Final[dict[str, Callable[[ExportDoc], bytes]]] = {
+    "docx": export.build_docx,
+    "hwpx": export.build_hwpx,
+}
+
+
+def _export_filename(
+    display_name: str,
+    *,
+    variants: bool,
+    fmt: ExportFormat,
+    include: ExportInclude,
+) -> str:
+    """다운로드 파일명. `<이름>_문제.docx` / `<이름>_변형문제와해설.hwpx` 형태."""
+    kind = "변형문제" if variants else "문제"
+    tail = "와해설" if include == "full" else ""
+    return f"{display_name}_{kind}{tail}.{fmt}"
+
+
+def export_exam(
+    node_id: str,
+    *,
+    fmt: ExportFormat = "docx",
+    include: ExportInclude = "problems",
+) -> tuple[bytes, str]:
+    """시험지를 문서로 내보낸다.
+
+    문항을 **번호 순서대로** 순회하며 크롭 PNG 를 삽입한다. `include="full"` 이면
+    저장된 풀이를 문항 뒤에 붙인다(`## 문제 확인` 은 제외).
+
+    Args:
+        node_id: 시험지 파일 노드 id.
+        fmt: `docx` 또는 `hwpx`.
+        include: `problems`(문제만) 또는 `full`(문제+해설).
 
     Returns:
-        (docx 바이트, 표시용 시험지 이름(뒤 `.pdf` 제거)).
+        (문서 바이트, 다운로드 파일명).
 
     Raises:
         ApiError: 파일이 아니거나 없을 때(400/404), 내보낼 문항/이미지가 없을 때(400).
@@ -511,26 +547,172 @@ def problems_docx(node_id: str) -> tuple[bytes, str]:
     with storage.transaction() as conn:
         node = require_file_node(conn, node_id)
         problems = storage.list_problems(conn, node_id)
+        solutions_by_no = (
+            {
+                int(row["no"]): str(row["solution"])
+                for row in storage.list_solutions(conn, node_id)
+            }
+            if include == "full"
+            else {}
+        )
     if not problems:
         raise bad_request(
             "no_problems",
             "내보낼 문항이 없습니다.",
             "문항이 추출된 시험지인지 확인하세요.",
         )
-    images: list[tuple[int, Path]] = []
+
+    items: list[export_build.ExamItem] = []
     for problem in sorted(problems, key=lambda item: int(item["no"])):
         crop = config.data_dir() / str(problem["crop_path"])
-        if crop.is_file():
-            images.append((int(problem["no"]), crop))
-    if not images:
+        if not crop.is_file():
+            continue
+        no = int(problem["no"])
+        items.append(
+            export_build.ExamItem(no=no, image=crop, solution=solutions_by_no.get(no))
+        )
+    if not items:
         raise bad_request(
             "no_crops",
             "내보낼 문항 이미지가 없습니다.",
             "파일을 다시 업로드해 추출을 재실행하세요.",
         )
+
     display_name = _display_exam_name(str(node["name"]))
-    content = docx_export.build_problems_docx(display_name, images)
-    return content, display_name
+    doc = export_build.build_exam_doc(
+        title=display_name, items=items, include_full=include == "full"
+    )
+    filename = _export_filename(
+        display_name, variants=False, fmt=fmt, include=include
+    )
+    return _RENDERERS[fmt](doc), filename
+
+
+def export_variants(
+    node_id: str,
+    *,
+    fmt: ExportFormat = "docx",
+    include: ExportInclude = "problems",
+) -> tuple[bytes, str]:
+    """저장된 변형 문제를 문서로 내보낸다.
+
+    원본 크롭은 넣지 않는다(변형 문제만 배포할 수 있어야 한다). 한 문항에 여러
+    변형 종류가 저장돼 있으면 모두 넣는다(번호 → 종류 순).
+
+    Args:
+        node_id: 시험지 파일 노드 id.
+        fmt: `docx` 또는 `hwpx`.
+        include: `problems`(변형 문제만) 또는 `full`(정답·풀이 포함).
+
+    Returns:
+        (문서 바이트, 다운로드 파일명).
+
+    Raises:
+        ApiError: 파일이 아니거나 없을 때(400/404), 저장된 변형이 없을 때(400).
+    """
+    with storage.transaction() as conn:
+        node = require_file_node(conn, node_id)
+        rows = storage.list_variants(conn, node_id)
+    if not rows:
+        raise bad_request(
+            "no_variants",
+            "내보낼 변형 문제가 없습니다.",
+            "문항을 열어 변형 문제를 먼저 생성하세요.",
+        )
+
+    items = [
+        export_build.VariantItem(
+            no=int(row["no"]), mode=str(row["mode"]), text=str(row["text"])
+        )
+        for row in rows
+    ]
+    display_name = _display_exam_name(str(node["name"]))
+    doc = export_build.build_variants_doc(
+        title=f"{display_name} 변형 문제",
+        items=items,
+        include_full=include == "full",
+    )
+    filename = _export_filename(display_name, variants=True, fmt=fmt, include=include)
+    return _RENDERERS[fmt](doc), filename
+
+
+def export_note(
+    note_id: str,
+    *,
+    fmt: ExportFormat = "docx",
+    include: ExportInclude = "problems",
+) -> tuple[bytes, str]:
+    """오답노트를 문서로 내보낸다.
+
+    원본이 삭제된 항목(`source_node_id IS NULL`)도 스냅샷 크롭으로 넣는다.
+    `include="full"` 이면 **원본이 살아 있고 저장된 풀이가 있는** 항목에만
+    풀이가 붙는다.
+
+    Args:
+        note_id: 오답노트 노드 id.
+        fmt: `docx` 또는 `hwpx`.
+        include: `problems`(문제만) 또는 `full`(문제+해설).
+
+    Returns:
+        (문서 바이트, 다운로드 파일명).
+
+    Raises:
+        ApiError: 오답노트가 아니거나 없을 때(400/404), 항목이 없을 때(400).
+    """
+    with storage.transaction() as conn:
+        node = require_note_node(conn, note_id)
+        rows = storage.list_note_items(conn, note_id)
+        solutions_by_item: dict[str, str] = {}
+        if include == "full":
+            for row in rows:
+                source_id = row["source_node_id"]
+                if source_id is None:
+                    continue
+                saved = storage.get_solution(
+                    conn, str(source_id), int(row["problem_no"])
+                )
+                if saved is not None:
+                    solutions_by_item[str(row["id"])] = str(saved["solution"])
+    if not rows:
+        raise bad_request(
+            "no_items",
+            "내보낼 오답노트 항목이 없습니다.",
+            "시험지에서 문항을 담은 뒤 다시 시도하세요.",
+        )
+
+    items: list[export_build.NoteItem] = []
+    for row in rows:
+        snapshot = str(row["crop_snapshot_path"] or "")
+        image = config.data_dir() / snapshot if snapshot else None
+        items.append(
+            export_build.NoteItem(
+                source_name=_display_exam_name(str(row["source_name"])),
+                problem_no=int(row["problem_no"]),
+                image=image if image is not None and image.is_file() else None,
+                memo=row["memo"],
+                solution=solutions_by_item.get(str(row["id"])),
+            )
+        )
+
+    display_name = _display_exam_name(str(node["name"]))
+    doc = export_build.build_note_doc(
+        title=display_name, items=items, include_full=include == "full"
+    )
+    filename = _export_filename(
+        display_name, variants=False, fmt=fmt, include=include
+    )
+    return _RENDERERS[fmt](doc), filename
+
+
+def variants(node_id: str) -> list[dict[str, Any]]:
+    """저장된 변형 목록(파일 노드 검증 포함).
+
+    프론트가 시험지를 열 때 받아 스토어를 채운다 — 새로고침해도 남고, 이미 만든
+    변형을 다시 생성해 쿼터를 낭비하지 않는다.
+    """
+    with storage.transaction() as conn:
+        require_file_node(conn, node_id)
+        return storage.list_variants(conn, node_id)
 
 
 def solutions(node_id: str) -> list[dict[str, Any]]:
@@ -1004,12 +1186,14 @@ __all__ = [
     "delete_conversation",
     "delete_node",
     "delete_note_item",
+    "export_exam",
+    "export_note",
+    "export_variants",
     "file_detail",
     "list_conversations",
     "list_tree",
     "note_crop_path",
     "note_detail",
-    "problems_docx",
     "raw_pdf_path",
     "reextract_pdf",
     "register_pdf",
@@ -1021,4 +1205,5 @@ __all__ = [
     "solutions",
     "update_node",
     "validate_pdf",
+    "variants",
 ]

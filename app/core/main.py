@@ -11,9 +11,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Final, Literal
 from urllib.parse import quote
@@ -41,11 +42,12 @@ from fastapi.responses import (
 
 import ai_service
 import config
+import jobs
 import pricing
 import service
 import sse
 import storage
-from errors import ApiError, register_error_handlers
+from errors import ApiError, bad_request, not_found, register_error_handlers
 from providers import agy, subscription
 from schemas import (
     AgyProviderInfo,
@@ -64,6 +66,10 @@ from schemas import (
     ErrorBody,
     FileDetailResponse,
     FolderCreate,
+    JobCreate,
+    JobCreated,
+    JobOut,
+    JobsResponse,
     ModelInfo,
     NodeOut,
     NodeResponse,
@@ -80,12 +86,11 @@ from schemas import (
     SolutionContentSave,
     SolutionOut,
     SolutionsResponse,
-    SolveRequest,
     SubscriptionInfo,
     SubscriptionProviderInfo,
     TreeResponse,
     UsageSummaryResponse,
-    VariantRequest,
+    VariantsResponse,
 )
 
 # 프론트엔드(Next.js dev) 와 Tauri 로컬 웹뷰에서 호출한다.
@@ -110,20 +115,43 @@ _ERRORS: Final[dict[int | str, dict[str, Any]]] = {
     409: {"model": ErrorBody, "description": "사용할 수 있는 AI 연결이 없음"},
 }
 
+logger: Final[logging.Logger] = logging.getLogger("math_teacher.core.api")
+
 NodeId = Annotated[str, Path(min_length=1, max_length=64)]
 SectionQuery = Annotated[Section, Query(description="exam=시험지, note=오답노트")]
 ProblemNoQuery = Annotated[
     int | None,
     Query(ge=1, description="문항별 스레드. 생략하면 시험지 전역 스레드"),
 ]
+# 내보내기 구성. 기본값 `problems` 로 기존 `export.docx` 호출자가 그대로 동작한다.
+IncludeQuery = Annotated[
+    service.ExportInclude,
+    Query(description="problems=문제만, full=문제+해설"),
+]
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """시작 시 데이터 디렉터리와 DB 스키마를 준비한다."""
+    """시작 시 데이터 디렉터리·DB 를 준비하고 작업 큐 워커를 띄운다.
+
+    프로세스가 죽으면 인메모리 큐도 사라지므로, 남아 있던 대기·실행 작업은
+    `interrupted` 로 표시한다. 자동 재개는 하지 않는다(중복 과금 위험).
+    """
     config.ensure_dirs()
     await run_in_threadpool(storage.init_db)
-    yield
+    interrupted = await run_in_threadpool(_interrupt_stale_jobs)
+    if interrupted:
+        logger.info("이전 실행에서 남은 작업 %d건을 중단 처리했습니다.", interrupted)
+    jobs.runner.start()
+    try:
+        yield
+    finally:
+        await jobs.runner.stop()
+
+
+def _interrupt_stale_jobs() -> int:
+    with storage.transaction() as conn:
+        return storage.interrupt_unfinished_jobs(conn)
 
 
 app = FastAPI(
@@ -142,28 +170,34 @@ app.add_middleware(
     expose_headers=["Content-Disposition"],
 )
 
-# DOCX(Word) MIME. '문제만' 내보내기 응답에 쓴다.
+# 내보내기 응답 MIME. `.hwpx` 는 컨테이너 안 `mimetype` 파일과 같은 값을 쓴다.
 DOCX_MEDIA_TYPE: Final[str] = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
+HWPX_MEDIA_TYPE: Final[str] = "application/hwp+zip"
+_EXPORT_MEDIA_TYPES: Final[dict[str, str]] = {
+    "docx": DOCX_MEDIA_TYPE,
+    "hwpx": HWPX_MEDIA_TYPE,
+}
 
 # 접속 비밀번호가 필요 없는 경로(게이트 표시 판단·헬스체크·로그인 자체).
-_AUTH_EXEMPT: Final[frozenset[str]] = frozenset(
-    {"/api/health", "/api/env", "/api/login"}
-)
+_AUTH_EXEMPT: Final[frozenset[str]] = frozenset({"/api/health", "/api/env", "/api/login"})
 
 
 def _is_binary_asset(path: str) -> bool:
     """브라우저가 헤더 없이 직접 로드/다운로드하는 바이너리 GET 경로인지.
 
     `/api/files/{id}/raw`, `/api/files/{id}/problems/{no}/crop`,
-    `/api/notes/{id}/items/{item_id}/crop`, `/api/files/{id}/export.docx` 가 해당한다.
+    `/api/notes/{id}/items/{item_id}/crop`, 그리고 `.docx`/`.hwpx` 내보내기가
+    해당한다. 내보내기는 시험지/변형/오답노트 3종이지만 모두 `/export.<확장자>`
+    로 끝나므로 별도 분기가 필요 없다.
     이 경로들만 `?access=<비번>` 쿼리 인증을 허용한다(그 외는 헤더 전용).
     """
     return (
         path.endswith("/raw")
         or path.endswith("/crop")
         or path.endswith("/export.docx")
+        or path.endswith("/export.hwpx")
     )
 
 
@@ -410,9 +444,7 @@ async def upload_file(
     node, extract_error = await run_in_threadpool(
         service.register_pdf, filename, raw, parent_id or None
     )
-    return NodeResponse(
-        node=NodeOut.model_validate(node), extract_error=extract_error
-    )
+    return NodeResponse(node=NodeOut.model_validate(node), extract_error=extract_error)
 
 
 @app.get(
@@ -483,93 +515,342 @@ def _attachment_disposition(filename: str) -> str:
     return f"attachment; filename*=UTF-8''{encoded}"
 
 
+async def _export_response(
+    exporter: Callable[..., tuple[bytes, str]],
+    node_id: str,
+    *,
+    fmt: service.ExportFormat,
+    include: service.ExportInclude,
+) -> Response:
+    """내보내기 서비스를 스레드풀에서 돌려 첨부 응답으로 감싼다.
+
+    문서 조립은 이미지 인코딩을 포함한 블로킹 작업이라 `run_in_threadpool` 이
+    필수다(이벤트 루프를 막으면 다른 요청이 멈춘다).
+
+    Args:
+        exporter: `service.export_exam` / `export_variants` / `export_note`.
+        node_id: 시험지 또는 오답노트 노드 id.
+        fmt: `docx` 또는 `hwpx`.
+        include: `problems` 또는 `full`.
+
+    Returns:
+        첨부 다운로드 응답(Content-Disposition 은 RFC5987 인코딩).
+    """
+    content, filename = await run_in_threadpool(
+        exporter, node_id, fmt=fmt, include=include
+    )
+    return Response(
+        content=content,
+        media_type=_EXPORT_MEDIA_TYPES[fmt],
+        headers={"Content-Disposition": _attachment_disposition(filename)},
+    )
+
+
 @app.get(
     "/api/files/{node_id}/export.docx",
     response_class=Response,
     status_code=status.HTTP_200_OK,
     responses=_ERRORS,
 )
-async def export_file_docx(node_id: NodeId) -> Response:
-    """문항 크롭 이미지만 담은 '문제' 시험지 DOCX 를 내려준다(풀이/변형/정답 제외).
+async def export_file_docx(
+    node_id: NodeId, include: IncludeQuery = "problems"
+) -> Response:
+    """시험지 DOCX. 기본은 '문제만'(크롭 이미지), `include=full` 이면 풀이도 넣는다.
 
     브라우저가 직접 GET 으로 내려받는 바이너리 라우트라, 미들웨어에서 `?access=`
     쿼리 인증도 허용한다(`_is_binary_asset`). 문항이 없으면 400 이다.
     """
-    content, exam_name = await run_in_threadpool(service.problems_docx, node_id)
-    return Response(
-        content=content,
-        media_type=DOCX_MEDIA_TYPE,
-        headers={
-            "Content-Disposition": _attachment_disposition(f"{exam_name}_문제.docx")
-        },
+    return await _export_response(
+        service.export_exam, node_id, fmt="docx", include=include
     )
 
 
-# ------------------------------------------------------------------- 풀이
-@app.post(
-    "/api/files/{node_id}/solve",
-    response_class=StreamingResponse,
+@app.get(
+    "/api/files/{node_id}/export.hwpx",
+    response_class=Response,
     status_code=status.HTTP_200_OK,
     responses=_ERRORS,
 )
-async def solve_file(
-    node_id: NodeId,
-    payload: SolveRequest,
-    x_api_key: ApiKeyHeader = None,
-) -> StreamingResponse:
-    """선택 문항(또는 전체)을 순차로 풀어 SSE 로 스트리밍한다."""
-    provider = ai_service.resolve_provider(payload.provider, _api_key(x_api_key))
-    model = ai_service.resolve_model(payload.model, provider.name)
-    mode, targets = await run_in_threadpool(
-        ai_service.load_solve_targets, node_id, payload.problem_numbers
-    )
-    stream = ai_service.solve_stream(
-        node_id=node_id,
-        provider=provider,
-        mode=mode,
-        targets=targets,
-        model=model,
-        effort=payload.effort,
-    )
-    return StreamingResponse(
-        stream, media_type=sse.SSE_MEDIA_TYPE, headers=sse.SSE_HEADERS
+async def export_file_hwpx(
+    node_id: NodeId, include: IncludeQuery = "problems"
+) -> Response:
+    """시험지 HWPX(한글). 구성은 DOCX 와 같다.
+
+    수식은 한글 수식 객체가 아니라 유니코드 평문(`x²`)으로 들어간다.
+    """
+    return await _export_response(
+        service.export_exam, node_id, fmt="hwpx", include=include
     )
 
 
-@app.post(
-    "/api/files/{node_id}/problems/{no}/variant",
-    response_class=StreamingResponse,
+@app.get(
+    "/api/files/{node_id}/variants/export.docx",
+    response_class=Response,
     status_code=status.HTTP_200_OK,
     responses=_ERRORS,
 )
-async def generate_variant(
-    node_id: NodeId,
-    no: Annotated[int, Path(ge=1)],
-    payload: VariantRequest,
-    x_api_key: ApiKeyHeader = None,
-) -> StreamingResponse:
-    """해당 문항을 소스로 동일 유형·유사 난이도의 변형 문제를 생성해 SSE 로 흘린다.
+async def export_variants_docx(
+    node_id: NodeId, include: IncludeQuery = "problems"
+) -> Response:
+    """저장된 변형 문제 DOCX. 원본 크롭은 넣지 않는다. 변형이 없으면 400 이다."""
+    return await _export_response(
+        service.export_variants, node_id, fmt="docx", include=include
+    )
 
-    `mode` 로 무엇을 바꿀지 고른다(number=수치만/condition=조건만/number_condition=둘 다).
-    출력은 `## 문제 / ## 정답 / ## 풀이` 마크다운이며, v1 은 저장하지 않는다.
+
+@app.get(
+    "/api/files/{node_id}/variants/export.hwpx",
+    response_class=Response,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def export_variants_hwpx(
+    node_id: NodeId, include: IncludeQuery = "problems"
+) -> Response:
+    """저장된 변형 문제 HWPX(한글). 구성은 DOCX 와 같다."""
+    return await _export_response(
+        service.export_variants, node_id, fmt="hwpx", include=include
+    )
+
+
+@app.get(
+    "/api/files/{node_id}/variants",
+    response_model=VariantsResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+def read_variants(node_id: NodeId) -> VariantsResponse:
+    """저장된 변형 목록(문항 번호 → 변형 종류 순).
+
+    프론트가 시험지를 열 때 받아 스토어를 채운다 — 새로고침해도 남고, 이미 만든
+    변형을 다시 생성해 쿼터를 낭비하지 않는다.
+    """
+    return VariantsResponse.model_validate({"variants": service.variants(node_id)})
+
+
+# --------------------------------------------------------------- 작업 큐
+# 풀이·변형은 여기로만 들어온다. 예전 `/solve`·`/variant` 는 HTTP 응답 자체가
+# 작업이라 브라우저가 끊으면 작업도 멈췄다. 이제 작업은 큐에서 돌고 연결과
+# 무관하게 끝까지 진행된다. (채팅은 즉답이 필요하므로 큐에 넣지 않는다.)
+
+
+@app.post(
+    "/api/jobs",
+    response_model=JobCreated,
+    status_code=status.HTTP_201_CREATED,
+    responses=_ERRORS,
+)
+async def create_job(
+    payload: JobCreate,
+    x_api_key: ApiKeyHeader = None,
+) -> JobCreated:
+    """풀이·변형 작업을 큐에 넣고 **즉시** 돌려준다.
+
+    응답은 스트림을 기다리지 않는다. 진행 상황은
+    `GET /api/jobs/{id}/events` 로 구독하며, 구독하지 않아도 작업은 진행된다.
+
+    같은 시험지에 대해 같은 종류의 작업이 이미 대기·실행 중이면 새로 만들지 않고
+    그것을 돌려준다(`existing=true`). 버튼을 두 번 눌러 쿼터를 두 배로 쓰는 것을
+    막는다.
     """
     provider = ai_service.resolve_provider(payload.provider, _api_key(x_api_key))
     model = ai_service.resolve_model(payload.model, provider.name)
-    mode, problem = await run_in_threadpool(
-        ai_service.load_variant_target, node_id, no
+
+    existing = await run_in_threadpool(_find_overlapping_job, payload)
+    if existing is not None:
+        return JobCreated(job=JobOut.model_validate(existing), existing=True)
+
+    params = {
+        "provider": payload.provider,
+        "model": model,
+        "effort": payload.effort,
+    }
+
+    if payload.kind == "solve":
+        mode, targets, node_name = await run_in_threadpool(
+            ai_service.plan_solve_job,
+            payload.node_id,
+            payload.problem_numbers,
+            force=payload.force,
+        )
+        numbers = [int(item["no"]) for item in targets]
+        record = await run_in_threadpool(
+            _insert_job,
+            kind="solve",
+            node_id=payload.node_id,
+            node_name=node_name,
+            targets=numbers,
+            params=params,
+            total=len(numbers),
+        )
+        jobs.runner.submit(
+            job_id=record["id"],
+            total=len(numbers),
+            factory=jobs.solve_factory(
+                node_id=payload.node_id,
+                provider=provider,
+                mode=mode,
+                targets=targets,
+                model=model,
+                effort=payload.effort,
+            ),
+        )
+    else:
+        if payload.no is None:
+            raise bad_request(
+                "no_required",
+                "변형 작업에는 문항 번호가 필요합니다.",
+                "no 필드를 넣어 주세요.",
+            )
+        kinds = list(payload.modes or ["number"])
+        mode, problem, node_name = await run_in_threadpool(
+            ai_service.plan_variant_job, payload.node_id, payload.no
+        )
+        record = await run_in_threadpool(
+            _insert_job,
+            kind="variant",
+            node_id=payload.node_id,
+            node_name=node_name,
+            targets={"no": payload.no, "modes": kinds},
+            params=params,
+            total=len(kinds),
+        )
+        jobs.runner.submit(
+            job_id=record["id"],
+            total=len(kinds),
+            factory=jobs.variant_batch_factory(
+                node_id=payload.node_id,
+                provider=provider,
+                mode=mode,
+                problem=problem,
+                kinds=kinds,
+                model=model,
+                effort=payload.effort,
+            ),
+        )
+
+    return JobCreated(
+        job=JobOut.model_validate(record),
+        existing=False,
+        position=max(0, jobs.runner.queued_count - 1),
     )
-    stream = ai_service.variant_stream(
-        node_id=node_id,
-        provider=provider,
-        mode=mode,
-        problem=problem,
-        kind=payload.mode,
-        model=model,
-        effort=payload.effort,
+
+
+def _find_overlapping_job(payload: JobCreate) -> dict[str, Any] | None:
+    """같은 **대상**을 이미 처리 중인 작업(중복 요청 판정).
+
+    시험지 단위로만 보면 안 된다. 같은 시험지의 다른 문항을 풀거나 다른 변형을
+    만드는 것은 별개 작업이다. 겹치는 대상이 있을 때만 기존 작업을 돌려준다
+    (버튼 두 번 눌러 쿼터를 두 배로 쓰는 것을 막는 것이 목적이다).
+
+    Args:
+        payload: 만들려는 작업 요청.
+
+    Returns:
+        대상이 겹치는 진행 중 작업. 없으면 None.
+    """
+    with storage.transaction() as conn:
+        active = storage.find_active_job_for(conn, payload.node_id, payload.kind)
+    if not active:
+        return None
+
+    if payload.kind == "solve":
+        # 전체 풀이(problem_numbers=None)는 어떤 진행 중 풀이와도 겹친다고 본다.
+        if payload.problem_numbers is None:
+            return active[0]
+        wanted = set(payload.problem_numbers)
+        for job in active:
+            targets = job["targets"]
+            if isinstance(targets, list) and wanted & {int(no) for no in targets}:
+                return job
+        return None
+
+    wanted_modes = set(payload.modes or ["number"])
+    for job in active:
+        targets = job["targets"]
+        if not isinstance(targets, dict):
+            continue
+        if targets.get("no") != payload.no:
+            continue
+        if wanted_modes & set(targets.get("modes") or []):
+            return job
+    return None
+
+
+def _insert_job(**kwargs: Any) -> dict[str, Any]:
+    with storage.transaction() as conn:
+        return storage.insert_job(conn, job_id=storage.new_id(), **kwargs)
+
+
+@app.get(
+    "/api/jobs",
+    response_model=JobsResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def list_jobs() -> JobsResponse:
+    """진행 중인 작업 전부 + 최근 종료된 10건."""
+    active, recent = await run_in_threadpool(_read_jobs)
+    return JobsResponse(
+        active=[JobOut.model_validate(item) for item in active],
+        recent=[JobOut.model_validate(item) for item in recent],
     )
+
+
+def _read_jobs() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    with storage.transaction() as conn:
+        return storage.list_active_jobs(conn), storage.list_recent_jobs(conn)
+
+
+@app.get(
+    "/api/jobs/{job_id}/events",
+    response_class=StreamingResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def job_events(job_id: str) -> StreamingResponse:
+    """작업 진행을 SSE 로 구독한다. 붙는 즉시 `snapshot` 을 한 번 받는다.
+
+    끊었다 다시 붙어도 되고, 구독자가 없어도 작업은 계속된다.
+    """
+    record = await run_in_threadpool(_get_job, job_id)
+    if record is None:
+        raise not_found("작업을 찾을 수 없습니다.", "목록을 새로고침해 주세요.")
+
+    async def stream() -> AsyncIterator[str]:
+        async for name, data in jobs.runner.subscribe(job_id):
+            yield sse.event(name, data)
+
     return StreamingResponse(
-        stream, media_type=sse.SSE_MEDIA_TYPE, headers=sse.SSE_HEADERS
+        stream(), media_type=sse.SSE_MEDIA_TYPE, headers=sse.SSE_HEADERS
     )
+
+
+@app.delete(
+    "/api/jobs/{job_id}",
+    response_model=OkResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def cancel_job(job_id: str) -> OkResponse:
+    """작업을 취소한다. 대기 중이면 큐에서 빠지고, 실행 중이면 현재 문항 뒤 멈춘다."""
+    record = await run_in_threadpool(_get_job, job_id)
+    if record is None:
+        raise not_found("작업을 찾을 수 없습니다.", "목록을 새로고침해 주세요.")
+    # 러너가 모르는 작업 = 이미 끝났거나 서버가 재시작된 것. DB 상태만 정리한다.
+    if not jobs.runner.cancel(job_id) and record["status"] in ("queued", "running"):
+        await run_in_threadpool(_mark_canceled, job_id)
+    return OkResponse()
+
+
+def _get_job(job_id: str) -> dict[str, Any] | None:
+    with storage.transaction() as conn:
+        return storage.get_job(conn, job_id)
+
+
+def _mark_canceled(job_id: str) -> None:
+    with storage.transaction() as conn:
+        storage.update_job(conn, job_id, status="canceled", current_no=None)
 
 
 @app.get(
@@ -819,9 +1100,7 @@ def read_note(note_id: NodeId) -> NoteDetailResponse:
     status_code=status.HTTP_201_CREATED,
     responses=_ERRORS,
 )
-async def create_note_items(
-    note_id: NodeId, payload: NoteItemsCreate
-) -> NoteItemsResult:
+async def create_note_items(note_id: NodeId, payload: NoteItemsCreate) -> NoteItemsResult:
     """문항 여러 개를 한 번에 담는다. 이미 있는 문항은 `skipped` (멱등)."""
     result = await run_in_threadpool(
         service.add_note_items,
@@ -856,8 +1135,40 @@ def read_note_item_crop(note_id: NodeId, item_id: NodeId) -> FileResponse:
 
     원본 시험지가 지워져도 이 스냅샷은 남는다.
     """
-    return FileResponse(
-        service.note_crop_path(note_id, item_id), media_type="image/png"
+    return FileResponse(service.note_crop_path(note_id, item_id), media_type="image/png")
+
+
+@app.get(
+    "/api/notes/{note_id}/export.docx",
+    response_class=Response,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def export_note_docx(
+    note_id: NodeId, include: IncludeQuery = "problems"
+) -> Response:
+    """오답노트 DOCX. 스냅샷 크롭을 담고, `include=full` 이면 원본 풀이도 넣는다.
+
+    원본 시험지가 지워진 항목도 스냅샷으로 들어간다(풀이만 빠진다).
+    항목이 없으면 400 이다.
+    """
+    return await _export_response(
+        service.export_note, note_id, fmt="docx", include=include
+    )
+
+
+@app.get(
+    "/api/notes/{note_id}/export.hwpx",
+    response_class=Response,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def export_note_hwpx(
+    note_id: NodeId, include: IncludeQuery = "problems"
+) -> Response:
+    """오답노트 HWPX(한글). 구성은 DOCX 와 같다."""
+    return await _export_response(
+        service.export_note, note_id, fmt="hwpx", include=include
     )
 
 

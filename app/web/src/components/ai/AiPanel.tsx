@@ -50,7 +50,8 @@ export function AiPanel({ onCollapse }: { onCollapse?: () => void }) {
   const setEffort = useWorkspace((state) => state.setEffort);
   const setProvider = useWorkspace((state) => state.setProvider);
   const startSolve = useWorkspace((state) => state.startSolve);
-  const abortSolve = useWorkspace((state) => state.abortSolve);
+  const cancelJob = useWorkspace((state) => state.cancelJob);
+  const jobs = useWorkspace((state) => state.jobs);
   const sendChat = useWorkspace((state) => state.sendChat);
   const abortChat = useWorkspace((state) => state.abortChat);
   const newConversation = useWorkspace((state) => state.newConversation);
@@ -146,7 +147,16 @@ export function AiPanel({ onCollapse }: { onCollapse?: () => void }) {
           {solve.running ? (
             <button
               type="button"
-              onClick={abortSolve}
+              onClick={() => {
+                // 이 시험지의 진행 중 풀이 작업을 취소한다(서버 큐에서 뺀다).
+                const running = jobs.find(
+                  (job) =>
+                    job.node_id === selectedFileId &&
+                    job.kind === 'solve' &&
+                    (job.status === 'running' || job.status === 'queued'),
+                );
+                if (running) void cancelJob(running.id);
+              }}
               className="flex-1 rounded border border-rose-600 bg-rose-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-rose-700"
             >
               풀이 중단

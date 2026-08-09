@@ -154,6 +154,15 @@ def test_migration_preserves_data_and_adds_schema(tmp_path: Path) -> None:
                 )
             }
             assert {"idx_nodes_section", "idx_chat_thread"} <= indexes
+            assert storage.table_columns(conn, "variants") == {
+                "node_id",
+                "no",
+                "mode",
+                "text",
+                "usage_json",
+                "cost_json",
+                "created_at",
+            }
             assert storage.user_version(conn) == storage.SCHEMA_VERSION
         finally:
             conn.close()
@@ -176,6 +185,87 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
                 conn.execute("SELECT COUNT(*) AS n FROM chat_messages").fetchone()["n"]
                 == 1
             )
+        finally:
+            conn.close()
+    finally:
+        config.use_data_dir(original)
+
+
+V2_EXTRA_SCHEMA = """
+ALTER TABLE nodes ADD COLUMN section TEXT NOT NULL DEFAULT 'exam';
+ALTER TABLE chat_messages ADD COLUMN problem_no INTEGER NULL;
+
+CREATE TABLE IF NOT EXISTS note_items (
+    id TEXT PRIMARY KEY,
+    note_node_id TEXT NOT NULL,
+    source_node_id TEXT NULL,
+    source_name TEXT NOT NULL,
+    problem_no INTEGER NOT NULL,
+    crop_snapshot_path TEXT NOT NULL DEFAULT '',
+    memo TEXT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (note_node_id, source_node_id, problem_no)
+);
+PRAGMA user_version = 2;
+"""
+
+
+def _make_v2_db(path: Path) -> None:
+    """v2 스키마(section / problem_no / note_items) + 사용자 데이터 DB."""
+    _make_legacy_db(path)
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(V2_EXTRA_SCHEMA)
+        conn.execute(
+            "INSERT INTO solutions (node_id, no, solution, created_at)"
+            " VALUES ('file1', 3, '예전 풀이', '2026-07-31T20:03:00+09:00')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_v2_db_gains_variants_table(tmp_path: Path) -> None:
+    """v2 DB 를 열면 `variants` 가 생기고 기존 데이터는 그대로 남는다."""
+    data_dir = tmp_path / "v2-data"
+    _make_v2_db(data_dir / "app.db")
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        conn = storage.connect()
+        try:
+            assert storage.user_version(conn) == 2
+        finally:
+            conn.close()
+
+        storage.init_db()
+
+        conn = storage.connect()
+        try:
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 4
+            assert "variants" in {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            # 기존 데이터가 남아 있다.
+            assert (
+                conn.execute("SELECT COUNT(*) AS n FROM problems").fetchone()["n"] == 22
+            )
+            assert (
+                conn.execute(
+                    "SELECT solution FROM solutions WHERE node_id = 'file1' AND no = 3"
+                ).fetchone()["solution"]
+                == "예전 풀이"
+            )
+            # 새 테이블은 비어 있고 바로 쓸 수 있다.
+            assert storage.list_variants(conn, "file1") == []
+            storage.upsert_variant(
+                conn, node_id="file1", no=3, mode="number", text="## 문제\n변형"
+            )
+            conn.commit()
+            assert len(storage.list_variants(conn, "file1")) == 1
         finally:
             conn.close()
     finally:

@@ -52,7 +52,7 @@ describe('풀이 탭의 변형 문제 만들기', () => {
   }
 
   it('탭 바 3개가 보이고, 패널이 열리면 첫 탭(숫자)만 자동 생성된다', async () => {
-    const spy = vi.spyOn(api, 'generateVariant');
+    const spy = vi.spyOn(api, 'createJob');
     await openProblemOne();
 
     expect(screen.getByText('변형 문제 만들기')).toBeInTheDocument();
@@ -62,14 +62,14 @@ describe('풀이 탭의 변형 문제 만들기', () => {
 
     // 첫 탭(숫자)만 자동 생성된다.
     await waitFor(() => expect(modeDone(1, 'number')).toBe(true), { timeout: 20_000 });
-    const numberCalls = spy.mock.calls.filter((call) => call[2] === 'number');
+    const numberCalls = spy.mock.calls.filter((call) => call[0].modes?.[0] === 'number');
     expect(numberCalls).toHaveLength(1);
-    expect(spy.mock.calls.some((call) => call[2] === 'condition')).toBe(false);
-    expect(spy.mock.calls.some((call) => call[2] === 'number_condition')).toBe(false);
+    expect(spy.mock.calls.some((call) => call[0].modes?.[0] === 'condition')).toBe(false);
+    expect(spy.mock.calls.some((call) => call[0].modes?.[0] === 'number_condition')).toBe(false);
   }, 30_000);
 
   it('처음 여는 탭만 생성하고, 이미 생성된 탭 전환은 재생성하지 않는다(캐시)', async () => {
-    const spy = vi.spyOn(api, 'generateVariant');
+    const spy = vi.spyOn(api, 'createJob');
     const user = await openProblemOne();
 
     await waitFor(() => expect(modeDone(1, 'number')).toBe(true), { timeout: 20_000 });
@@ -77,17 +77,17 @@ describe('풀이 탭의 변형 문제 만들기', () => {
     // 조건 탭으로 전환하면 그때 처음 생성된다(lazy).
     await user.click(screen.getByRole('tab', { name: '조건 변형' }));
     await waitFor(() => expect(modeDone(1, 'condition')).toBe(true), { timeout: 20_000 });
-    expect(spy.mock.calls.filter((call) => call[2] === 'condition')).toHaveLength(1);
+    expect(spy.mock.calls.filter((call) => call[0].modes?.[0] === 'condition')).toHaveLength(1);
 
     // 다시 숫자 탭으로 돌아가도 재생성하지 않고 캐시를 보여준다.
     await user.click(screen.getByRole('tab', { name: '숫자 변형' }));
     await user.click(screen.getByRole('tab', { name: '조건 변형' }));
-    expect(spy.mock.calls.filter((call) => call[2] === 'number')).toHaveLength(1);
-    expect(spy.mock.calls.filter((call) => call[2] === 'condition')).toHaveLength(1);
+    expect(spy.mock.calls.filter((call) => call[0].modes?.[0] === 'number')).toHaveLength(1);
+    expect(spy.mock.calls.filter((call) => call[0].modes?.[0] === 'condition')).toHaveLength(1);
   }, 45_000);
 
   it('활성 탭 결과에 복사 2종과 "다시 생성"이 있고, 다시 생성은 재호출한다', async () => {
-    const spy = vi.spyOn(api, 'generateVariant');
+    const spy = vi.spyOn(api, 'createJob');
     const user = await openProblemOne();
 
     await waitFor(() => expect(modeDone(1, 'number')).toBe(true), { timeout: 20_000 });
@@ -99,10 +99,10 @@ describe('풀이 탭의 변형 문제 만들기', () => {
     expect(screen.getByRole('button', { name: '복사(AI 대화용)' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '복사(한글·워드용)' })).toBeInTheDocument();
 
-    const before = spy.mock.calls.filter((call) => call[2] === 'number').length;
+    const before = spy.mock.calls.filter((call) => call[0].modes?.[0] === 'number').length;
     await user.click(screen.getByRole('button', { name: '다시 생성' }));
     await waitFor(
-      () => expect(spy.mock.calls.filter((call) => call[2] === 'number')).toHaveLength(before + 1),
+      () => expect(spy.mock.calls.filter((call) => call[0].modes?.[0] === 'number')).toHaveLength(before + 1),
       { timeout: 20_000 },
     );
     await waitFor(() => expect(modeDone(1, 'number')).toBe(true), { timeout: 20_000 });
@@ -153,7 +153,7 @@ describe('오답노트의 변형 문제 만들기', () => {
     expect(closeButton).toHaveAttribute('aria-expanded', 'true');
 
     // 닫으면 탭이 사라진다.
-    const spy = vi.spyOn(api, 'generateVariant');
+    const spy = vi.spyOn(api, 'createJob');
     await user.click(closeButton);
     expect(screen.queryByRole('tab', { name: '숫자 변형' })).toBeNull();
 
@@ -161,7 +161,7 @@ describe('오답노트의 변형 문제 만들기', () => {
     await user.click(screen.getByRole('button', { name: '변형 문제 만들기' }));
     expect(await screen.findByRole('tab', { name: '숫자 변형' })).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(spy.mock.calls.some((call) => call[2] === 'number')).toBe(false);
+    expect(spy.mock.calls.some((call) => call[0].modes?.[0] === 'number')).toBe(false);
   }, 45_000);
 
   it('원본이 삭제된 항목에는 변형 컨트롤을 숨긴다', () => {
