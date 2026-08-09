@@ -9,7 +9,7 @@ import { VariantPanel } from '@/components/center/VariantPanel';
 import { ReextractButton } from '@/components/center/ReextractButton';
 import { CopyButton } from '@/components/ui/CopyButton';
 import { toPlainText } from '@/lib/to-plain-text';
-import { EmptyState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
+import { EmptyState, InlineBadge, LoadingState, Spinner } from '@/components/ui/Feedback';
 import { costAmounts, formatDateTime, formatInt, formatKrw, formatUsd, totalTokens } from '@/lib/format';
 import { useWorkspace, type SolutionEntry } from '@/store/workspace';
 import type { Problem } from '@/types/api';
@@ -19,6 +19,9 @@ const EMPTY_PROBLEMS: Problem[] = [];
 /** 중앙 [풀이] 탭: 문제별 아코디언. */
 export function SolutionsTab() {
   const fileDetail = useWorkspace((state) => state.fileDetail);
+  const jobs = useWorkspace((state) => state.jobs);
+  const cancelingJobIds = useWorkspace((state) => state.cancelingJobIds);
+  const cancelJob = useWorkspace((state) => state.cancelJob);
   const picking = useWorkspace((state) => state.notePicking);
   const notePicked = useWorkspace((state) => state.notePicked);
   const toggleNotePick = useWorkspace((state) => state.toggleNotePick);
@@ -71,6 +74,14 @@ export function SolutionsTab() {
   }
 
   const pickedSet = new Set(notePicked);
+  // 이 시험지에서 진행 중인 풀이 작업(문항 행의 중단 버튼이 이걸 취소한다).
+  const runningJob =
+    jobs.find(
+      (job) =>
+        job.node_id === fileId &&
+        job.kind === 'solve' &&
+        (job.status === 'running' || job.status === 'queued'),
+    ) ?? null;
 
   const toggle = (no: number) => {
     setOpenSet((current) => {
@@ -126,7 +137,21 @@ export function SolutionsTab() {
                 onToggle={() => toggle(problem.no)}
                 onSolveOne={() => void startSolve([problem.no])}
                 onResolveOne={() => void startSolve([problem.no], { force: true })}
-                disabled={solve.running}
+                disabled={solutions[problem.no]?.status === 'running'}
+                onCancel={
+                  runningJob && solutions[problem.no]?.status === 'running'
+                    ? () => void cancelJob(runningJob.id)
+                    : undefined
+                }
+                canceling={runningJob != null && cancelingJobIds.includes(runningJob.id)}
+                cancelLabel={
+                  runningJob && runningJob.total > 1 ? '전체 풀이 중단' : '풀이 중단'
+                }
+                cancelTitle={
+                  runningJob && runningJob.total > 1
+                    ? `이 시험지의 풀이 작업(${runningJob.total}문항) 전체가 중단됩니다`
+                    : '이 문제 풀이를 중단합니다'
+                }
                 picking={picking}
                 picked={pickedSet.has(problem.no)}
                 onTogglePick={() => toggleNotePick(problem.no)}
@@ -150,6 +175,13 @@ interface SolutionRowProps {
   onSolveOne: () => void;
   onResolveOne: () => void;
   disabled: boolean;
+  /** 진행 중 작업을 멈추는 콜백. 진행 중이 아니면 없다. */
+  onCancel?: () => void;
+  /** 중단 요청을 보내고 아직 멈추지 않았는지. */
+  canceling: boolean;
+  /** 중단 버튼 문구(단일 문항인지 전체 풀이인지에 따라 다르다). */
+  cancelLabel: string;
+  cancelTitle: string;
   /** 오답노트 담기 모드인지. */
   picking: boolean;
   /** 이 문항이 담기 대상으로 골라졌는지. */
@@ -168,6 +200,10 @@ function SolutionRow({
   onSolveOne,
   onResolveOne,
   disabled,
+  onCancel,
+  canceling,
+  cancelLabel,
+  cancelTitle,
   picking,
   picked,
   onTogglePick,
@@ -215,7 +251,7 @@ function SolutionRow({
               {status === 'done'
                 ? plainPreview(entry?.text ?? '')
                 : status === 'running'
-                  ? '생성 중…'
+                  ? '풀이 중…'
                   : status === 'error'
                     ? (entry?.error ?? '오류')
                     : '아직 풀이가 없습니다'}
@@ -241,6 +277,24 @@ function SolutionRow({
               </MathText>
             ) : status === 'error' ? (
               <p className="text-[13px] text-rose-700">{entry?.error}</p>
+            ) : status === 'running' ? (
+              // 아직 첫 델타가 오기 전. 여기서도 진행과 중단이 보여야 한다.
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 text-[13px] text-slate-600">
+                  <Spinner className="h-3 w-3" /> 풀이 중…
+                </span>
+                {onCancel ? (
+                  <button
+                    type="button"
+                    onClick={onCancel}
+                    disabled={canceling}
+                    title={cancelTitle}
+                    className="rounded border border-rose-600 bg-rose-600 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-rose-700 disabled:opacity-60"
+                  >
+                    {canceling ? '중단하는 중…' : cancelLabel}
+                  </button>
+                ) : null}
+              </div>
             ) : (
               <div className="flex flex-col items-start gap-2">
                 <p className="text-[13px] text-slate-500">아직 풀이가 없습니다.</p>
@@ -255,6 +309,20 @@ function SolutionRow({
               </div>
             )}
           </div>
+
+          {status === 'running' && body && onCancel ? (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={onCancel}
+                disabled={canceling}
+                title={cancelTitle}
+                className="rounded border border-rose-300 bg-white px-2 py-0.5 text-[11px] font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+              >
+                {canceling ? '중단하는 중…' : cancelLabel}
+              </button>
+            </div>
+          ) : null}
 
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
             {/*

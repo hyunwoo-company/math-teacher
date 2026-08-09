@@ -2026,6 +2026,20 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         model,
         effort,
       });
+      // 그 시험지를 보고 있으면 진행 표시(우측 패널 진행 바)를 바로 켠다.
+      if (get().selectedFileId === fileId) {
+        set({
+          solve: {
+            running: true,
+            total: created.job.total,
+            doneCount: created.job.done_count,
+            currentNo: no,
+            partial: true,
+            error: null,
+            aborted: false,
+          },
+        });
+      }
       await get().loadJobs();
       void watchJob(created.job);
     } catch (error) {
