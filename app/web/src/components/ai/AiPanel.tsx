@@ -360,7 +360,12 @@ export function AiPanel({ onCollapse }: { onCollapse?: () => void }) {
                     {message.role === 'user' ? (
                       <p className="whitespace-pre-wrap">{message.content}</p>
                     ) : message.content ? (
-                      <MathText className={clsx(message.streaming && 'streaming-caret')}>
+                      // 자유 대화는 검산 언급을 지우지 않는다. 사용자가 "검산해줘" 라고
+                      // 직접 물었을 때 그 답이 사라지면 안 된다(풀이·변형은 기본 제거).
+                      <MathText
+                        className={clsx(message.streaming && 'streaming-caret')}
+                        keepVerification
+                      >
                         {message.content}
                       </MathText>
                     ) : message.error ? null : (

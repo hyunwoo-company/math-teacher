@@ -157,4 +157,13 @@ describe('MathText', () => {
     const { container } = render(<MathText>{'다음 계산을 검산하시오.'}</MathText>);
     expect(container.textContent).toContain('검산하시오');
   });
+
+  it('keepVerification 이면 검산 문구를 그대로 보여준다', () => {
+    // 자유 대화에서 사용자가 "검산해줘" 라고 물었을 때 그 답을 지우면 안 된다.
+    const { container } = render(
+      <MathText keepVerification>{'검산했습니다. ✔\n\n## 검산\n좌변과 우변이 같다.'}</MathText>,
+    );
+    expect(container.textContent).toContain('검산했습니다');
+    expect(container.textContent).toContain('좌변과 우변이 같다');
+  });
 });
