@@ -14,15 +14,18 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from pathlib import Path
 from urllib.parse import quote
 
 import pytest
 from conftest import make_note, upload_test_pdf
 from fastapi.testclient import TestClient
+from PIL import Image as PilImage
 
 import config
 import storage
 from export import docx as export_docx
+from export import hwpx as export_hwpx
 from export import model as export_model
 
 DOCX_MEDIA_TYPE = (
@@ -427,6 +430,46 @@ def test_variants_and_note_export_allow_access_query(
     ):
         assert client.get(path).status_code == 401
         assert client.get(f"{path}?access={password}").status_code == 200
+
+
+# -------------------------------------------------------- hwpx 지면(회귀)
+def _hwpx_body_width(payload: bytes) -> int:
+    """hwpx 본문 폭(HWPUNIT = 1/7200in). 용지 폭에서 좌우 여백을 뺀 값이다."""
+    section = _section_text(payload)
+    page = re.search(r'<hp:pagePr[^>]*\swidth="(\d+)"', section)
+    assert page is not None, "pagePr 가 없다"
+    margin = re.search(r"<hp:margin[^>]*>", section)
+    assert margin is not None, "margin 이 없다"
+    sides = {
+        name: int(value)
+        for name, value in re.findall(r'(left|right)="(\d+)"', margin.group(0))
+    }
+    return int(page.group(1)) - sides["left"] - sides["right"]
+
+
+def _hwpx_image_widths(payload: bytes) -> list[int]:
+    """hwpx 에 들어간 그림 폭들(HWPUNIT)."""
+    return [
+        int(width)
+        for width in re.findall(r'<hp:sz\s+width="(\d+)"', _section_text(payload))
+    ]
+
+
+def test_hwpx_image_never_exceeds_the_body_width(tmp_path: Path) -> None:
+    """넓은 크롭이 오른쪽 여백을 침범하지 않는다.
+
+    상한이 6인치(152.4mm)로 박혀 있어 A4 본문 폭(150mm)을 2.4mm 넘고 있었다.
+    지면 값을 문서에서 직접 읽어 비교하므로 상수를 바꿔도 이 관계가 유지된다.
+    """
+    wide = tmp_path / "wide.png"
+    PilImage.new("RGB", (3000, 300), "white").save(wide)
+
+    payload = export_hwpx.build_hwpx(
+        export_model.ExportDoc(title="시험지", blocks=[export_model.Image(wide)])
+    )
+    widths = _hwpx_image_widths(payload)
+    assert widths, "그림이 들어가지 않았다"
+    assert max(widths) <= _hwpx_body_width(payload)
 
 
 # ------------------------------------------------------- docx 스타일(회귀)

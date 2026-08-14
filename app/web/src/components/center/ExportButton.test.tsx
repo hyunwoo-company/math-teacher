@@ -35,6 +35,22 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * 방금 시작한 내보내기가 끝까지 돌 때까지 기다린다.
+ *
+ * `run()` 은 목 클라이언트의 지연(160ms) 뒤에야 blob 을 만들고 `<a download>` 를
+ * 클릭한 다음 objectURL 을 되돌린다. 요청 인자만 확인하고 테스트를 끝내면 그
+ * 뒷부분이 **다음 테스트 도중에** 실행돼, 다음 테스트가 깔아 둔 스파이
+ * (`HTMLAnchorElement.prototype.click`)를 앞 테스트의 값으로 먼저 때린다.
+ * 파일명 테스트가 실행 순서에 따라 `풍문고_변형문제.hwpx` 를 보고 실패한 원인이
+ * 이것이다. 그래서 각 테스트는 자기가 시작한 내보내기를 반드시 회수한다.
+ *
+ * `revokeObjectURL` 은 `finally` 에서 마지막으로 불리므로 완료 신호로 쓴다.
+ */
+async function settleExport(): Promise<void> {
+  await waitFor(() => expect(revokeObjectURL).toHaveBeenCalled());
+}
+
 describe('ExportButton', () => {
   it('대상에 따라 버튼 이름이 다르다', () => {
     const { rerender } = render(
@@ -80,6 +96,7 @@ describe('ExportButton', () => {
     await waitFor(() =>
       expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, format, include),
     );
+    await settleExport();
   });
 
   it('변형 대상은 target=variants 로 요청한다', async () => {
@@ -93,6 +110,7 @@ describe('ExportButton', () => {
     await waitFor(() =>
       expect(spy).toHaveBeenCalledWith('variants', MOCK_FILE_ID, 'hwpx', 'problems'),
     );
+    await settleExport();
   });
 
   it('서버 파일명이 없으면 대상·구성에 맞는 이름으로 저장한다', async () => {
@@ -108,7 +126,10 @@ describe('ExportButton', () => {
     await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
     await user.click(screen.getByRole('menuitem', { name: '문제+해설 · HWPX' }));
 
-    await waitFor(() => expect(clickSpy).toHaveBeenCalled());
+    // 다운로드가 끝난 뒤에 읽는다. `clickSpy` 호출만 기다리면 앞 테스트에서 새어
+    // 나온 내보내기의 클릭에도 통과해 버린다.
+    await settleExport();
+    expect(clickSpy).toHaveBeenCalled();
     // `.pdf` 는 벗기고 구성에 맞는 접미사를 붙인다.
     expect(downloadName).toBe('풍문고_문제와해설.hwpx');
   });

@@ -22,28 +22,18 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Length, Mm, Pt
 from PIL import Image as PilImage
 
+from export import layout
 from export.model import ExportDoc, Heading, Image, Text
 
 # 크롭 렌더 해상도(extractor.DEFAULT_DPI 와 동일). 픽셀→인치 환산 기준.
 _CROP_RENDER_DPI: Final[int] = 150
 
-# 용지·여백. python-docx 기본 템플릿은 **Letter(8.5x11in)** 라 한국에서 인쇄하면
-# 여백이 어긋난다. 같은 문서의 hwpx 는 A4 로 나가고 있어 애초에 용지가 달랐다.
-# 여백은 hwpx `Contents/section0.xml` 실측값(HWPUNIT=1/7200in)에 맞춘 것이다:
-# left/right 8504(1.18in), top 5668(0.79in), bottom 4252(0.59in).
-# 머리말·꼬리말(각 0.59in)은 이 렌더러가 쓰지 않으므로 그 몫은 본문에 준다.
-_PAGE_WIDTH_MM: Final[int] = 210
-_PAGE_HEIGHT_MM: Final[int] = 297
-_MARGIN_SIDE_MM: Final[int] = 30
-_MARGIN_TOP_MM: Final[int] = 20
-_MARGIN_BOTTOM_MM: Final[int] = 15
-# 본문 폭 150mm = 5.91in. hwpx 본문 폭(5.91in)과 같다.
-_BODY_WIDTH_MM: Final[int] = _PAGE_WIDTH_MM - 2 * _MARGIN_SIDE_MM
+# 용지·여백은 `export.layout` 이 단일 소스다(hwpx 렌더러와 같은 지면을 쓴다).
+# python-docx 기본 템플릿은 **Letter(8.5x11in)** 라 한국에서 인쇄하면 여백이
+# 어긋나므로 여기서 A4 로 덮어쓴다.
 # 이미지 폭 상한. 본문 폭을 넘으면 크롭이 여백을 침범하므로 본문 폭이 곧 상한이다.
 # 세로 비율은 python-docx 가 유지한다. 예전 값 6.0in 은 Letter 본문 폭이었다.
-# `hwpx.py` 의 `_MAX_IMAGE_WIDTH_MM = 152.4`(6in)와는 어긋나는데, 그 파일은 다른
-# 태스크가 소유하므로 여기서는 손대지 않는다.
-_MAX_IMAGE_WIDTH_INCHES: Final[float] = _BODY_WIDTH_MM / 25.4
+_MAX_IMAGE_WIDTH_INCHES: Final[float] = layout.BODY_WIDTH_MM / layout.MM_PER_INCH
 
 # 본문 폰트. python-docx 기본 템플릿은 테마 폰트(Calibri)를 쓰는데, Calibri 에는
 # 위·아래첨자(ᵐ ⁿ ⁻ ₁ ₂)와 ⇒ ∘ ∠ ⋯ ≡ ✔ 글리프가 없어 평문화한 수식이 □ 로 깨진다.
@@ -151,12 +141,12 @@ def _set_page(document: DocxDocument) -> None:
         document: 방금 만든 빈 문서. 본문을 채우기 전에 부른다.
     """
     section = document.sections[0]
-    section.page_width = Mm(_PAGE_WIDTH_MM)
-    section.page_height = Mm(_PAGE_HEIGHT_MM)
-    section.left_margin = Mm(_MARGIN_SIDE_MM)
-    section.right_margin = Mm(_MARGIN_SIDE_MM)
-    section.top_margin = Mm(_MARGIN_TOP_MM)
-    section.bottom_margin = Mm(_MARGIN_BOTTOM_MM)
+    section.page_width = Mm(layout.PAGE_WIDTH_MM)
+    section.page_height = Mm(layout.PAGE_HEIGHT_MM)
+    section.left_margin = Mm(layout.MARGIN_SIDE_MM)
+    section.right_margin = Mm(layout.MARGIN_SIDE_MM)
+    section.top_margin = Mm(layout.MARGIN_TOP_MM)
+    section.bottom_margin = Mm(layout.MARGIN_BOTTOM_MM)
 
 
 def _fit_width(path: Path) -> Length:
