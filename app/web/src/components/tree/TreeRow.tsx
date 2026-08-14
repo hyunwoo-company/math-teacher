@@ -132,6 +132,8 @@ export function TreeRow(props: TreeRowProps) {
         aria-expanded={isFolder ? isOpen : undefined}
         aria-selected={isOpened || isPicked}
         aria-level={item.depth + 1}
+        // 고무줄 선택이 이 속성으로 행 위치를 읽고, "행 위에서 시작한 mousedown" 을 가려낸다.
+        data-node-id={node.id}
         tabIndex={0}
         draggable
         title={dragBadge ? `${node.name} 외 ${dragBadge - 1}개` : node.name}

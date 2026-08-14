@@ -119,6 +119,129 @@ export function dragPayloadIds(
   return ordered.length > 0 ? ordered : [draggedId];
 }
 
+/* ── 고무줄(마퀴) 선택 ─────────────────────────────────────────── */
+
+/**
+ * 스크롤 컨테이너의 **내용 좌표계** 한 점.
+ *
+ * 화면 좌표(clientX/Y)를 그대로 쓰면 끌던 중 스크롤이 움직이면 어긋난다.
+ * 그래서 `toContainerPoint()` 로 컨테이너 좌상단 + `scrollTop/Left` 기준으로 바꿔 쓴다.
+ */
+export interface Point {
+  x: number;
+  y: number;
+}
+
+/** 내용 좌표계 사각형. 항상 left<=right, top<=bottom. */
+export interface Rect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** 행 하나의 위치. `rect` 는 내용 좌표계. */
+export interface RowBox {
+  id: string;
+  rect: Rect;
+}
+
+/** 이만큼(px) 움직이기 전에는 고무줄이 아니라 클릭으로 본다. */
+export const MARQUEE_THRESHOLD_PX = 4;
+
+/**
+ * 이 mousedown 으로 고무줄을 시작해도 되는지.
+ *
+ * - 행 위에서 시작한 것은 기존 HTML5 드래그 이동이다(고무줄로 가로채면 이동이 깨진다).
+ * - 버튼/입력 위에서 시작한 것은 그 컨트롤의 조작이다.
+ * - 왼쪽 버튼만 받는다(오른쪽은 컨텍스트 메뉴).
+ *
+ * @param input `button` 은 MouseEvent.button, `onRow`/`onInteractive` 는 이벤트 대상 판별 결과.
+ */
+export function shouldStartMarquee(input: {
+  button: number;
+  onRow: boolean;
+  onInteractive: boolean;
+}): boolean {
+  return input.button === 0 && !input.onRow && !input.onInteractive;
+}
+
+/**
+ * 화면 좌표를 스크롤 컨테이너 내용 좌표로 바꾼다.
+ *
+ * @param client `clientX`/`clientY`.
+ * @param container `getBoundingClientRect()` 의 left/top 과 현재 스크롤량.
+ */
+export function toContainerPoint(
+  client: Point,
+  container: { left: number; top: number; scrollLeft: number; scrollTop: number },
+): Point {
+  return {
+    x: client.x - container.left + container.scrollLeft,
+    y: client.y - container.top + container.scrollTop,
+  };
+}
+
+/** 두 점으로 사각형을 만든다(어느 방향으로 끌어도 같은 결과). */
+export function normalizeRect(a: Point, b: Point): Rect {
+  return {
+    left: Math.min(a.x, b.x),
+    top: Math.min(a.y, b.y),
+    right: Math.max(a.x, b.x),
+    bottom: Math.max(a.y, b.y),
+  };
+}
+
+/** 시작점에서 충분히 멀어졌는지(= 클릭이 아니라 고무줄인지). */
+export function exceedsMarqueeThreshold(start: Point, current: Point): boolean {
+  return (
+    Math.abs(current.x - start.x) >= MARQUEE_THRESHOLD_PX ||
+    Math.abs(current.y - start.y) >= MARQUEE_THRESHOLD_PX
+  );
+}
+
+/** 두 사각형이 실제로 겹치는지. 변이 맞닿기만 한 경우는 겹치지 않은 것으로 본다. */
+function rectsIntersect(a: Rect, b: Rect): boolean {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+export interface MarqueeResult {
+  selected: Set<string>;
+  /** 이 고무줄이 잡은 첫 행(행 목록 순서 = 화면 순서). 아무것도 안 잡으면 null. */
+  anchorId: string | null;
+}
+
+/**
+ * 고무줄 사각형이 지금 덮고 있는 선택 상태를 계산한다.
+ *
+ * `base` 는 **고무줄을 시작한 순간의 선택**이다. 끌면서 매번 이 기준으로 다시
+ * 계산하기 때문에 사각형을 줄이면 선택도 따라 풀린다(직전 결과에 누적하면
+ * 한 번 잡힌 행이 영영 안 풀린다).
+ *
+ * @param input.base 시작 시점 선택. `additive` 가 false 면 무시된다.
+ * @param input.rows 행 위치들(화면 순서).
+ * @param input.rect 지금 고무줄 사각형.
+ * @param input.additive Ctrl/Cmd 를 누른 채 끄는 중인지(기존 선택에 더한다).
+ */
+export function marqueeSelection(input: {
+  base: ReadonlySet<string>;
+  rows: readonly RowBox[];
+  rect: Rect;
+  additive: boolean;
+}): MarqueeResult {
+  const { base, rows, rect, additive } = input;
+  const selected = additive ? new Set(base) : new Set<string>();
+  let anchorId: string | null = null;
+
+  for (const row of rows) {
+    if (!rectsIntersect(rect, row.rect)) continue;
+    if (anchorId == null) anchorId = row.id;
+    selected.add(row.id);
+  }
+
+  return { selected, anchorId };
+}
+
 /**
  * `dataTransfer` 에 실린 값에서 노드 id 목록을 읽는다.
  *

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import clsx from 'clsx';
 import { useWorkspace } from '@/store/workspace';
 import { buildTree, countDescendants, type TreeItem } from '@/lib/tree';
@@ -10,12 +10,37 @@ import { ContextMenu, type ContextMenuItem } from '@/components/tree/ContextMenu
 import { NODE_MIME, TreeRow, type DragState } from '@/components/tree/TreeRow';
 import {
   dragPayloadIds,
+  exceedsMarqueeThreshold,
+  marqueeSelection,
   nextSelection,
+  normalizeRect,
   parseDragIds,
+  shouldStartMarquee,
+  toContainerPoint,
   visibleNodeIds,
+  type Point,
+  type Rect,
+  type RowBox,
 } from '@/components/tree/selection';
 import { ConfirmDialog, PromptDialog } from '@/components/ui/Dialog';
 import { EmptyState, ErrorState, LoadingState, Spinner } from '@/components/ui/Feedback';
+
+/** 고무줄 한 번의 상태. 렌더에 쓰지 않고 ref 로만 들고 있어 mousemove 마다 다시 그리지 않는다. */
+interface MarqueeSession {
+  /** 누른 지점(컨테이너 내용 좌표). */
+  start: Point;
+  /** 시작 시점 선택. 사각형을 줄였을 때 되돌릴 기준이다. */
+  base: ReadonlySet<string>;
+  /** 시작 시점 행 위치들. 끌고 있는 동안 트리는 바뀌지 않으므로 한 번만 읽는다. */
+  rows: RowBox[];
+  /** Ctrl/Cmd 를 누른 채 시작했는지(기존 선택에 더한다). */
+  additive: boolean;
+  /** 임계값을 넘겨 실제 고무줄이 됐는지. 안 넘겼으면 그냥 클릭이다. */
+  moved: boolean;
+}
+
+/** 이 위에서 누른 mousedown 은 고무줄이 아니라 컨트롤 조작이다. */
+const INTERACTIVE_SELECTOR = 'button, a, input, textarea, select, [role="button"]';
 
 type DialogState =
   | { kind: 'none' }
@@ -58,6 +83,11 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const [anchorId, setAnchorId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadTargetRef = useRef<string | null>(null);
+  // 고무줄: 스크롤 컨테이너 + 진행 중 세션 + 화면에 그릴 사각형.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const marqueeRef = useRef<MarqueeSession | null>(null);
+  const [marqueeOn, setMarqueeOn] = useState(false);
+  const [marqueeRect, setMarqueeRect] = useState<Rect | null>(null);
 
   const isNote = section === 'note';
   const roots = useMemo(() => buildTree(nodes), [nodes]);
@@ -95,6 +125,80 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     if (item.node.type === 'folder') toggleExpanded(item.node.id);
     else void openNode(item.node.id);
   };
+
+  /**
+   * 빈 공간에서 누르면 고무줄을 준비한다.
+   * 행 위에서 누른 것은 건드리지 않는다 — 그건 기존 HTML5 드래그 이동이다.
+   */
+  const handleTreeMouseDown = (event: MouseEvent<HTMLDivElement>) => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const target = event.target instanceof Element ? event.target : null;
+    const onRow = target?.closest('[data-node-id]') != null;
+    const onInteractive = target?.closest(INTERACTIVE_SELECTOR) != null;
+    if (!shouldStartMarquee({ button: event.button, onRow, onInteractive })) return;
+
+    const additive = event.ctrlKey || event.metaKey;
+    marqueeRef.current = {
+      start: toContainerPoint(
+        { x: event.clientX, y: event.clientY },
+        containerOrigin(container),
+      ),
+      base: additive ? new Set(selectedIds) : new Set(),
+      rows: readRowBoxes(container),
+      additive,
+      moved: false,
+    };
+    setMarqueeOn(true);
+    // 빈 공간을 끌 때 안내 문구가 텍스트 선택으로 파랗게 잡히는 것을 막는다.
+    event.preventDefault();
+  };
+
+  // 고무줄은 window 에서 듣는다. 커서가 패널을 벗어나거나 밖에서 손을 떼도 확정된다.
+  useEffect(() => {
+    if (!marqueeOn) return;
+
+    const finish = () => {
+      marqueeRef.current = null;
+      setMarqueeOn(false);
+      setMarqueeRect(null);
+    };
+
+    const handleMove = (event: globalThis.MouseEvent) => {
+      const session = marqueeRef.current;
+      const container = scrollRef.current;
+      if (!session || !container) {
+        finish();
+        return;
+      }
+      const point = toContainerPoint(
+        { x: event.clientX, y: event.clientY },
+        containerOrigin(container),
+      );
+      // 몇 px 안 움직였으면 아직 클릭이다. 선택을 건드리지 않는다.
+      if (!session.moved && !exceedsMarqueeThreshold(session.start, point)) return;
+      session.moved = true;
+
+      const rect = normalizeRect(session.start, point);
+      const result = marqueeSelection({
+        base: session.base,
+        rows: session.rows,
+        rect,
+        additive: session.additive,
+      });
+      setMarqueeRect(rect);
+      setPickedIds(result.selected);
+      // 아무 행도 안 잡았으면 기존 기준점을 그대로 둔다(Shift 클릭이 죽지 않게).
+      setAnchorId((previous) => result.anchorId ?? previous);
+    };
+
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', finish);
+    return () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', finish);
+    };
+  }, [marqueeOn]);
 
   const beginDrag = (nodeId: string): string[] => {
     const ids = dragPayloadIds(selectedIds, nodeId, visibleIds);
@@ -267,10 +371,13 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
       ) : null}
 
       <div
+        ref={scrollRef}
+        // relative: 고무줄 사각형을 이 컨테이너의 내용 좌표계에 붙인다(스크롤과 함께 움직인다).
         className={
-          'min-h-0 flex-1 overflow-auto px-1 py-1 ' +
+          'relative min-h-0 flex-1 overflow-auto px-1 py-1 ' +
           (rootDragOver ? 'bg-blue-50/60 ring-2 ring-blue-300 ring-inset' : '')
         }
+        onMouseDown={handleTreeMouseDown}
         onContextMenu={openRootMenu}
         onDragOver={(event) => {
           const hasNode = event.dataTransfer.types.includes(NODE_MIME);
@@ -343,6 +450,19 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
             ))}
           </ul>
         )}
+
+        {marqueeRect ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute z-10 rounded-sm border border-blue-400 bg-blue-400/20"
+            style={{
+              left: marqueeRect.left,
+              top: marqueeRect.top,
+              width: marqueeRect.right - marqueeRect.left,
+              height: marqueeRect.bottom - marqueeRect.top,
+            }}
+          />
+        ) : null}
       </div>
 
       <footer className="border-t border-slate-200 p-2">
@@ -492,6 +612,47 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
       />
     </aside>
   );
+}
+
+/** 스크롤 컨테이너의 화면 원점 + 현재 스크롤량. 좌표 변환의 기준. */
+function containerOrigin(container: HTMLElement): {
+  left: number;
+  top: number;
+  scrollLeft: number;
+  scrollTop: number;
+} {
+  const box = container.getBoundingClientRect();
+  return {
+    left: box.left,
+    top: box.top,
+    scrollLeft: container.scrollLeft,
+    scrollTop: container.scrollTop,
+  };
+}
+
+/**
+ * 지금 그려진 행들의 위치를 컨테이너 내용 좌표로 읽는다.
+ * 고무줄 시작 때 한 번만 부른다(끌고 있는 동안 트리는 바뀌지 않는다).
+ */
+function readRowBoxes(container: HTMLElement): RowBox[] {
+  const origin = containerOrigin(container);
+  const boxes: RowBox[] = [];
+  for (const element of container.querySelectorAll('[data-node-id]')) {
+    const id = element.getAttribute('data-node-id');
+    if (id == null || id === '') continue;
+    const box = element.getBoundingClientRect();
+    const topLeft = toContainerPoint({ x: box.left, y: box.top }, origin);
+    boxes.push({
+      id,
+      rect: {
+        left: topLeft.x,
+        top: topLeft.y,
+        right: topLeft.x + box.width,
+        bottom: topLeft.y + box.height,
+      },
+    });
+  }
+  return boxes;
 }
 
 function SectionTab({
