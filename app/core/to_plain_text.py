@@ -14,6 +14,7 @@ r"""마크다운 + LaTeX 원문을 "한글/워드에 붙여도 읽히는" 유니
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Final, NamedTuple
 
 # ── 유니코드 위/아래 첨자 ────────────────────────────────────────────
@@ -418,4 +419,84 @@ def to_plain_text(source: str) -> str:
     return _strip_markdown(assembled)
 
 
-__all__ = ["split_math", "to_plain_text"]
+# ── 평문화 + LaTeX 원문 보존 ─────────────────────────────────────────
+# 수식 자리표. 유니코드 사용자 영역(U+E000~)이라 실제 원고에 나올 일이 없고,
+# `_strip_markdown` 의 어떤 정규식도 건드리지 않는다(공백도 마크다운 기호도 아님).
+_PLACEHOLDER_OPEN: Final[str] = "\ue000"
+_PLACEHOLDER_CLOSE: Final[str] = "\ue001"
+_PLACEHOLDER_RE: Final[re.Pattern[str]] = re.compile(
+    f"{_PLACEHOLDER_OPEN}(\\d+){_PLACEHOLDER_CLOSE}"
+)
+
+
+@dataclass(frozen=True)
+class PlainSegment:
+    """평문화 결과의 한 조각.
+
+    Attributes:
+        text: 이 조각의 평문. 수식이면 `to_plain_text` 와 같은 유니코드 폴백이다.
+        latex: 수식 조각이면 구분자를 벗긴 LaTeX 본문, 텍스트면 빈 문자열.
+    """
+
+    text: str
+    latex: str = ""
+
+    @property
+    def is_math(self) -> bool:
+        """수식 조각인지."""
+        return self.latex != ""
+
+
+def to_plain_segments(source: str) -> list[PlainSegment]:
+    r"""평문화하면서 수식 구간의 LaTeX 원문을 함께 남긴다.
+
+    `to_plain_text` 는 문자열 하나를 돌려주므로 렌더러가 LaTeX 를 볼 수 없고,
+    평문으로는 분수·근호의 2차원 조판이 원리상 불가능하다. 그래서 수식을
+    자리표로 바꿔 **기존 평문화 파이프라인을 그대로** 통과시킨 뒤 다시 잘라낸다.
+    수식 밖 텍스트가 `to_plain_text` 와 한 글자도 다르지 않은 것이 이 방식의
+    목적이다.
+
+    불변식: ``"".join(s.text for s in to_plain_segments(x)) == to_plain_text(x)``
+    (`tests/test_to_plain_text.py` 가 기존 케이스 전체로 검증한다.)
+
+    Args:
+        source: AI 응답 등 마크다운+LaTeX 원문.
+
+    Returns:
+        텍스트/수식 조각 목록. 인접한 텍스트 조각은 합쳐져 있다.
+    """
+    if _PLACEHOLDER_OPEN in source or _PLACEHOLDER_CLOSE in source:
+        # 자리표와 충돌하는 입력. 수식 분리를 포기하고 평문만 돌려준다.
+        return [PlainSegment(to_plain_text(source))]
+
+    pieces: list[str] = []
+    latexes: list[str] = []
+    plains: list[str] = []
+    for segment in split_math(source):
+        if not segment.is_math:
+            pieces.append(segment.value)
+            continue
+        plain = _convert_math(segment.value)
+        if plain == "":
+            # 평문이 비는 수식(예: `\(\displaystyle\)`). 자리표를 만들지 않는다 —
+            # `to_plain_text` 도 아무것도 남기지 않으므로 불변식이 유지된다.
+            continue
+        pieces.append(f"{_PLACEHOLDER_OPEN}{len(latexes)}{_PLACEHOLDER_CLOSE}")
+        latexes.append(segment.value)
+        plains.append(plain)
+
+    stripped = _strip_markdown("".join(pieces))
+    out: list[PlainSegment] = []
+    cursor = 0
+    for match in _PLACEHOLDER_RE.finditer(stripped):
+        if match.start() > cursor:
+            out.append(PlainSegment(stripped[cursor : match.start()]))
+        index = int(match.group(1))
+        out.append(PlainSegment(plains[index], latexes[index]))
+        cursor = match.end()
+    if cursor < len(stripped):
+        out.append(PlainSegment(stripped[cursor:]))
+    return out
+
+
+__all__ = ["PlainSegment", "split_math", "to_plain_segments", "to_plain_text"]

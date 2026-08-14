@@ -1,8 +1,12 @@
 """대상별 `ExportDoc` 조립 (시험지 / 변형 / 오답노트).
 
-**평문화(`to_plain_text`)와 섹션 분리(`markdown_sections`)를 여기서 끝낸다.**
-렌더러(`docx.py` / `hwpx.py`)는 이미 사람이 읽을 수 있는 문자열만 받는다.
-이렇게 해야 형식이 늘어도 변환 규칙이 한 곳에 남는다.
+**마크다운 평문화(`to_plain_text`)와 섹션 분리(`markdown_sections`)를 여기서
+끝낸다.** 렌더러(`docx.py` / `hwpx.py`)는 이미 사람이 읽을 수 있는 문자열만
+받는다. 이렇게 해야 형식이 늘어도 변환 규칙이 한 곳에 남는다.
+
+**수식만은 평문화하지 않고 LaTeX 원문을 함께 넘긴다**(`to_plain_segments`).
+분수·근호의 2차원 조판은 형식마다 다른 문법이라 렌더러가 직접 해야 한다.
+수식 밖 텍스트는 예전과 한 글자도 다르지 않다.
 
 이 모듈은 DB 를 모른다. 호출자(`service.py`)가 읽어온 값을 항목 dataclass 로
 넘기면 문서 구성 규칙만 적용한다(설계 문서 3-5항).
@@ -16,8 +20,8 @@ from pathlib import Path
 from typing import Final
 
 import markdown_sections
-from export.model import Block, ExportDoc, Heading, Image, Text
-from to_plain_text import to_plain_text
+from export.model import Block, ExportDoc, Heading, Image, MathRun, Run, Text, TextRun
+from to_plain_text import PlainSegment, to_plain_segments, to_plain_text
 
 # 변형 종류의 표시 라벨. 프론트(`web/src/lib/variant.ts`)와 문구를 맞춘다.
 VARIANT_MODE_LABEL: Final[dict[str, str]] = {
@@ -44,6 +48,8 @@ _SKIPPED_SECTIONS: Final[frozenset[str]] = frozenset(
 _PROBLEM_TITLE: Final[str] = "문제"
 # 섹션이 없는 풀이에 붙이는 소제목.
 _SOLUTION_TITLE: Final[str] = "풀이"
+# 오답노트 메모 줄의 접두어.
+_MEMO_PREFIX: Final[str] = "메모: "
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,68 @@ def _heading_text(title: str) -> str:
     return to_plain_text(title) or title
 
 
+def _to_lines(segments: Sequence[PlainSegment]) -> list[list[Run]]:
+    """평문 조각들을 줄 단위 런 목록으로 나눈다.
+
+    렌더러가 줄마다 문단을 만들기 때문에 줄 나누기를 여기서 끝낸다. 수식은
+    `_convert_math` 가 공백을 접어 한 줄로 만들므로 줄을 넘지 않는다.
+
+    Args:
+        segments: `to_plain_segments` 결과.
+
+    Returns:
+        줄마다의 런 목록. 빈 줄은 빈 목록이 된다(빈 문단이 나간다).
+    """
+    lines: list[list[Run]] = [[]]
+    for segment in segments:
+        if segment.is_math:
+            lines[-1].append(MathRun(latex=segment.latex, plain=segment.text))
+            continue
+        for index, part in enumerate(segment.text.split("\n")):
+            if index:
+                lines.append([])
+            if part:
+                lines[-1].append(TextRun(part))
+    return lines
+
+
+def _body(raw: str) -> Text | None:
+    """본문 원문을 본문 블록으로 만든다.
+
+    Args:
+        raw: 마크다운 + LaTeX 원문.
+
+    Returns:
+        본문 블록. 평문화 결과가 비면 None(블록을 만들지 않는다).
+    """
+    segments = to_plain_segments(raw)
+    plain = "".join(segment.text for segment in segments)
+    if not plain:
+        return None
+    if not any(segment.is_math for segment in segments):
+        # 수식이 없으면 예전과 똑같은 블록을 만든다.
+        return Text(plain)
+    return Text(plain, _to_lines(segments))
+
+
+def _prefixed(prefix: str, body: Text | None) -> Text:
+    """본문 블록 첫 줄 앞에 접두어를 붙인다(수식 런은 그대로 남긴다).
+
+    Args:
+        prefix: 붙일 접두어(예: `메모: `).
+        body: 본문 블록. None 이면 접두어만 남는다.
+
+    Returns:
+        접두어가 붙은 본문 블록.
+    """
+    if body is None:
+        return Text(prefix)
+    if body.lines is None:
+        return Text(f"{prefix}{body.text}")
+    first, *rest = body.lines
+    return Text(f"{prefix}{body.text}", [[TextRun(prefix), *first], *rest])
+
+
 def _solution_blocks(solution: str) -> list[Block]:
     """풀이 원문을 섹션별 소제목 + 본문 블록으로 만든다.
 
@@ -117,18 +185,18 @@ def _solution_blocks(solution: str) -> list[Block]:
         return []
     if list(sections) == [markdown_sections.FALLBACK_TITLE]:
         # 섹션을 못 찾은 응답. 전체를 풀이 한 덩이로 본다.
-        body = to_plain_text(sections[markdown_sections.FALLBACK_TITLE])
-        return [Heading(_SOLUTION_TITLE, 3), Text(body)] if body else []
+        body = _body(sections[markdown_sections.FALLBACK_TITLE])
+        return [Heading(_SOLUTION_TITLE, 3), body] if body else []
 
     blocks: list[Block] = []
     for title, raw in sections.items():
         if title in _SKIPPED_SECTIONS:
             continue
-        body = to_plain_text(raw)
-        if not body:
+        body = _body(raw)
+        if body is None:
             continue
         blocks.append(Heading(_heading_text(title), 3))
-        blocks.append(Text(body))
+        blocks.append(body)
     return blocks
 
 
@@ -202,16 +270,16 @@ def build_variants_doc(
         for section_title, raw in markdown_sections.split_sections(item.text).items():
             if section_title in _SKIPPED_SECTIONS:
                 continue
-            body = to_plain_text(raw)
-            if not body:
+            body = _body(raw)
+            if body is None:
                 continue
             if section_title == _PROBLEM_TITLE:
-                blocks.append(Text(body))
+                blocks.append(body)
                 continue
             if not include_full:
                 continue
             blocks.append(Heading(_heading_text(section_title), 3))
-            blocks.append(Text(body))
+            blocks.append(body)
     return ExportDoc(title=title, blocks=blocks, footer=_footer(source))
 
 
@@ -241,7 +309,7 @@ def build_note_doc(
         if item.image is not None:
             blocks.append(Image(item.image))
         if item.memo:
-            blocks.append(Text(f"메모: {to_plain_text(item.memo)}"))
+            blocks.append(_prefixed(_MEMO_PREFIX, _body(item.memo)))
         if include_full and item.solution:
             blocks.extend(_solution_blocks(item.solution))
     return ExportDoc(title=title, blocks=blocks, footer=_footer(source))

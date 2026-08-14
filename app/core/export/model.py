@@ -3,8 +3,13 @@
 `.docx` 와 `.hwpx` 렌더러가 같은 `ExportDoc` 을 받는다. 형식이 늘어도 문서 구성
 규칙(`build.py`)은 한 벌만 유지된다.
 
-**평문화는 `build.py` 에서 끝낸다.** `Text.text` 에는 이미 사람이 읽을 수 있는
-유니코드 평문만 들어온다(LaTeX/마크다운 잔재 없음).
+**마크다운 평문화는 `build.py` 에서 끝낸다.** `Text.text` 에는 이미 사람이 읽을
+수 있는 유니코드 평문만 들어온다(마크다운 잔재 없음).
+
+**수식은 예외다.** 분수의 가로선이나 근호가 덮는 선은 1차원 문자열로 표현할 수
+없고, 2차원 조판은 형식마다 완전히 다른 문법(워드 OMML vs 한글 EqEdit)을 쓴다.
+그래서 수식만은 LaTeX 원문(`MathRun.latex`)이 렌더러까지 살아서 간다. 조판에
+실패한 렌더러는 `MathRun.plain`(기존 유니코드 평문)으로 폴백한다.
 """
 
 from __future__ import annotations
@@ -35,10 +40,41 @@ class Image:
 
 
 @dataclass(frozen=True)
-class Text:
-    """본문 블록. **이미 평문화된** 문자열만 들어온다."""
+class TextRun:
+    """수식이 아닌 글자 조각. **이미 평문화된** 문자열이다."""
 
     text: str
+
+
+@dataclass(frozen=True)
+class MathRun:
+    """수식 조각.
+
+    Attributes:
+        latex: 구분자를 벗긴 LaTeX 원문. 렌더러가 형식별 수식 개체로 조판한다.
+        plain: 조판에 실패했을 때 쓸 유니코드 평문(`to_plain_text` 결과와 같다).
+    """
+
+    latex: str
+    plain: str
+
+
+Run = TextRun | MathRun
+
+
+@dataclass(frozen=True)
+class Text:
+    r"""본문 블록.
+
+    Attributes:
+        text: 블록 전체의 평문. 줄바꿈(`\\n`)이 그대로 들어 있다.
+        lines: 줄마다의 런 목록. 수식이 하나도 없는 블록은 None 이고, 그때
+            렌더러는 `text` 만 보고 예전과 똑같이 렌더한다(수식 없는 문서의
+            결과물이 바뀌지 않도록 하는 장치다).
+    """
+
+    text: str
+    lines: Sequence[Sequence[Run]] | None = None
 
 
 Block = Heading | Image | Text
@@ -60,4 +96,13 @@ class ExportDoc:
     footer: str | None = None
 
 
-__all__ = ["Block", "ExportDoc", "Heading", "Image", "Text"]
+__all__ = [
+    "Block",
+    "ExportDoc",
+    "Heading",
+    "Image",
+    "MathRun",
+    "Run",
+    "Text",
+    "TextRun",
+]
