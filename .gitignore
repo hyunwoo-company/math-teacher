@@ -48,3 +48,6 @@ Thumbs.db
 app/web/scripts/browser-smoke/*.png
 app/web/scripts/browser-smoke/shots/
 tmp_pt.xml
+
+# 서브에이전트 작업 기록(스크래치)
+.superpowers/
