@@ -167,7 +167,8 @@ def build_agy_args(
     """Agy 실행 인자 배열을 만든다.
 
     flash 와 gemini-3.1-pro-low/high 는 `--effort` 를 거부(전자는 미지원, 후자는
-    모델명에 effort 내장)하므로 붙이지 않는다. `spec["effort"]` 가 True 인 모델에만 붙인다.
+    모델명에 effort 내장)하므로 붙이지 않는다. `spec["effort"]` 가 True 인 모델에만
+    붙인다.
 
     Raises:
         ProviderError: 화이트리스트에 없는 모델일 때.
