@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from urllib.parse import quote
 
@@ -21,6 +22,8 @@ from fastapi.testclient import TestClient
 
 import config
 import storage
+from export import docx as export_docx
+from export import model as export_model
 
 DOCX_MEDIA_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -424,3 +427,65 @@ def test_variants_and_note_export_allow_access_query(
     ):
         assert client.get(path).status_code == 401
         assert client.get(f"{path}?access={password}").status_code == 200
+
+
+# ------------------------------------------------------- docx 스타일(회귀)
+def _docx_styles_xml(payload: bytes) -> str:
+    """생성된 docx 에서 styles.xml 을 꺼낸다."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        return archive.read("word/styles.xml").decode("utf-8")
+
+
+def _docx_style(payload: bytes, style_id: str) -> str:
+    """styles.xml 에서 스타일 하나의 XML 조각을 꺼낸다."""
+    styles = _docx_styles_xml(payload)
+    found = re.search(
+        rf'<w:style [^>]*w:styleId="{style_id}".*?</w:style>', styles, re.S
+    )
+    assert found is not None, f"{style_id} 스타일이 없다"
+    return found.group(0)
+
+
+def test_docx_normal_style_has_no_paragraph_spacing() -> None:
+    """문단마다 붙는 10pt 여백이 74페이지를 만들었다(hwpx 는 14페이지).
+
+    평문을 줄 단위로 문단화하므로 문단 여백이 그대로 페이지 수가 된다.
+    """
+    payload = export_docx.build_docx(
+        export_model.ExportDoc(title="시험지", blocks=[export_model.Text("가\n나\n다")])
+    )
+    normal = _docx_style(payload, "Normal")
+    assert 'w:after="0"' in normal
+    assert 'w:before="0"' in normal
+    assert 'w:line="240"' in normal
+
+
+def test_docx_uses_a_font_that_covers_math_glyphs() -> None:
+    """Calibri 는 위·아래첨자와 ⇒ ∘ ∠ ⋯ ≡ ✔ 글리프가 없어 수식이 깨진다."""
+    payload = export_docx.build_docx(
+        export_model.ExportDoc(title="시험지", blocks=[export_model.Text("x² ⇒ a₁ ✔")])
+    )
+    normal = _docx_style(payload, "Normal")
+    for attribute in ("w:ascii", "w:eastAsia", "w:hAnsi", "w:cs"):
+        assert f'{attribute}="맑은 고딕"' in normal
+
+
+@pytest.mark.parametrize("style_id", ["Title", "Heading1", "Heading2", "Heading3"])
+def test_docx_heading_styles_are_tight_and_use_the_body_font(style_id: str) -> None:
+    """제목 스타일도 여백을 줄이고 같은 폰트를 쓴다(설계 §3-6)."""
+    payload = export_docx.build_docx(
+        export_model.ExportDoc(
+            title="시험지",
+            blocks=[
+                export_model.Heading("1번", level=2),
+                export_model.Heading("풀이", level=3),
+                export_model.Text("본문"),
+            ],
+        )
+    )
+    style = _docx_style(payload, style_id)
+    after = re.search(r'<w:spacing[^>]*w:after="(\d+)"', style)
+    assert after is not None, f"{style_id} 에 w:after 가 없다"
+    assert int(after.group(1)) <= 100
+    for attribute in ("w:ascii", "w:eastAsia", "w:hAnsi", "w:cs"):
+        assert f'{attribute}="맑은 고딕"' in style
