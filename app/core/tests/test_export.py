@@ -446,6 +446,44 @@ def _docx_style(payload: bytes, style_id: str) -> str:
     return found.group(0)
 
 
+def _docx_sect_pr(payload: bytes) -> dict[str, int]:
+    """생성된 docx 의 `sectPr` 에서 용지·여백을 twip 단위로 꺼낸다."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        document = archive.read("word/document.xml").decode("utf-8")
+    found = re.search(r"<w:sectPr.*?</w:sectPr>", document, re.S)
+    assert found is not None, "sectPr 가 없다"
+    values: dict[str, int] = {}
+    for tag in ("pgSz", "pgMar"):
+        element = re.search(rf"<w:{tag}[^>]*/?>", found.group(0))
+        assert element is not None, f"{tag} 가 없다"
+        for name, value in re.findall(r'w:(\w+)="(-?\d+)"', element.group(0)):
+            values[name] = int(value)
+    return values
+
+
+def test_docx_page_is_a4_with_hwpx_margins() -> None:
+    """용지는 A4 다. python-docx 기본값은 Letter(8.5x11in)라 한국 인쇄에 안 맞다.
+
+    여백은 같은 문서의 hwpx 실측값(좌우 1.18in / 위 0.79in / 아래 0.59in)에
+    맞췄다. 1440 twip = 1 인치이고, mm→twip 환산에서 1 twip 오차가 난다.
+    """
+    payload = export_docx.build_docx(
+        export_model.ExportDoc(title="시험지", blocks=[export_model.Text("본문")])
+    )
+    page = _docx_sect_pr(payload)
+    # A4 210x297mm = 11906 x 16838 twip.
+    assert abs(page["w"] - 11906) <= 2
+    assert abs(page["h"] - 16838) <= 2
+    # 좌우 30mm(1701), 위 20mm(1134), 아래 15mm(850).
+    assert abs(page["left"] - 1701) <= 2
+    assert abs(page["right"] - 1701) <= 2
+    assert abs(page["top"] - 1134) <= 2
+    assert abs(page["bottom"] - 850) <= 2
+    # 본문 폭이 이미지 폭 상한보다 좁으면 크롭이 여백을 넘는다.
+    body_width_inches = (page["w"] - page["left"] - page["right"]) / 1440
+    assert body_width_inches + 0.01 >= export_docx._MAX_IMAGE_WIDTH_INCHES
+
+
 def test_docx_normal_style_has_no_paragraph_spacing() -> None:
     """문단마다 붙는 10pt 여백이 74페이지를 만들었다(hwpx 는 14페이지).
 

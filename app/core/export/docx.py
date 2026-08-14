@@ -19,15 +19,31 @@ from docx.document import Document as DocxDocument
 from docx.enum.text import WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, Length, Pt
+from docx.shared import Inches, Length, Mm, Pt
 from PIL import Image as PilImage
 
 from export.model import ExportDoc, Heading, Image, Text
 
 # 크롭 렌더 해상도(extractor.DEFAULT_DPI 와 동일). 픽셀→인치 환산 기준.
 _CROP_RENDER_DPI: Final[int] = 150
-# 이미지 폭 상한(A4 본문 폭에 맞춘 값). 세로 비율은 python-docx 가 유지한다.
-_MAX_IMAGE_WIDTH_INCHES: Final[float] = 6.0
+
+# 용지·여백. python-docx 기본 템플릿은 **Letter(8.5x11in)** 라 한국에서 인쇄하면
+# 여백이 어긋난다. 같은 문서의 hwpx 는 A4 로 나가고 있어 애초에 용지가 달랐다.
+# 여백은 hwpx `Contents/section0.xml` 실측값(HWPUNIT=1/7200in)에 맞춘 것이다:
+# left/right 8504(1.18in), top 5668(0.79in), bottom 4252(0.59in).
+# 머리말·꼬리말(각 0.59in)은 이 렌더러가 쓰지 않으므로 그 몫은 본문에 준다.
+_PAGE_WIDTH_MM: Final[int] = 210
+_PAGE_HEIGHT_MM: Final[int] = 297
+_MARGIN_SIDE_MM: Final[int] = 30
+_MARGIN_TOP_MM: Final[int] = 20
+_MARGIN_BOTTOM_MM: Final[int] = 15
+# 본문 폭 150mm = 5.91in. hwpx 본문 폭(5.91in)과 같다.
+_BODY_WIDTH_MM: Final[int] = _PAGE_WIDTH_MM - 2 * _MARGIN_SIDE_MM
+# 이미지 폭 상한. 본문 폭을 넘으면 크롭이 여백을 침범하므로 본문 폭이 곧 상한이다.
+# 세로 비율은 python-docx 가 유지한다. 예전 값 6.0in 은 Letter 본문 폭이었다.
+# `hwpx.py` 의 `_MAX_IMAGE_WIDTH_MM = 152.4`(6in)와는 어긋나는데, 그 파일은 다른
+# 태스크가 소유하므로 여기서는 손대지 않는다.
+_MAX_IMAGE_WIDTH_INCHES: Final[float] = _BODY_WIDTH_MM / 25.4
 
 # 본문 폰트. python-docx 기본 템플릿은 테마 폰트(Calibri)를 쓰는데, Calibri 에는
 # 위·아래첨자(ᵐ ⁿ ⁻ ₁ ₂)와 ⇒ ∘ ∠ ⋯ ≡ ✔ 글리프가 없어 평문화한 수식이 □ 로 깨진다.
@@ -124,8 +140,27 @@ def _tighten(document: DocxDocument) -> None:
         _apply_font(style, _BODY_FONT, size)
 
 
+def _set_page(document: DocxDocument) -> None:
+    """용지를 A4 로, 여백을 hwpx 쪽 실측값에 맞춘다.
+
+    python-docx 기본 `sectPr` 은 Letter(8.5x11in)라 한국에서 인쇄하면 여백이
+    어긋난다. 같은 문서를 hwpx 로 뽑으면 A4 로 나가므로 두 형식이 애초에 다른
+    용지였고, 페이지 수를 비교하는 것 자체가 성립하지 않았다.
+
+    Args:
+        document: 방금 만든 빈 문서. 본문을 채우기 전에 부른다.
+    """
+    section = document.sections[0]
+    section.page_width = Mm(_PAGE_WIDTH_MM)
+    section.page_height = Mm(_PAGE_HEIGHT_MM)
+    section.left_margin = Mm(_MARGIN_SIDE_MM)
+    section.right_margin = Mm(_MARGIN_SIDE_MM)
+    section.top_margin = Mm(_MARGIN_TOP_MM)
+    section.bottom_margin = Mm(_MARGIN_BOTTOM_MM)
+
+
 def _fit_width(path: Path) -> Length:
-    """이미지 폭을 페이지 폭(6인치)에 맞춰 계산한다(원본보다 키우지 않음).
+    """이미지 폭을 본문 폭(A4 기준 150mm = 5.91in)에 맞춘다(원본보다 키우지 않음).
 
     python-docx 는 `width` 만 주면 세로를 원본 비율대로 맞춘다.
 
@@ -148,7 +183,8 @@ def build_docx(doc: ExportDoc) -> bytes:
 
     본문 텍스트는 줄 단위로 문단을 나눈다. 한 문단에 개행을 그대로 넣으면
     워드가 줄바꿈으로 표시하지 않기 때문이다. 그래서 문단이 아주 많아지므로
-    `_tighten` 으로 문단 여백을 0 으로 눌러 두고 시작한다.
+    `_tighten` 으로 문단 여백을 0 으로 눌러 두고, `_set_page` 로 용지를 A4 로
+    맞춘 다음 시작한다.
 
     Args:
         doc: 렌더할 문서.
@@ -157,6 +193,7 @@ def build_docx(doc: ExportDoc) -> bytes:
         `.docx` 파일 바이트(ZIP 컨테이너, 시그니처 ``PK``).
     """
     document = Document()
+    _set_page(document)
     _tighten(document)
     document.add_heading(doc.title, level=0)
     for block in doc.blocks:
