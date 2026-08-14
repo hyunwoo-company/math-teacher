@@ -3,6 +3,10 @@
 기존 `core/docx_export.py` 를 이식한 것이다(이미지 폭 계산 로직 동일).
 원본 PDF 는 수식 폰트(PUA)가 깨져 문항은 텍스트 대신 크롭 이미지를 쓴다.
 
+수식은 워드 네이티브 수식 개체(OMML)로 넣는다(`export/omml.py`). 분수는
+가로선 위/아래로, 근호는 피근수를 덮는 선으로 워드가 직접 조판한다. 변환에
+실패한 수식은 기존 평문(`MathRun.plain`)으로 폴백하고 로그를 남긴다.
+
 이 모듈은 **블로킹**(파일 IO / 이미지 인코딩)이다.
 `async def` 라우트에서 부를 때는 `run_in_threadpool` 로 감싼다.
 """
@@ -10,6 +14,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
@@ -17,13 +22,17 @@ from typing import Any, Final
 from docx import Document
 from docx.document import Document as DocxDocument
 from docx.enum.text import WD_LINE_SPACING
-from docx.oxml import OxmlElement
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Inches, Length, Mm, Pt, RGBColor
+from docx.text.paragraph import Paragraph
 from PIL import Image as PilImage
 
 from export import layout
-from export.model import ExportDoc, Heading, Image, Text
+from export.model import ExportDoc, Heading, Image, MathRun, Text, TextRun
+from export.omml import UnsupportedLatexError, latex_to_omml
+
+_LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
 # 크롭 렌더 해상도(extractor.DEFAULT_DPI 와 동일). 픽셀→인치 환산 기준.
 _CROP_RENDER_DPI: Final[int] = 150
@@ -172,6 +181,49 @@ def _fit_width(path: Path) -> Length:
     return Inches(min(native_inches, _MAX_IMAGE_WIDTH_INCHES))
 
 
+def _add_math(paragraph: Paragraph, run: MathRun) -> None:
+    """문단 끝에 워드 수식 개체를 붙인다. 변환 실패 시 평문으로 폴백한다.
+
+    `m:oMath` 는 `w:p` 의 정식 자식이라(ECMA-376 Part 1 §22.1.2 / EG_PContent)
+    문단 요소에 그대로 덧붙일 수 있다.
+
+    Args:
+        paragraph: 붙일 문단.
+        run: 수식 런.
+    """
+    try:
+        math_xml = latex_to_omml(run.latex)
+    except UnsupportedLatexError as error:
+        _LOGGER.info("OMML 변환 실패, 평문으로 폴백: %r (%s)", run.latex, error)
+        paragraph.add_run(run.plain)
+        return
+    paragraph._p.append(parse_xml(math_xml))
+
+
+def _add_text(document: DocxDocument, block: Text) -> None:
+    """본문 블록을 문단들로 넣는다.
+
+    한 문단에 개행을 그대로 넣으면 워드가 줄바꿈으로 표시하지 않으므로 줄마다
+    문단을 만든다.
+
+    Args:
+        document: 대상 문서.
+        block: 본문 블록.
+    """
+    if block.lines is None:
+        # 수식이 없는 블록. 예전 경로 그대로다.
+        for line in block.text.split("\n"):
+            document.add_paragraph(line)
+        return
+    for runs in block.lines:
+        paragraph = document.add_paragraph()
+        for run in runs:
+            if isinstance(run, TextRun):
+                paragraph.add_run(run.text)
+            else:
+                _add_math(paragraph, run)
+
+
 def build_docx(doc: ExportDoc) -> bytes:
     """`ExportDoc` 을 `.docx` 바이트로 렌더한다.
 
@@ -196,8 +248,7 @@ def build_docx(doc: ExportDoc) -> bytes:
         elif isinstance(block, Image):
             document.add_picture(str(block.path), width=_fit_width(block.path))
         elif isinstance(block, Text):
-            for line in block.text.split("\n"):
-                document.add_paragraph(line)
+            _add_text(document, block)
     if doc.footer:
         # 출처는 문서 맨 끝 한 줄. 본문과 섞이지 않게 작은 회색 글씨로 낸다.
         run = document.add_paragraph().add_run(doc.footer)
