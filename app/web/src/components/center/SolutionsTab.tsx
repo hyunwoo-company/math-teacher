@@ -124,7 +124,17 @@ export function SolutionsTab() {
         ) : null}
         <button
           type="button"
-          onClick={() => (variantPicking ? stopVariantPicking() : startVariantPicking())}
+          onClick={() => {
+            if (variantPicking) {
+              stopVariantPicking();
+              return;
+            }
+            // 모드는 문항 선택을 매번 버리고 시작한다(startVariantPicking).
+            // 훨씬 비싼 force 만 남으면 규칙이 어긋난다 — 20문항 × 전체를
+            // 모르고 다시 걸면 60건이 통째로 재생성된다.
+            setVariantForce(false);
+            startVariantPicking();
+          }}
           aria-pressed={variantPicking}
           title="문항을 여러 개 골라 변형 문제를 한 번에 만듭니다"
           className={clsx(

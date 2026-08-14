@@ -98,6 +98,32 @@ describe('변형 일괄 생성 UI', () => {
     expect(spy.mock.calls[0]?.[0]).toMatchObject({ force: true });
   }, 30_000);
 
+  it('모드를 다시 열면 force 가 꺼진 채로 시작한다', async () => {
+    const user = await openFile();
+    const spy = vi.spyOn(api, 'createJob');
+    render(<SolutionsTab />);
+
+    // 한 번 켜서 걸고,
+    await user.click(screen.getByRole('button', { name: '변형 만들기' }));
+    await user.click(screen.getByLabelText('1번 변형 선택'));
+    await user.click(screen.getByLabelText('이미 만든 것도 다시 생성'));
+    await user.click(screen.getByRole('button', { name: '1개 문항 변형 생성' }));
+    expect(spy.mock.calls[0]?.[0]).toMatchObject({ force: true });
+
+    await waitFor(() =>
+      expect(screen.queryByLabelText('1번 변형 선택')).not.toBeInTheDocument(),
+    );
+    spy.mockClear();
+
+    // 다시 열면 문항 선택처럼 force 도 버려져 있어야 한다. 남으면 모르고 건
+    // 다음 배치가 이미 만든 것까지 통째로 재생성해 쿼터를 태운다.
+    await user.click(screen.getByRole('button', { name: '변형 만들기' }));
+    expect(screen.getByLabelText('이미 만든 것도 다시 생성')).not.toBeChecked();
+    await user.click(screen.getByLabelText('2번 변형 선택'));
+    await user.click(screen.getByRole('button', { name: '1개 문항 변형 생성' }));
+    expect(spy.mock.calls[0]?.[0]).toMatchObject({ force: false });
+  }, 30_000);
+
   it('담기 모드를 켜면 변형 모드는 꺼진다(체크박스 뜻이 하나여야 한다)', async () => {
     const user = await openFile();
     render(<SolutionsTab />);
