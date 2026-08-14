@@ -14,6 +14,7 @@ def test_all_system_prompts_non_empty() -> None:
         prompts.SOLVE_SYSTEM_PROMPT,
         prompts.VARIANT_SYSTEM_PROMPT,
         prompts.CHAT_SYSTEM_PROMPT,
+        prompts.TRANSCRIBE_SYSTEM_PROMPT,
     ):
         assert prompt.strip()
 
@@ -65,6 +66,40 @@ def test_solve_prompt_forbids_printing_verification() -> None:
 def test_variant_prompt_shares_the_same_rule() -> None:
     """변형도 같은 공유 스킬을 쓰므로 같은 규약이 걸린다."""
     assert "검산 과정은 답변에 쓰지 마십시오" in prompts.VARIANT_SYSTEM_PROMPT
+
+
+def test_transcribe_reuses_persona_and_latex_rules() -> None:
+    """텍스트화도 같은 페르소나·LaTeX 규칙을 쓴다."""
+    assert prompts._SKILL_PERSONA_SCOPE in prompts.TRANSCRIBE_SYSTEM_PROMPT
+    assert prompts._SKILL_LATEX_RULES in prompts.TRANSCRIBE_SYSTEM_PROMPT
+
+
+def test_transcribe_never_asks_for_a_solution() -> None:
+    """텍스트화 산출물은 풀이가 아니라 원문이다.
+
+    풀이/정답 서술 규약을 넣으면 그 텍스트가 그대로 시험지에 조판되어 나간다.
+    """
+    transcribe = prompts.TRANSCRIBE_SYSTEM_PROMPT
+    assert prompts._SKILL_SOLUTION_STEPS not in transcribe
+    assert prompts._SKILL_ANSWER_FORMAT not in transcribe
+    assert "문제를 풀지 마십시오" in transcribe
+
+
+def test_transcribe_output_format_and_conservative_verdict() -> None:
+    """`## 판정` → `## 문제` 순서와 '애매하면 불가' 지시가 있다."""
+    transcribe = prompts.TRANSCRIBE_SYSTEM_PROMPT
+    verdict = f"## {prompts.TRANSCRIBE_VERDICT_TITLE}"
+    problem = f"## {prompts.TRANSCRIBE_PROBLEM_TITLE}"
+    assert verdict in transcribe
+    assert problem in transcribe
+    assert transcribe.index(verdict) < transcribe.index(problem)
+    assert f"애매하면 `{prompts.TRANSCRIBE_VERDICT_FAIL}` 입니다" in transcribe
+
+
+def test_transcribe_user_text_forbids_solving() -> None:
+    text = prompts.transcribe_user_text(7)
+    assert "7번 문항" in text
+    assert "풀지 마십시오" in text
 
 
 def test_variant_keeps_its_own_output_order_and_instructions() -> None:
