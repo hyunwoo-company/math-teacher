@@ -1902,7 +1902,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   },
 
   startNotePicking() {
-    set({ notePicking: true });
+    // 이전 선택을 반드시 버린다. 남기면 담기 모달을 닫기만 했을 때 그 선택이
+    // 다음 담기에 딸려가 엉뚱한 문항이 노트에 들어간다.
+    set({ notePicking: true, notePicked: [] });
   },
 
   stopNotePicking() {

@@ -350,6 +350,25 @@ describe('워크스페이스 스토어 (목 API)', () => {
   });
 });
 
+describe('오답노트 담기 모드', () => {
+  beforeEach(() => {
+    reset();
+  });
+
+  it('담기 모드를 다시 켜면 이전 선택이 남지 않는다', () => {
+    const store = useWorkspace.getState();
+    store.startNotePicking();
+    store.toggleNotePick(3);
+    store.toggleNotePick(5);
+    expect(useWorkspace.getState().notePicked).toEqual([3, 5]);
+
+    // 담지 않고 모달만 닫은 상황: stopNotePicking 이 불리지 않는다.
+    // 이 상태에서 담기 모드를 다시 켜면 선택은 비어 있어야 한다.
+    useWorkspace.getState().startNotePicking();
+    expect(useWorkspace.getState().notePicked).toEqual([]);
+  });
+});
+
 describe('패널 레이아웃 prefs (좌측 너비 / 좌·우 접기)', () => {
   beforeEach(() => {
     reset();
