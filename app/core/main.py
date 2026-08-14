@@ -668,7 +668,7 @@ async def create_job(
     payload: JobCreate,
     x_api_key: ApiKeyHeader = None,
 ) -> JobCreated:
-    """풀이·변형 작업을 큐에 넣고 **즉시** 돌려준다.
+    """풀이·변형·텍스트화 작업을 큐에 넣고 **즉시** 돌려준다.
 
     응답은 스트림을 기다리지 않는다. 진행 상황은
     `GET /api/jobs/{id}/events` 로 구독하며, 구독하지 않아도 작업은 진행된다.
@@ -717,6 +717,39 @@ async def create_job(
                 targets=targets,
                 model=model,
                 effort=payload.effort,
+            ),
+        )
+    elif payload.kind == "transcribe":
+        # 대상 수 == AI 호출 수가 **아니다.** 1차 디코딩으로 끝나는 문항은
+        # 프로바이더를 건드리지 않는다(집계는 진행 이벤트가 알려준다).
+        transcribe_targets, node_name = await run_in_threadpool(
+            partial(
+                ai_service.plan_transcribe_job,
+                payload.node_id,
+                payload.problem_numbers,
+                force=payload.force,
+            )
+        )
+        numbers = [int(item["no"]) for item in transcribe_targets]
+        record = await run_in_threadpool(
+            _insert_job,
+            kind="transcribe",
+            node_id=payload.node_id,
+            node_name=node_name,
+            targets=numbers,
+            params=params,
+            total=len(numbers),
+        )
+        jobs.runner.submit(
+            job_id=record["id"],
+            total=len(numbers),
+            factory=jobs.transcribe_factory(
+                node_id=payload.node_id,
+                provider=provider,
+                targets=transcribe_targets,
+                model=model,
+                effort=payload.effort,
+                force=payload.force,
             ),
         )
     else:
@@ -807,8 +840,9 @@ def _find_overlapping_job(payload: JobCreate) -> dict[str, Any] | None:
     if not active:
         return None
 
-    if payload.kind == "solve":
-        # 전체 풀이(problem_numbers=None)는 어떤 진행 중 풀이와도 겹친다고 본다.
+    if payload.kind in ("solve", "transcribe"):
+        # 둘 다 targets 가 문항 번호 배열이라 겹침 판정이 같다.
+        # 전체 대상(problem_numbers=None)은 어떤 진행 중 작업과도 겹친다고 본다.
         if payload.problem_numbers is None:
             return active[0]
         wanted = set(payload.problem_numbers)

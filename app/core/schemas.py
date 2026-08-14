@@ -235,7 +235,7 @@ class VariantRequest(BaseModel):
     effort: Effort = DEFAULT_EFFORT
 
 
-JobKind = Literal["solve", "variant"]
+JobKind = Literal["solve", "variant", "transcribe"]
 JobStatus = Literal["queued", "running", "done", "error", "canceled", "interrupted"]
 
 
@@ -248,12 +248,17 @@ class JobCreate(BaseModel):
     그 문항들을, 없으면 `no` 하나를 대상으로 삼는다(문항별 `VariantPanel` 이
     계속 `no` 를 쓴다). 만들 조합은 (문항 x `modes`) 이며, `force` 가 아니면
     이미 만들어 둔 조합은 건너뛴다.
+
+    `kind="transcribe"` 는 문항을 텍스트로 옮긴다. 대상은 solve 와 같은
+    `problem_numbers`(null = 전체)이고, `force` 가 아니면 이미 판독본이 있는
+    문항은 건너뛴다. 1차 경로(PDF 텍스트 레이어 디코딩)로 끝나는 문항은 AI 를
+    호출하지 않으므로 대상 수가 곧 AI 호출 수는 아니다.
     """
 
     kind: JobKind
     #: 시험지 노드 id.
     node_id: str
-    #: solve: 대상 문항(null = 전체). variant: 대상 문항들(null 이면 `no` 를 쓴다).
+    #: solve/transcribe: 대상 문항(null = 전체). variant: 대상 문항들(null 이면 `no`).
     problem_numbers: list[int] | None = None
     #: variant 전용. 소스 문항 번호(단일 경로, 하위호환).
     no: int | None = None

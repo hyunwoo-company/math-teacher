@@ -13,12 +13,15 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, Final, NamedTuple
 
 import anyio
+import fitz
 from fastapi import status
 from fastapi.concurrency import run_in_threadpool
 
 import config
+import markdown_sections
 import pricing
 import prompts
+import pua_decode
 import service
 import sse
 import storage
@@ -1050,3 +1053,353 @@ async def variant_batch_events(
                 continue  # 마지막에 한 번만 낸다
             yield (name, {**data, "mode": kind})
     yield ("end", {"total_usage": None, "total_cost": None})
+
+
+# -------------------------------------------------------------- transcribe
+# 문항 텍스트화. **순서가 이 기능의 전부다**(설계 §3-1/3-2).
+#   1차: PDF 텍스트 레이어 디코딩(`pua_decode`). AI 호출 0회, 결정적, 원본 글리프.
+#   2차: 1차가 `ok=False` 인 문항만 AI 비전에 크롭 PNG 를 보낸다.
+# 디코딩으로 끝난 문항에 AI 를 부르면 이 단계의 존재 이유가 사라진다.
+
+
+def plan_transcribe_job(
+    node_id: str, numbers: Sequence[int] | None, *, force: bool
+) -> tuple[list[dict[str, Any]], str]:
+    """텍스트화 작업 대상을 정한다 (블로킹).
+
+    이미 판독본이 있는 문항을 건너뛰는 규칙을 **서버에서** 적용한다
+    (`plan_solve_job` / `plan_variant_batch` 와 같은 규칙).
+
+    Args:
+        node_id: 시험지 노드 id.
+        numbers: 대상 문항. None 이면 전체.
+        force: True 면 이미 판독본이 있는 문항도 다시 판독한다.
+
+    Returns:
+        (대상 문항들, 표시용 시험지 이름).
+
+    Raises:
+        ApiError: 파일/문항이 없을 때. 남는 대상이 없으면
+            400 `already_transcribed`.
+    """
+    _, targets = load_solve_targets(node_id, numbers)
+    with storage.transaction() as conn:
+        node = service.require_file_node(conn, node_id)
+        done = set() if force else storage.transcribed_numbers(conn, node_id)
+    remaining = [item for item in targets if int(item["no"]) not in done]
+    if not remaining:
+        raise bad_request(
+            "already_transcribed",
+            "요청한 문항은 이미 모두 텍스트로 옮겨져 있습니다.",
+            '다시 판독하려면 "다시 판독" 을 눌러 주세요.',
+        )
+    return remaining, str(node["name"])
+
+
+def _decode_targets(
+    node_id: str, targets: Sequence[dict[str, Any]]
+) -> dict[int, pua_decode.DecodeResult]:
+    """대상 문항을 PDF 텍스트 레이어에서 디코딩한다 (블로킹, AI 호출 0회).
+
+    PDF 를 **한 번만 열고 한 스레드 안에서** 전부 처리한다. PyMuPDF 객체는
+    스레드를 옮겨 다니면 안 되고, 문항마다 다시 여는 것도 낭비다.
+
+    원본 PDF 가 사라졌거나 디코더가 예상치 못하게 실패해도 예외를 올리지 않는다.
+    그 문항은 결과에 없고, 호출부가 2차 경로(AI 비전)로 보낸다.
+
+    Args:
+        node_id: 시험지 노드 id.
+        targets: 대상 문항들(`page` 는 1-기준, `bbox` 는 네 값).
+
+    Returns:
+        문항 번호 -> 디코딩 결과. 디코딩을 시도조차 못 한 문항은 빠진다.
+    """
+    try:
+        path = service.raw_pdf_path(node_id)
+    except ApiError as exc:
+        logger.warning(
+            "원본 PDF 가 없어 1차 디코딩을 건너뜁니다 (node_id=%s): %s",
+            node_id,
+            exc.message,
+        )
+        return {}
+
+    results: dict[int, pua_decode.DecodeResult] = {}
+    doc = fitz.open(str(path))
+    try:
+        for problem in targets:
+            no = int(problem["no"])
+            index = int(problem["page"]) - 1
+            if not 0 <= index < doc.page_count:
+                logger.warning("문항 페이지가 PDF 범위를 벗어났습니다 (no=%s)", no)
+                continue
+            try:
+                results[no] = pua_decode.decode_region(doc[index], problem["bbox"])
+            except Exception:
+                logger.exception("1차 디코딩 중 예상치 못한 오류 (no=%s)", no)
+    finally:
+        doc.close()
+    return results
+
+
+class Transcription(NamedTuple):
+    """AI 판독 응답을 읽은 결과.
+
+    Attributes:
+        transcript: 채택한 전문. `불가` 판정이거나 형식이 어긋나면 None.
+        note: 채택하지 않은 이유(채택했으면 None).
+    """
+
+    transcript: str | None
+    note: str | None
+
+
+def parse_transcription(text: str) -> Transcription:
+    """AI 판독 응답(`## 판정` / `## 문제`)을 읽는다.
+
+    **`가능` 판정이 명시적으로 있을 때만 채택한다.** 형식이 어긋난 응답을
+    관대하게 받아들이면 풀이나 해설이 시험지 본문으로 흘러 들어간다 —
+    이미지로 폴백하는 쪽이 언제나 안전하다.
+
+    Args:
+        text: 모델 응답 원문.
+
+    Returns:
+        채택한 전문, 또는 채택하지 않은 이유.
+    """
+    sections = markdown_sections.split_sections(text)
+    verdict = (sections.get(prompts.TRANSCRIBE_VERDICT_TITLE) or "").strip()
+    if not verdict:
+        return Transcription(None, "AI 응답에서 판정을 읽지 못했습니다.")
+    if not verdict.startswith(prompts.TRANSCRIBE_VERDICT_OK):
+        # `불가 - 좌표평면 그래프...` 를 한 줄로 접어 이유로 남긴다.
+        return Transcription(None, " ".join(verdict.split()))
+    body = (sections.get(prompts.TRANSCRIBE_PROBLEM_TITLE) or "").strip()
+    if not body:
+        return Transcription(None, "판정은 가능인데 옮긴 본문이 비어 있습니다.")
+    return Transcription(body, None)
+
+
+def _save_transcript(
+    *,
+    node_id: str,
+    no: int,
+    transcript: str | None,
+    source: str | None,
+    note: str | None,
+    overwrite_manual: bool,
+) -> bool:
+    """판독본을 저장한다 (블로킹). 사용자가 고친 것은 기본적으로 지킨다."""
+    with storage.transaction() as conn:
+        return storage.set_transcript(
+            conn,
+            node_id=node_id,
+            no=no,
+            transcript=transcript,
+            source=source,
+            note=note,
+            overwrite_manual=overwrite_manual,
+        )
+
+
+async def transcribe_events(
+    *,
+    node_id: str,
+    provider: Provider,
+    targets: Sequence[dict[str, Any]],
+    model: str,
+    effort: Effort,
+    force: bool = False,
+) -> AsyncIterator[Event]:
+    """문항을 텍스트로 옮기며 이벤트를 흘린다 (1차 디코딩 → 실패분만 AI).
+
+    이벤트 계약은 풀이(`solve_events`)와 같다: `start` → 문항마다
+    `problem`/(`delta`)/`done`|`error` → `end`. 여기에 **비용을 드러내는 값**을
+    더한다.
+
+    * `problem.route`: 이 문항이 `pua`(디코딩) 인지 `ai` 인지. 미리 알 수 있다.
+    * `done.source`: 실제로 저장한 출처(`pua` / `ai`, 불가면 None).
+    * `done.decoded_count` / `done.ai_count`: 그 시점까지의 누적.
+    * `end.decoded_count` / `end.ai_count` / `end.unavailable_count`: 최종 집계.
+
+    Args:
+        node_id: 시험지 노드 id.
+        provider: 2차 경로에 쓸 프로바이더(1차만으로 끝나면 호출되지 않는다).
+        targets: 대상 문항들. 앞에서부터 순차로 처리한다.
+        model: 모델 id.
+        effort: 추론 강도.
+        force: True 면 사용자가 고친 판독본(`manual`)도 덮어쓴다.
+
+    Yields:
+        진행 이벤트들.
+    """
+    total_usage: dict[str, int] = dict.fromkeys(_USAGE_KEYS, 0)
+    total_usd = 0.0
+    has_usage = False
+    has_cost = False
+    decoded_count = 0
+    ai_count = 0
+    unavailable_count = 0
+
+    try:
+        yield ("start", {"total": len(targets)})
+
+        # 1차: AI 호출 없이 전부 디코딩해 두고, 실패한 것만 아래에서 AI 로 보낸다.
+        decoded = await run_in_threadpool(_decode_targets, node_id, targets)
+
+        for problem in targets:
+            no = int(problem["no"])
+            result = decoded.get(no)
+            # 1차를 채택하는 조건: 디코더가 스스로 신뢰한다(`ok`)고 하고 내용이 있다.
+            latex = result.latex if result is not None and result.ok else None
+            yield (
+                "problem",
+                {
+                    "no": no,
+                    "status": "running",
+                    "route": storage.TRANSCRIPT_PUA if latex else storage.TRANSCRIPT_AI,
+                },
+            )
+
+            if latex:
+                await run_in_threadpool(
+                    _save_transcript,
+                    node_id=node_id,
+                    no=no,
+                    transcript=latex,
+                    source=storage.TRANSCRIPT_PUA,
+                    note=None,
+                    overwrite_manual=force,
+                )
+                decoded_count += 1
+                yield (
+                    "done",
+                    {
+                        "no": no,
+                        "source": storage.TRANSCRIPT_PUA,
+                        "transcript": latex,
+                        "note": None,
+                        "decoded_count": decoded_count,
+                        "ai_count": ai_count,
+                        "usage": None,
+                        "cost": None,
+                        "truncated": False,
+                    },
+                )
+                continue
+
+            # 2차: 디코딩이 못 한 문항만 AI 비전으로.
+            decode_reason = (
+                result.reason
+                if result is not None and result.reason
+                else "PDF 텍스트 레이어에서 문항을 읽지 못했다"
+            )
+            image_b64 = await run_in_threadpool(_read_crop_b64, problem)
+            if not image_b64:
+                yield (
+                    "error",
+                    {
+                        "no": no,
+                        "error_code": "crop_missing",
+                        "message": (
+                            f"{no}번 문항의 크롭 이미지가 없어 판독할 수 없습니다."
+                        ),
+                        "hint": "파일을 다시 업로드해 추출을 재실행하세요.",
+                    },
+                )
+                continue
+
+            ai_count += 1
+            try:
+                async for chunk in provider.solve_problem(
+                    no=no,
+                    mode="image",
+                    text="",
+                    image_b64=image_b64,
+                    model=model,
+                    effort=effort,
+                    max_tokens=config.DEFAULT_MAX_TOKENS,
+                    system=prompts.TRANSCRIBE_SYSTEM_PROMPT,
+                    instruction=prompts.transcribe_user_text(no),
+                ):
+                    if chunk["type"] == "delta":
+                        yield ("delta", {"no": no, "text": chunk["text"]})
+                        continue
+
+                    reading = parse_transcription(chunk["text"])
+                    if reading.transcript is None:
+                        unavailable_count += 1
+                    await run_in_threadpool(
+                        _save_transcript,
+                        node_id=node_id,
+                        no=no,
+                        transcript=reading.transcript,
+                        source=(
+                            storage.TRANSCRIPT_AI
+                            if reading.transcript is not None
+                            else None
+                        ),
+                        note=reading.note,
+                        overwrite_manual=force,
+                    )
+                    usage = chunk["usage"]
+                    cost = chunk["cost"]
+                    has_usage = _accumulate(total_usage, usage) or has_usage
+                    if cost is not None:
+                        has_cost = True
+                        total_usd += float(cost.get("total_usd", 0.0) or 0.0)
+                    yield (
+                        "done",
+                        {
+                            "no": no,
+                            "source": (
+                                storage.TRANSCRIPT_AI
+                                if reading.transcript is not None
+                                else None
+                            ),
+                            "transcript": reading.transcript,
+                            "note": reading.note,
+                            "decode_reason": decode_reason,
+                            "decoded_count": decoded_count,
+                            "ai_count": ai_count,
+                            "usage": usage,
+                            "cost": cost,
+                            "truncated": chunk["truncated"],
+                        },
+                    )
+            except ProviderError as exc:
+                logger.warning("문항 판독 실패 (no=%s): %s", no, exc.message)
+                yield (
+                    "error",
+                    {
+                        "no": no,
+                        "error_code": exc.error_code,
+                        "message": exc.message,
+                        "hint": exc.hint,
+                    },
+                )
+            except Exception as exc:
+                logger.exception("문항 판독 중 예상치 못한 오류 (no=%s)", no)
+                yield (
+                    "error",
+                    {
+                        "no": no,
+                        "error_code": "internal_error",
+                        "message": "문항 판독 중 서버 오류가 발생했습니다.",
+                        "hint": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+
+        yield (
+            "end",
+            {
+                "total_usage": dict(total_usage) if has_usage else None,
+                "total_cost": _total_cost(total_usd) if has_cost else None,
+                "decoded_count": decoded_count,
+                "ai_count": ai_count,
+                "unavailable_count": unavailable_count,
+            },
+        )
+    except (anyio.get_cancelled_exc_class(), GeneratorExit):
+        logger.info("SSE 연결이 끊겼습니다 (transcribe, node_id=%s)", node_id)
+        raise

@@ -1,4 +1,4 @@
-"""풀이·변형 작업 큐 (프로세스 단위 인메모리 러너).
+"""풀이·변형·텍스트화 작업 큐 (프로세스 단위 인메모리 러너).
 
 왜 필요한가
 ----------
@@ -43,6 +43,7 @@ _SUBSCRIBER_MAXSIZE: Final[int] = 1000
 
 JOB_KIND_SOLVE: Final[str] = "solve"
 JOB_KIND_VARIANT: Final[str] = "variant"
+JOB_KIND_TRANSCRIBE: Final[str] = "transcribe"
 
 STATUS_QUEUED: Final[str] = "queued"
 STATUS_RUNNING: Final[str] = "running"
@@ -333,5 +334,14 @@ def variant_batch_factory(**kwargs: Any) -> Callable[[], AsyncIterator[Event]]:
 
     def make() -> AsyncIterator[Event]:
         return ai_service.variant_batch_events(**kwargs)
+
+    return make
+
+
+def transcribe_factory(**kwargs: Any) -> Callable[[], AsyncIterator[Event]]:
+    """문항 텍스트화 이벤트 팩토리(1차 디코딩 → 실패한 문항만 AI 비전)."""
+
+    def make() -> AsyncIterator[Event]:
+        return ai_service.transcribe_events(**kwargs)
 
     return make
