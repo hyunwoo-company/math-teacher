@@ -11,7 +11,15 @@ import { CopyButton } from '@/components/ui/CopyButton';
 import { toPlainText } from '@/lib/to-plain-text';
 import { EmptyState, InlineBadge, LoadingState, Spinner } from '@/components/ui/Feedback';
 import { costAmounts, formatDateTime, formatInt, formatKrw, formatUsd, totalTokens } from '@/lib/format';
-import { VARIANT_PICK_KINDS, VARIANT_PICK_LABEL } from '@/lib/variant';
+import {
+  VARIANT_PICK_KINDS,
+  VARIANT_PICK_LABEL,
+  allPicksRunning,
+  hasRunningVariant,
+  runningPickCount,
+  variantProgressOf,
+  type VariantProgress,
+} from '@/lib/variant';
 import { useWorkspace, type SolutionEntry } from '@/store/workspace';
 import type { Problem } from '@/types/api';
 
@@ -38,6 +46,7 @@ export function SolutionsTab() {
   const setVariantPicked = useWorkspace((state) => state.setVariantPicked);
   const setVariantKind = useWorkspace((state) => state.setVariantKind);
   const startVariantBatch = useWorkspace((state) => state.startVariantBatch);
+  const variants = useWorkspace((state) => state.variants);
   const solutions = useWorkspace((state) => state.solutions);
   const solutionsStatus = useWorkspace((state) => state.solutionsStatus);
   const selectedProblemNo = useWorkspace((state) => state.selectedProblemNo);
@@ -68,6 +77,23 @@ export function SolutionsTab() {
         : problems,
     [problems, solutions, unsolvedOnly],
   );
+
+  /**
+   * 변형 진행 상황. 문항 안 패널과 **같은 자리**(variants 의 streaming)를 보므로
+   * 아래가 "생성 중…" 이면 위에도 반드시 보인다. 따로 집계 상태를 두지 않는다.
+   */
+  const variantProgress = useMemo(
+    () => (fileId ? variantProgressOf({ variants, fileId, jobs }) : null),
+    [fileId, variants, jobs],
+  );
+  /** 고른 문항 중 지금 고른 유형으로 이미 생성 중인 문항 수. */
+  const runningPicks = useMemo(
+    () => (fileId ? runningPickCount(variants, fileId, variantPicked, variantKind) : 0),
+    [fileId, variants, variantPicked, variantKind],
+  );
+  /** 고른 문항 전부가 지금 고른 유형으로 생성 중 = 다시 걸 게 없다. */
+  const pickedAllRunning =
+    fileId != null && allPicksRunning(variants, fileId, variantPicked, variantKind);
 
   if (!fileId) {
     return <EmptyState title="파일을 먼저 선택하세요" />;
@@ -122,6 +148,14 @@ export function SolutionsTab() {
             {solve.currentNo != null ? ` (현재 ${solve.currentNo}번)` : ''}
           </span>
         ) : null}
+        {/* 아래 패널이 "생성 중…" 이면 여기도 반드시 보인다(같은 자리를 본다). */}
+        {variantProgress ? (
+          <VariantProgressNotice
+            progress={variantProgress}
+            cancelingJobIds={cancelingJobIds}
+            onCancel={(jobId) => void cancelJob(jobId)}
+          />
+        ) : null}
         <button
           type="button"
           onClick={() => {
@@ -136,15 +170,23 @@ export function SolutionsTab() {
             startVariantPicking();
           }}
           aria-pressed={variantPicking}
-          title="문항을 여러 개 골라 변형 문제를 한 번에 만듭니다"
+          title={
+            variantProgress
+              ? '변형을 만드는 중입니다. 문항을 골라 다른 유형을 이어서 걸 수 있습니다'
+              : '문항을 여러 개 골라 변형 문제를 한 번에 만듭니다'
+          }
           className={clsx(
-            'ml-auto rounded border px-2 py-0.5 text-[11px] font-medium',
+            'ml-auto inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] font-medium',
             variantPicking
               ? 'border-violet-600 bg-violet-600 text-white hover:bg-violet-700'
               : 'border-violet-300 bg-white text-violet-700 hover:bg-violet-50',
           )}
         >
           변형 만들기
+          {/* 진행 중임을 버튼에서도 알린다(문항 패널 탭의 점과 같은 표시). */}
+          {variantProgress ? (
+            <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-500" />
+          ) : null}
         </button>
         <label className="flex items-center gap-1.5">
           <input
@@ -161,22 +203,33 @@ export function SolutionsTab() {
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-violet-200 bg-violet-50 px-3 py-1.5 text-[12px] text-slate-700">
           <span className="font-medium text-violet-900">변형 유형</span>
           <div className="flex items-center gap-1">
-            {VARIANT_PICK_KINDS.map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                onClick={() => setVariantKind(kind)}
-                aria-pressed={variantKind === kind}
-                className={clsx(
-                  'rounded border px-2 py-0.5 text-[11px]',
-                  variantKind === kind
-                    ? 'border-violet-600 bg-violet-600 text-white'
-                    : 'border-violet-300 bg-white text-violet-700 hover:bg-violet-100',
-                )}
-              >
-                {VARIANT_PICK_LABEL[kind]}
-              </button>
-            ))}
+            {VARIANT_PICK_KINDS.map((kind) => {
+              // 고른 문항이 **전부** 그 유형으로 생성 중일 때만 막는다. 일부만
+              // 진행 중이면 나머지는 걸 수 있어야 한다(겹치는 조합은 서버가 건너뛴다).
+              const busy = allPicksRunning(variants, fileId, variantPicked, kind);
+              return (
+                <button
+                  key={kind}
+                  type="button"
+                  onClick={() => setVariantKind(kind)}
+                  aria-pressed={variantKind === kind}
+                  disabled={busy}
+                  title={
+                    busy
+                      ? `이미 생성 중입니다 — 고른 ${variantPicked.length}개 문항이 모두 ${VARIANT_PICK_LABEL[kind]} 변형을 만들고 있습니다`
+                      : undefined
+                  }
+                  className={clsx(
+                    'rounded border px-2 py-0.5 text-[11px] disabled:cursor-not-allowed disabled:opacity-50',
+                    variantKind === kind
+                      ? 'border-violet-600 bg-violet-600 text-white'
+                      : 'border-violet-300 bg-white text-violet-700 hover:bg-violet-100',
+                  )}
+                >
+                  {VARIANT_PICK_LABEL[kind]}
+                </button>
+              );
+            })}
           </div>
           <span className="text-violet-900">{variantPicked.length}개 문항 선택됨</span>
           <button
@@ -210,11 +263,25 @@ export function SolutionsTab() {
               />
               이미 만든 것도 다시 생성
             </label>
+            {/*
+              일부만 진행 중이면 막지 않는다. 다만 몇 개가 이미 돌고 있는지는
+              밝혀야 한다 — 안 그러면 "왜 요청한 수보다 적게 만들어졌지" 가 된다.
+            */}
+            {runningPicks > 0 && !pickedAllRunning ? (
+              <span className="text-[11px] text-violet-700">{runningPicks}개는 이미 생성 중</span>
+            ) : null}
             <button
               type="button"
               onClick={() => void startVariantBatch({ force: variantForce })}
-              disabled={variantPicked.length === 0}
-              className="rounded border border-violet-600 bg-violet-600 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+              disabled={variantPicked.length === 0 || pickedAllRunning}
+              title={
+                variantPicked.length === 0
+                  ? '변형을 만들 문항을 먼저 고르세요'
+                  : pickedAllRunning
+                    ? `이미 생성 중입니다 — 고른 문항이 모두 ${VARIANT_PICK_LABEL[variantKind]} 변형을 만들고 있습니다`
+                    : undefined
+              }
+              className="rounded border border-violet-600 bg-violet-600 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {variantPicked.length}개 문항 변형 생성
             </button>
@@ -266,6 +333,7 @@ export function SolutionsTab() {
                     : '이 문제 풀이를 중단합니다'
                 }
                 pickMode={pickMode}
+                variantRunning={hasRunningVariant(variants, fileId, problem.no)}
                 picked={pickedSet.has(problem.no)}
                 onTogglePick={() =>
                   pickMode === 'variant'
@@ -301,9 +369,49 @@ interface SolutionRowProps {
   cancelTitle: string;
   /** 지금 체크박스가 무엇을 고르는 중인지('none' 이면 체크박스를 숨긴다). */
   pickMode: PickMode;
+  /** 이 문항의 변형이 유형 하나라도 생성 중인지(변형 모드에서 배지로 알린다). */
+  variantRunning: boolean;
   /** 이 문항이 고른 대상인지. */
   picked: boolean;
   onTogglePick: () => void;
+}
+
+/**
+ * 상단 변형 진행 표시 + [중단].
+ *
+ * 중단 관례는 풀이 쪽과 같다: 요청을 보내면 버튼이 "중단하는 중…" 으로 바뀌고,
+ * 서버가 현재 조합을 마친 뒤 실제로 멈춘다.
+ */
+function VariantProgressNotice({
+  progress,
+  cancelingJobIds,
+  onCancel,
+}: {
+  progress: VariantProgress;
+  cancelingJobIds: readonly string[];
+  onCancel: (jobId: string) => void;
+}) {
+  const { jobId } = progress;
+  const canceling = jobId != null && cancelingJobIds.includes(jobId);
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="text-violet-700">
+        변형 중… {progress.doneCount}/{progress.total}
+        {progress.currentNo != null ? ` (현재 ${progress.currentNo}번)` : ''}
+      </span>
+      {jobId != null ? (
+        <button
+          type="button"
+          onClick={() => onCancel(jobId)}
+          disabled={canceling}
+          title={`이 시험지의 변형 작업(${progress.total}건) 전체가 중단됩니다`}
+          className="rounded border border-rose-300 bg-white px-2 py-0.5 text-[11px] font-medium text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {canceling ? '중단하는 중…' : '변형 중단'}
+        </button>
+      ) : null}
+    </span>
+  );
 }
 
 function SolutionRow({
@@ -322,6 +430,7 @@ function SolutionRow({
   cancelLabel,
   cancelTitle,
   pickMode,
+  variantRunning,
   picked,
   onTogglePick,
 }: SolutionRowProps) {
@@ -373,6 +482,10 @@ function SolutionRow({
               ) : null}
               <span className="text-[11px] text-slate-400">{problem.page}쪽</span>
               <StatusBadge status={status} truncated={entry?.truncated ?? false} />
+              {/* 변형 모드에서 어떤 문항이 이미 돌고 있는지 행에서 바로 보이게. */}
+              {pickMode === 'variant' && variantRunning ? (
+                <InlineBadge tone="violet">변형 생성 중</InlineBadge>
+              ) : null}
             </span>
             <span className="mt-1 block truncate text-[12px] text-slate-500">
               {status === 'done'

@@ -82,7 +82,7 @@ export function InlineBadge({
   tone = 'slate',
 }: {
   children: ReactNode;
-  tone?: 'slate' | 'blue' | 'green' | 'amber' | 'rose';
+  tone?: 'slate' | 'blue' | 'green' | 'amber' | 'rose' | 'violet';
 }) {
   const tones: Record<string, string> = {
     slate: 'bg-slate-100 text-slate-600 border-slate-200',
@@ -90,6 +90,8 @@ export function InlineBadge({
     green: 'bg-emerald-50 text-emerald-700 border-emerald-200',
     amber: 'bg-amber-50 text-amber-700 border-amber-200',
     rose: 'bg-rose-50 text-rose-700 border-rose-200',
+    // 변형 관련 표시는 담기(rose)와 구분되게 violet 으로 맞춘다.
+    violet: 'bg-violet-50 text-violet-700 border-violet-200',
   };
   return (
     <span

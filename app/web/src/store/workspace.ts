@@ -29,7 +29,7 @@ import {
   type ProviderConfig,
 } from '@/lib/provider-config';
 import { isDescendantOf } from '@/lib/tree';
-import { variantModesOf, type VariantPickKind } from '@/lib/variant';
+import { variantCacheKey, variantModesOf, type VariantPickKind } from '@/lib/variant';
 import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { uploadTargetLabel } from '@/lib/upload-target';
 import {
@@ -828,9 +828,12 @@ function eventVariantMode(event: { mode?: VariantMode }): VariantMode | null {
 /** 저장 풀이 조회 중복 방지용 진행 키 집합(`${fileId}::${no}`). 직렬화 대상 아님. */
 const problemSolutionLoading = new Set<string>();
 
-/** 변형 결과 저장 키: 시험지 문항(file_id + problem_no) 단위. */
+/**
+ * 변형 결과 저장 키: 시험지 문항(file_id + problem_no) 단위.
+ * 형식은 `lib/variant` 에 하나만 둔다(화면 쪽 판정 함수가 같은 키를 읽는다).
+ */
 function variantKey(fileId: string, no: number): string {
-  return `${fileId}::${no}`;
+  return variantCacheKey(fileId, no);
 }
 
 /**
