@@ -94,7 +94,7 @@ describe('ExportButton', () => {
     await user.click(screen.getByRole('menuitem', { name: label }));
 
     await waitFor(() =>
-      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, format, include, undefined),
+      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, format, include, undefined, 'image'),
     );
     await settleExport();
   });
@@ -108,7 +108,7 @@ describe('ExportButton', () => {
     await user.click(screen.getByRole('menuitem', { name: '문제만 · HWPX' }));
 
     await waitFor(() =>
-      expect(spy).toHaveBeenCalledWith('variants', MOCK_FILE_ID, 'hwpx', 'problems', undefined),
+      expect(spy).toHaveBeenCalledWith('variants', MOCK_FILE_ID, 'hwpx', 'problems', undefined, 'image'),
     );
     await settleExport();
   });
@@ -146,7 +146,7 @@ describe('ExportButton', () => {
     await user.click(screen.getByRole('menuitem', { name: '문제만 · DOCX' }));
 
     await waitFor(() =>
-      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, 'docx', 'problems', 'HY EDU'),
+      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, 'docx', 'problems', 'HY EDU', 'image'),
     );
     await settleExport();
   });
@@ -161,7 +161,7 @@ describe('ExportButton', () => {
     await user.click(screen.getByRole('menuitem', { name: '문제만 · DOCX' }));
 
     await waitFor(() =>
-      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, 'docx', 'problems', undefined),
+      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, 'docx', 'problems', undefined, 'image'),
     );
     await settleExport();
   });
@@ -181,6 +181,96 @@ describe('ExportButton', () => {
     render(<ExportButton target="exam" id={MOCK_FILE_ID} name="풍문고.pdf" />);
     await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
     await waitFor(() => expect(screen.getByLabelText('출처')).toHaveValue('HY EDU'));
+  });
+
+  it('판독본이 있으면 [문항을 텍스트로] 를 켜서 body=text 로 낸다', async () => {
+    const user = userEvent.setup();
+    const spy = vi.spyOn(api, 'exportDocument');
+    render(
+      <ExportButton target="exam" id={MOCK_FILE_ID} name="풍문고.pdf" transcriptReady />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
+    const checkbox = screen.getByLabelText('문항을 텍스트로');
+    // 기본은 꺼짐 — 지금까지와 완전히 같은 문서가 나온다.
+    expect(checkbox).not.toBeChecked();
+    await user.click(checkbox);
+    await user.click(screen.getByRole('menuitem', { name: '문제만 · DOCX' }));
+
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, 'docx', 'problems', undefined, 'text'),
+    );
+    await settleExport();
+  });
+
+  it('판독본이 하나도 없으면 비활성이고 이유를 알려준다', async () => {
+    const user = userEvent.setup();
+    render(
+      <ExportButton
+        target="exam"
+        id={MOCK_FILE_ID}
+        name="풍문고.pdf"
+        transcriptReady={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
+    const checkbox = screen.getByLabelText('문항을 텍스트로');
+    expect(checkbox).toBeDisabled();
+    expect(screen.getByText(/먼저 문항 텍스트화를 실행하세요/)).toBeInTheDocument();
+  });
+
+  it('판독본이 없으면 기억해 둔 선택도 되살리지 않는다(조용히 image 로 낸다)', async () => {
+    const user = userEvent.setup();
+    const spy = vi.spyOn(api, 'exportDocument');
+    window.localStorage.setItem('export.body', 'text');
+    render(
+      <ExportButton
+        target="exam"
+        id={MOCK_FILE_ID}
+        name="풍문고.pdf"
+        transcriptReady={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
+    await user.click(screen.getByRole('menuitem', { name: '문제만 · DOCX' }));
+
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, 'docx', 'problems', undefined, 'image'),
+    );
+    await settleExport();
+  });
+
+  it('변형 문서에는 이 선택이 없다(본문이 이미 텍스트다)', async () => {
+    const user = userEvent.setup();
+    render(
+      <ExportButton target="variants" id={MOCK_FILE_ID} name="풍문고.pdf" transcriptReady />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /변형문제 내보내기/ }));
+    expect(screen.queryByLabelText('문항을 텍스트로')).not.toBeInTheDocument();
+  });
+
+  it('마지막 선택을 기억해 다음 내보내기에 켜 둔다(출처와 같은 규칙)', async () => {
+    const user = userEvent.setup();
+    render(
+      <ExportButton target="exam" id={MOCK_FILE_ID} name="풍문고.pdf" transcriptReady />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
+    await user.click(screen.getByLabelText('문항을 텍스트로'));
+    await user.click(screen.getByRole('menuitem', { name: '문제만 · DOCX' }));
+    await settleExport();
+    // 성공한 값만 기억한다(출처 입력란과 같은 규칙).
+    expect(window.localStorage.getItem('export.body')).toBe('text');
+
+    cleanup();
+    render(
+      <ExportButton target="exam" id={MOCK_FILE_ID} name="풍문고.pdf" transcriptReady />,
+    );
+    await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
+    await waitFor(() => expect(screen.getByLabelText('문항을 텍스트로')).toBeChecked());
   });
 
   it('실패하면 토스트를 띄우고 버튼이 다시 활성화된다', async () => {

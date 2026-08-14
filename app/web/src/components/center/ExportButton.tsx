@@ -5,7 +5,7 @@ import clsx from 'clsx';
 import { api } from '@/lib/api';
 import { Spinner } from '@/components/ui/Feedback';
 import { useWorkspace } from '@/store/workspace';
-import type { ExportFormat, ExportInclude, ExportTarget } from '@/types/api';
+import type { ExportBody, ExportFormat, ExportInclude, ExportTarget } from '@/types/api';
 
 interface ExportButtonProps {
   /** 무엇을 내보낼지. */
@@ -14,6 +14,15 @@ interface ExportButtonProps {
   id: string;
   /** 저장 파일명 기본값 계산용(노드 이름). */
   name: string;
+  /**
+   * 판독본이 하나라도 있는지(체크박스를 켤 수 있는지).
+   *
+   * `undefined` 는 **모른다**는 뜻이고 그때는 막지 않는다. 오답노트가 그렇다 —
+   * `GET /api/notes/{id}` 의 항목에는 판독본 스냅샷 여부가 실리지 않는다. 서버는
+   * 판독본이 없는 항목을 조용히 이미지로 폴백하므로, 모를 때 켜 두는 편이 안전하다
+   * (반대로 막으면 판독본이 있어도 못 쓴다).
+   */
+  transcriptReady?: boolean;
   className?: string;
 }
 
@@ -38,6 +47,8 @@ const TARGET_LABEL: Record<ExportTarget, string> = {
 
 /** 마지막으로 쓴 출처를 기억해 두는 localStorage 키. */
 const SOURCE_STORAGE_KEY = 'export.source';
+/** 마지막으로 고른 본문 구성(image/text)을 기억해 두는 키(출처와 같은 규칙). */
+const BODY_STORAGE_KEY = 'export.body';
 /** 출처 입력 상한(백엔드 `source` 쿼리와 같은 값). */
 const SOURCE_MAX_LENGTH = 100;
 
@@ -61,18 +72,36 @@ function fallbackName(
  * 버튼 4개를 늘어놓지 않고 하나로 모은다. HWPX 는 한글에서 바로 열리고,
  * DOCX 는 한글·워드 모두에서 열린다.
  */
-export function ExportButton({ target, id, name, className }: ExportButtonProps) {
+export function ExportButton({
+  target,
+  id,
+  name,
+  transcriptReady,
+  className,
+}: ExportButtonProps) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [source, setSource] = useState('');
+  const [asText, setAsText] = useState(false);
   const showToast = useWorkspace((state) => state.showToast);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
-  // 기억해 둔 출처를 채운다. `useState` 초기값으로 읽으면 정적 내보내기의 서버
-  // 렌더에서 localStorage 가 없어 깨지므로 마운트 후에 읽는다.
+  // 기억해 둔 출처·본문 구성을 채운다. `useState` 초기값으로 읽으면 정적
+  // 내보내기의 서버 렌더에서 localStorage 가 없어 깨지므로 마운트 후에 읽는다.
   useEffect(() => {
     setSource(window.localStorage.getItem(SOURCE_STORAGE_KEY) ?? '');
+    setAsText(window.localStorage.getItem(BODY_STORAGE_KEY) === 'text');
   }, []);
+
+  /**
+   * 변형 문서에는 크롭 이미지가 없고 본문이 이미 텍스트다 — 백엔드도 `body` 를
+   * 받기만 하고 쓰지 않는다. 아무 일도 하지 않는 선택지를 내지 않는다.
+   */
+  const supportsText = target !== 'variants';
+  /** 판독본이 하나도 없으면 켤 수 없다(있는지 모르면 막지 않는다). */
+  const textEnabled = supportsText && transcriptReady !== false;
+  /** 기억해 둔 선택이 'text' 여도 켤 수 없는 상황이면 조용히 image 로 낸다. */
+  const body: ExportBody = textEnabled && asText ? 'text' : 'image';
 
   // 바깥을 누르거나 Esc 로 닫는다.
   useEffect(() => {
@@ -104,9 +133,13 @@ export function ExportButton({ target, id, name, className }: ExportButtonProps)
         item.format,
         item.include,
         trimmed === '' ? undefined : trimmed,
+        body,
       );
       // 성공한 값만 기억한다(실패한 오타를 다음번에 되살리지 않는다).
       window.localStorage.setItem(SOURCE_STORAGE_KEY, trimmed);
+      // 본문 구성도 같은 규칙으로 기억한다. 다만 이 대상에서 쓸 수 없는 선택은
+      // 기록하지 않는다(변형 내보내기가 시험지 쪽 기억을 지우면 안 된다).
+      if (supportsText) window.localStorage.setItem(BODY_STORAGE_KEY, body);
       objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = objectUrl;
@@ -176,6 +209,41 @@ export function ExportButton({ target, id, name, className }: ExportButtonProps)
               className="mt-0.5 block w-full rounded border border-slate-300 px-1.5 py-1 text-[12px] text-slate-700 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none"
             />
           </label>
+          {/*
+            문항을 크롭 이미지 대신 판독본 텍스트로 조판한다. 기본은 꺼짐 —
+            켜지 않으면 지금까지와 완전히 같은 문서가 나온다. 판독본이 없는
+            문항은 서버가 조용히 이미지로 폴백한다.
+          */}
+          {supportsText ? (
+            <div className="px-3 pb-1.5 pt-1">
+              <label
+                className={clsx(
+                  'flex items-center gap-1.5 text-[11px]',
+                  textEnabled ? 'text-slate-600' : 'cursor-not-allowed text-slate-400',
+                )}
+                title={
+                  textEnabled
+                    ? '판독본이 있는 문항은 텍스트로 조판합니다(없는 문항은 이미지로 나갑니다)'
+                    : '먼저 문항 텍스트화를 실행하세요'
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={textEnabled && asText}
+                  disabled={!textEnabled}
+                  onChange={(event) => setAsText(event.target.checked)}
+                  aria-label="문항을 텍스트로"
+                  className="h-3.5 w-3.5"
+                />
+                문항을 텍스트로
+              </label>
+              {!textEnabled ? (
+                <p className="mt-0.5 text-[10px] text-slate-400">
+                  먼저 문항 텍스트화를 실행하세요.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <div className="my-1 border-t border-slate-100" />
           {ITEMS.map((item) => (
             <button

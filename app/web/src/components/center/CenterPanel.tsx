@@ -12,6 +12,7 @@ import { ExportButton } from '@/components/center/ExportButton';
 import { ReextractButton } from '@/components/center/ReextractButton';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { formatDate } from '@/lib/format';
+import { hasAnyTranscript } from '@/lib/transcript';
 import { nodePath } from '@/lib/tree';
 import { useWorkspace } from '@/store/workspace';
 
@@ -35,6 +36,7 @@ export function CenterPanel() {
   const focusRequest = useWorkspace((state) => state.focusRequest);
   const nodes = useWorkspace((state) => state.nodes);
   const solutions = useWorkspace((state) => state.solutions);
+  const transcripts = useWorkspace((state) => state.transcripts);
 
   const setActiveTab = useWorkspace((state) => state.setActiveTab);
   const focusProblem = useWorkspace((state) => state.focusProblem);
@@ -85,6 +87,8 @@ export function CenterPanel() {
   const { node, problems } = fileDetail;
   const path = nodePath(nodes, node.id);
   const solvedCount = problems.filter((problem) => solutions[problem.no]?.status === 'done').length;
+  // 텍스트로 내보낼 수 있는지는 저장된 판독본으로 판단한다([풀이] 탭 헤더와 같은 자리).
+  const transcriptReady = hasAnyTranscript(transcripts, node.id, problems);
 
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-white">
@@ -112,7 +116,12 @@ export function CenterPanel() {
               <>
                 <ReextractButton fileId={node.id} problemCount={node.file.problem_count} />
                 <DownloadPdfButton url={api.fileRawUrl(node.id)} fileName={node.name} />
-                <ExportButton target="exam" id={node.id} name={node.name} />
+                <ExportButton
+                  target="exam"
+                  id={node.id}
+                  name={node.name}
+                  transcriptReady={transcriptReady}
+                />
                 <ExportButton target="variants" id={node.id} name={node.name} />
               </>
             ) : null}
