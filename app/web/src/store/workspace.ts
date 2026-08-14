@@ -29,6 +29,11 @@ import {
   type ProviderConfig,
 } from '@/lib/provider-config';
 import { isDescendantOf } from '@/lib/tree';
+import {
+  transcriptCacheKey,
+  transcriptSourceOf,
+  type TranscriptSource,
+} from '@/lib/transcript';
 import { variantCacheKey, variantModesOf, type VariantPickKind } from '@/lib/variant';
 import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { uploadTargetLabel } from '@/lib/upload-target';
@@ -119,6 +124,36 @@ export interface VariantEntry {
 
 /** 한 문항의 mode 별 변형 캐시. */
 export type VariantByMode = Partial<Record<VariantMode, VariantEntry>>;
+
+/** 판독본 상태. `done` 은 "판독 시도가 끝났다" 는 뜻이다(전문이 없을 수도 있다). */
+export type TranscriptStatus = 'idle' | 'running' | 'done' | 'error';
+
+/**
+ * 한 문항의 판독본(문항 텍스트화 결과). `transcripts[`${fileId}::${no}`]` 에 산다.
+ *
+ * **이 자리가 진행 표시와 배지의 단일 소스다**(`lib/transcript.ts` 참고).
+ * 전문은 서버가 저장한 값이고, 화면은 여기만 읽는다. 파일 상세의
+ * `has_transcript` 를 따로 보면 같은 사실의 사본이 생겨 어긋난다.
+ */
+export interface TranscriptEntry {
+  no: number;
+  /** 확정된 전문. 판독하지 못했으면 빈 문자열. */
+  text: string;
+  /** AI 판독(2차)이 흐르는 중의 부분 텍스트. 1차 디코딩은 델타가 없다. */
+  streamingText: string;
+  status: TranscriptStatus;
+  /** `pua` / `ai` / `manual`. 전문이 없으면 null. */
+  source: TranscriptSource | null;
+  /** 판독 실패·불가 이유(배지로 보여준다). */
+  note: string | null;
+  /** 이 문항이 어느 경로로 판독 중인지(진행 중에만 의미가 있다). */
+  route: 'pua' | 'ai' | null;
+  usage: Usage | null;
+  cost: Cost | null;
+  error: string | null;
+  /** 편집 저장 요청이 진행 중인지. */
+  saving: boolean;
+}
 
 export interface SolveProgress {
   running: boolean;
@@ -252,6 +287,14 @@ interface WorkspaceState {
    * 이 키 하나로 두 화면이 상태(캐시)를 공유한다.
    */
   variants: Record<string, VariantByMode>;
+
+  /**
+   * 판독본(문항 텍스트화). key = `${fileId}::${no}`.
+   *
+   * 진행 표시·출처 배지·내보내기 활성화가 **모두 이 자리만** 본다. 시험지를 열 때
+   * `loadTranscripts` 가 서버 저장본으로 채우고, 작업 이벤트와 편집 저장이 갱신한다.
+   */
+  transcripts: Record<string, TranscriptEntry>;
 
   /**
    * 특정 문항(file_id + problem_no)의 저장 풀이/on-demand 풀이 캐시.
@@ -493,6 +536,37 @@ interface WorkspaceState {
     opts?: { force?: boolean },
   ) => Promise<void>;
 
+  /**
+   * 그 시험지에 저장된 판독본을 조회해 `transcripts` 캐시를 채운다.
+   *
+   * 시험지를 열 때(`selectFile`)와 판독 작업이 끝난 뒤(`watchJob` 의 finally)에
+   * 부른다 — 이벤트로 받은 값과 서버 저장본을 마지막에 한 번 맞춘다.
+   * 판독 중인 자리는 덮지 않는다(흐르고 있는 결과가 옛 값으로 되돌아간다).
+   */
+  loadTranscripts: (fileId: string) => Promise<void>;
+
+  /**
+   * 문항을 텍스트로 옮기는 작업을 큐에 넣는다.
+   *
+   * `problemNumbers` 가 null 이면 시험지 전체다. 1차가 PDF 디코딩(AI 호출 0회)이라
+   * AI 연결이 없어도 유효한 작업이다. 이미 판독본이 있는 문항은 서버가 건너뛰고,
+   * 남는 게 없으면 400 `already_transcribed` 로 거절한다 — `opts.force` 로 뚫는다.
+   */
+  startTranscribe: (
+    problemNumbers: number[] | null,
+    opts?: { force?: boolean },
+  ) => Promise<void>;
+
+  /**
+   * 대조 화면에서 고친 판독본을 저장한다(출처가 `manual` 이 된다).
+   *
+   * **빈 문자열이면 판독본을 지운다**(되돌리는 경로). 실패는 토스트로 알리고
+   * 화면의 값을 바꾸지 않는다.
+   *
+   * @returns 저장 성공 여부(호출부가 편집 모드를 닫을지 결정한다).
+   */
+  saveTranscript: (fileId: string, no: number, text: string) => Promise<boolean>;
+
   sendChat: (message: string) => Promise<void>;
   handleNoteAddIntent: (
     intent: { problemNos: number[]; noteQuery: string | null },
@@ -528,6 +602,18 @@ const jobSubscriptions = new Map<string, AbortController>();
 /** 진행 중인 저장 변형 조회(file_id → 약속). 같은 파일을 겹쳐 조회하지 않는다. */
 const variantLoads = new Map<string, Promise<void>>();
 
+/** 진행 중인 저장 판독본 조회(file_id → 약속). */
+const transcriptLoads = new Map<string, Promise<void>>();
+
+/**
+ * 판독 작업이 채우기로 한 문항들(job_id → 문항 번호).
+ *
+ * 구독이 끝났는데 결과가 안 온 자리를 정리할 때 쓴다. `variantJobTargets` 과 같은
+ * 이유다 — "그 시험지의 running 전부" 를 정리하면 같은 시험지의 **다른** 판독
+ * 작업이 큐에서 잡아 둔 자리까지 지워진다.
+ */
+const transcribeJobTargets = new Map<string, number[]>();
+
 /** 생성 요청을 보내는 중인 (문항, 유형). 조회 대기 사이의 재진입을 막는다. */
 const variantStarting = new Set<string>();
 
@@ -551,6 +637,12 @@ function rememberVariantTargets(jobId: string, targets: VariantTargetRef[]): voi
   variantJobTargets.set(jobId, [...current, ...targets]);
 }
 
+/** 이 판독 작업이 채울 문항들을 기억한다. */
+function rememberTranscribeTargets(jobId: string, numbers: readonly number[]): void {
+  const current = transcribeJobTargets.get(jobId) ?? [];
+  transcribeJobTargets.set(jobId, [...current, ...numbers]);
+}
+
 /**
  * 작업 이벤트를 구독해 화면 상태에 반영한다.
  *
@@ -566,6 +658,17 @@ async function watchJob(job: Job): Promise<void> {
   const { setState, getState } = useWorkspace;
   const fileId = job.node_id;
   const isSolve = job.kind === 'solve';
+  const isTranscribe = job.kind === 'transcribe';
+  /** 판독본 자리를 갱신한다(없으면 만들어서). */
+  const touchTranscript = (no: number, patch: (entry: TranscriptEntry) => TranscriptEntry) => {
+    const key = transcriptCacheKey(fileId, no);
+    setState((state) => ({
+      transcripts: {
+        ...state.transcripts,
+        [key]: patch(state.transcripts[key] ?? emptyTranscript(no)),
+      },
+    }));
+  };
   /** 이 작업이 다루는 문항. variant 는 이벤트 data 의 no 를 그대로 쓴다. */
   const touch = (no: number, patch: (entry: SolutionEntry) => SolutionEntry) => {
     const key = variantKey(fileId, no);
@@ -608,11 +711,20 @@ async function watchJob(job: Job): Promise<void> {
                 : state.solve,
           }));
           // 진행 중이던 문항의 부분 텍스트를 이어서 보여준다.
-          if (event.current_no != null && event.partial_text) {
+          if (event.current_no != null) {
             const no = event.current_no;
             const text = event.partial_text;
-            if (isSolve) {
+            if (isSolve && text) {
               touch(no, (entry) => ({ ...entry, status: 'running', streamingText: text }));
+            }
+            // 판독은 1차 디코딩이 델타 없이 끝나므로 부분 텍스트가 없어도
+            // "판독 중" 자리는 되살려야 한다(새로고침 복구).
+            if (isTranscribe) {
+              touchTranscript(no, (entry) => ({
+                ...entry,
+                status: 'running',
+                streamingText: text,
+              }));
             }
           }
           break;
@@ -638,6 +750,20 @@ async function watchJob(job: Job): Promise<void> {
                 ? { ...state.solve, currentNo: event.no }
                 : state.solve,
           }));
+          if (isTranscribe) {
+            // `route` 로 이 문항이 디코딩인지 AI 인지 미리 알 수 있다(비용이 다르다).
+            const route = event.route === 'ai' ? 'ai' : event.route === 'pua' ? 'pua' : null;
+            touchTranscript(event.no, (entry) => ({
+              ...entry,
+              status: 'running',
+              streamingText: '',
+              route,
+              error: null,
+            }));
+            break;
+          }
+          // 풀이가 아닌 작업(변형)은 풀이 자리를 건드리지 않는다.
+          if (!isSolve) break;
           touch(event.no, (entry) => ({
             ...entry,
             status: 'running',
@@ -648,6 +774,15 @@ async function watchJob(job: Job): Promise<void> {
 
         case 'delta': {
           if (event.no == null) break;
+          if (isTranscribe) {
+            const no = event.no;
+            touchTranscript(no, (entry) => ({
+              ...entry,
+              status: 'running',
+              streamingText: entry.streamingText + event.text,
+            }));
+            break;
+          }
           const mode = eventVariantMode(event);
           if (!isSolve && mode) {
             const key = variantKey(fileId, event.no);
@@ -670,6 +805,38 @@ async function watchJob(job: Job): Promise<void> {
 
         case 'done': {
           if (event.no == null) break;
+          if (isTranscribe) {
+            const no = event.no;
+            setState((state) => ({
+              jobs: patchJobProgress(state.jobs, job.id, (item) => ({
+                ...item,
+                done_count: item.done_count + 1,
+              })),
+              totals:
+                // 1차 디코딩은 AI 호출이 0회다 — 호출로 세면 사용량이 부풀려진다.
+                event.usage || event.cost
+                  ? accumulate(state.totals, event.usage, event.cost)
+                  : state.totals,
+            }));
+            touchTranscript(no, (entry) => ({
+              ...entry,
+              status: 'done',
+              // `불가` 판정(transcript=null)은 **이유만** 남기고 전문을 지우지 않는다.
+              // AI 판정은 비결정적이라 그 변동으로 확보한 데이터를 잃으면 안 된다
+              // (서버 `_save_transcript_note` 와 같은 규칙).
+              text: event.transcript ?? entry.text,
+              streamingText: '',
+              source: event.transcript == null
+                ? entry.source
+                : transcriptSourceOf(event.transcript_source),
+              note: event.transcript_note ?? null,
+              route: null,
+              usage: event.usage,
+              cost: event.cost,
+              error: null,
+            }));
+            break;
+          }
           const mode = eventVariantMode(event);
           if (!isSolve && mode) {
             const key = variantKey(fileId, event.no);
@@ -718,6 +885,25 @@ async function watchJob(job: Job): Promise<void> {
 
         case 'error': {
           if (event.no == null) break;
+          if (isTranscribe) {
+            const no = event.no;
+            setState((state) => ({
+              jobs: patchJobProgress(state.jobs, job.id, (item) => ({
+                ...item,
+                done_count: item.done_count + 1,
+              })),
+            }));
+            // 전문은 건드리지 않는다(AI 연결이 없어 못 읽은 것이 이미 확보한
+            // 판독본을 지울 근거는 아니다).
+            touchTranscript(no, (entry) => ({
+              ...entry,
+              status: 'error',
+              streamingText: '',
+              route: null,
+              error: event.message,
+            }));
+            break;
+          }
           const mode = eventVariantMode(event);
           if (!isSolve && mode) {
             const key = variantKey(fileId, event.no);
@@ -790,11 +976,18 @@ async function watchJob(job: Job): Promise<void> {
     // 있는지와 무관하다 — 오답노트도 같은 캐시를 본다.
     const pending = variantJobTargets.get(job.id) ?? [];
     variantJobTargets.delete(job.id);
+    // 판독도 같다. 중단하면 시작조차 못 한 문항이 영원히 "판독 중" 으로 남는다.
+    const pendingTranscripts = transcribeJobTargets.get(job.id) ?? [];
+    transcribeJobTargets.delete(job.id);
     setState((state) => ({
       variants: pending.reduce(
         (variants, target) =>
           settleVariant(variants, variantKey(fileId, target.no), target.mode),
         state.variants,
+      ),
+      transcripts: pendingTranscripts.reduce(
+        (transcripts, no) => settleTranscript(transcripts, transcriptCacheKey(fileId, no)),
+        state.transcripts,
       ),
       ...(state.selectedFileId === fileId
         ? {
@@ -805,6 +998,9 @@ async function watchJob(job: Job): Promise<void> {
     }));
     void getState().loadJobs();
     void getState().loadUsageSummary();
+    // 판독본은 마지막에 서버 저장본으로 한 번 맞춘다. 작업이 저장한 이유(note)는
+    // 이벤트에 다 실리지 않고(AI 연결 부재 등), 진행의 단일 소스는 저장된 값이다.
+    if (isTranscribe) void getState().loadTranscripts(fileId);
   }
 }
 
@@ -923,6 +1119,23 @@ function clampLeftWidth(width: number): number {
   return Math.min(LEFT_MAX, Math.max(LEFT_MIN, Math.round(width)));
 }
 
+/** 아직 판독하지 않은 문항의 빈 자리. */
+function emptyTranscript(no: number): TranscriptEntry {
+  return {
+    no,
+    text: '',
+    streamingText: '',
+    status: 'idle',
+    source: null,
+    note: null,
+    route: null,
+    usage: null,
+    cost: null,
+    error: null,
+    saving: false,
+  };
+}
+
 function emptyEntry(no: number): SolutionEntry {
   return {
     no,
@@ -1028,6 +1241,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   solutionsStatus: 'idle',
   solve: emptySolve,
   variants: {},
+  transcripts: {},
   problemSolutions: {},
 
   messages: [],
@@ -1157,6 +1371,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       chatTruncatedBefore: 0,
       solutions: {},
       variants: {},
+      transcripts: {},
       problemSolutions: {},
     });
   },
@@ -1718,6 +1933,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     // 생성해 쿼터를 낭비하지 않는다(캐시는 file_id 로 키를 잡으므로 뒤늦게
     // 도착해도 다른 시험지를 오염시키지 않는다 — epoch 검사가 필요 없다).
     void get().loadVariants(id);
+    // 판독본도 같은 이유로 열 때 채운다. 출처 배지·진행 표시·텍스트 내보내기
+    // 활성화가 모두 이 캐시를 본다.
+    void get().loadTranscripts(id);
   },
 
   async selectNote(id: string) {
@@ -2493,6 +2711,161 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     }
   },
 
+  async loadTranscripts(fileId: string) {
+    const inFlight = transcriptLoads.get(fileId);
+    if (inFlight) return inFlight;
+
+    const load = (async () => {
+      try {
+        const { transcripts } = await api.getTranscripts(fileId);
+        set((state) => {
+          const next = { ...state.transcripts };
+          const seen = new Set<string>();
+          for (const item of transcripts) {
+            const key = transcriptCacheKey(fileId, item.no);
+            seen.add(key);
+            // 판독 중인 자리는 건드리지 않는다. 서버 저장본은 이전 판이라
+            // 덮으면 흐르고 있는 새 결과가 옛 글로 되돌아간다.
+            if (next[key]?.status === 'running') continue;
+            next[key] = {
+              ...emptyTranscript(item.no),
+              text: item.transcript ?? '',
+              status: 'done',
+              source: transcriptSourceOf(item.transcript_source),
+              note: item.transcript_note,
+            };
+          }
+          // 목록에서 빠진 문항은 판독본이 지워진 것이다(다른 창의 편집·재추출).
+          // 남겨 두면 화면이 서버에 없는 판독본을 계속 보여준다.
+          for (const [key, entry] of Object.entries(next)) {
+            if (!key.startsWith(`${fileId}::`) || seen.has(key)) continue;
+            if (entry.status === 'running' || entry.status === 'idle') continue;
+            next[key] = emptyTranscript(entry.no);
+          }
+          return { transcripts: next };
+        });
+      } catch {
+        // 판독본 조회 실패는 화면을 막지 않는다(실행은 여전히 가능).
+      } finally {
+        transcriptLoads.delete(fileId);
+      }
+    })();
+    transcriptLoads.set(fileId, load);
+    return load;
+  },
+
+  async startTranscribe(problemNumbers: number[] | null, opts = {}) {
+    const { force = false } = opts;
+    const { selectedFileId, fileDetail, model, effort, provider } = get();
+    if (!selectedFileId) {
+      get().showToast({ kind: 'info', message: '먼저 왼쪽에서 시험지 파일을 선택하세요.' });
+      return;
+    }
+
+    let created;
+    try {
+      created = await api.createJob({
+        kind: 'transcribe',
+        node_id: selectedFileId,
+        problem_numbers: problemNumbers,
+        force,
+        provider,
+        model,
+        effort,
+      });
+    } catch (error) {
+      // "이미 모두 텍스트로 옮겨져 있습니다" 같은 거절도 여기로 온다. 힌트가
+      // 빠져나올 방법("다시 판독")을 알려주므로 함께 보여준다. 화면의 판독본은
+      // 손대지 않는다 — 거절은 데이터를 잃을 이유가 아니다.
+      get().showToast({
+        kind: 'info',
+        message: toUserMessage(error),
+        hint: toUserHint(error),
+      });
+      return;
+    }
+
+    if (created.existing) {
+      // 서버가 겹치는 작업을 돌려줬다 = 이번 요청은 큐에 들어가지 않았다.
+      // 자리를 만들면 아무도 채우지 않아 유령 진행 표시가 된다(변형과 같은 규칙).
+      get().showToast({
+        kind: 'info',
+        message: '이 시험지의 문항 텍스트화가 이미 진행 중이라 새로 걸지 않았습니다.',
+        hint: '진행 중인 작업이 끝난 뒤 다시 눌러 주세요. 진행 상황은 상단 배너에 있습니다.',
+      });
+      await get().loadJobs();
+      void watchJob(created.job);
+      return;
+    }
+
+    // 진행 자리를 먼저 만든다(진행 표시의 단일 소스). 서버가 이미 판독한 문항을
+    // 건너뛰므로, 자리도 실제 대상(=아직 판독본이 없는 문항)에만 만든다.
+    const requested =
+      problemNumbers ?? (fileDetail?.problems ?? []).map((problem) => problem.no);
+    const targets = requested.filter((no) => {
+      if (force) return true;
+      return (get().transcripts[transcriptCacheKey(selectedFileId, no)]?.text ?? '') === '';
+    });
+    set((state) => {
+      const next = { ...state.transcripts };
+      for (const no of targets) {
+        const key = transcriptCacheKey(selectedFileId, no);
+        next[key] = { ...(next[key] ?? emptyTranscript(no)), status: 'running', error: null };
+      }
+      return { transcripts: next, activeTab: 'solutions' };
+    });
+    // 중간에 멈추면 이 자리들을 정리해야 한다(watchJob 의 finally).
+    rememberTranscribeTargets(created.job.id, targets);
+
+    get().showToast({
+      kind: 'success',
+      message: `${created.job.total}개 문항을 텍스트로 옮기기 시작했습니다.`,
+      hint: 'PDF 에서 바로 읽는 것이 1차라 대부분은 AI 호출 없이 끝납니다. 화면을 떠나도 계속 진행됩니다.',
+    });
+    await get().loadJobs();
+    void watchJob(created.job);
+  },
+
+  async saveTranscript(fileId: string, no: number, text: string) {
+    const key = transcriptCacheKey(fileId, no);
+    set((state) => ({
+      transcripts: {
+        ...state.transcripts,
+        [key]: { ...(state.transcripts[key] ?? emptyTranscript(no)), saving: true },
+      },
+    }));
+    try {
+      const saved = await api.saveTranscript(fileId, no, text);
+      set((state) => ({
+        transcripts: {
+          ...state.transcripts,
+          [key]: {
+            ...emptyTranscript(no),
+            text: saved.transcript ?? '',
+            // 지운 뒤에는 미판독으로 되돌린다 — 다음 재실행이 다시 대상으로 잡는다.
+            status: saved.transcript == null ? 'idle' : 'done',
+            source: transcriptSourceOf(saved.transcript_source),
+            note: saved.transcript_note,
+          },
+        },
+      }));
+      return true;
+    } catch (error) {
+      // 실패하면 화면의 값을 바꾸지 않는다(사용자가 고친 초안을 잃지 않게).
+      set((state) => ({
+        transcripts: state.transcripts[key]
+          ? { ...state.transcripts, [key]: { ...state.transcripts[key]!, saving: false } }
+          : state.transcripts,
+      }));
+      get().showToast({
+        kind: 'error',
+        message: toUserMessage(error),
+        hint: toUserHint(error),
+      });
+      return false;
+    }
+  },
+
   async sendChat(message: string) {
     const trimmed = message.trim();
     if (trimmed === '') return;
@@ -2902,6 +3275,30 @@ function settleVariant(
   return { ...variants, [key]: { ...variants[key], [mode]: next } };
 }
 
+/**
+ * 스트림이 done 없이 끝났을 때 그 문항의 'running' 을 정리한다.
+ *
+ * 판독은 델타 없이 끝나는 경로(1차 디코딩)가 있어 부분 텍스트를 결과로 승격할 수
+ * 없다. 이미 확보한 전문이 있으면 그것으로 되돌리고, 없으면 미판독으로 되돌린다
+ * (다음 실행이 다시 대상으로 잡는다).
+ */
+function settleTranscript(
+  transcripts: Record<string, TranscriptEntry>,
+  key: string,
+): Record<string, TranscriptEntry> {
+  const current = transcripts[key];
+  if (!current || current.status !== 'running') return transcripts;
+  return {
+    ...transcripts,
+    [key]: {
+      ...current,
+      status: current.text === '' ? 'idle' : 'done',
+      streamingText: '',
+      route: null,
+    },
+  };
+}
+
 function resetTargets(
   solutions: Record<number, SolutionEntry>,
   targets: number[] | null,
@@ -2970,6 +3367,8 @@ function resetJobSubscriptions(): void {
   variantJobTargets.clear();
   variantStarting.clear();
   variantLoads.clear();
+  transcribeJobTargets.clear();
+  transcriptLoads.clear();
 }
 
 export const __internal = {
@@ -2983,4 +3382,6 @@ export const __internal = {
   patchVariant,
   settleVariant,
   variantKey,
+  emptyTranscript,
+  settleTranscript,
 };
