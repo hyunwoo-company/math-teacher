@@ -145,6 +145,9 @@ def test_migration_preserves_data_and_adds_schema(tmp_path: Path) -> None:
                 "problem_no",
                 "crop_snapshot_path",
                 "memo",
+                # 판독본 스냅샷(v7). 담을 때 복사하고 원본이 지워져도 남는다.
+                "transcript",
+                "transcript_source",
                 "created_at",
             }
             indexes = {
@@ -249,7 +252,7 @@ def test_v2_db_gains_variants_table(tmp_path: Path) -> None:
 
         conn = storage.connect()
         try:
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 6
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 7
             assert "variants" in {
                 str(row["name"])
                 for row in conn.execute(
@@ -427,7 +430,7 @@ def test_v5_db_gains_transcript_columns(tmp_path: Path) -> None:
         config.use_data_dir(data_dir)
         storage.init_db()
         with storage.transaction() as conn:
-            assert storage.user_version(conn) == 6
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION
             problem = storage.get_problem(conn, "file1", 4)
             assert problem is not None
             assert problem["text"] == "옛 텍스트"
@@ -448,5 +451,84 @@ def test_v5_db_gains_transcript_columns(tmp_path: Path) -> None:
                 is True
             )
             assert storage.transcribed_numbers(conn, "file1") == {4}
+    finally:
+        config.use_data_dir(original)
+
+
+V6_NOTE_ITEMS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS note_items (
+    id TEXT PRIMARY KEY,
+    note_node_id TEXT NOT NULL,
+    source_node_id TEXT NULL,
+    source_name TEXT NOT NULL,
+    problem_no INTEGER NOT NULL,
+    crop_snapshot_path TEXT NOT NULL DEFAULT '',
+    memo TEXT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (note_node_id, source_node_id, problem_no)
+);
+PRAGMA user_version = 6;
+"""
+
+
+def test_v6_db_gains_note_item_transcript_snapshot(tmp_path: Path) -> None:
+    """v6 DB(노트 판독본 스냅샷 없음)를 열면 2열이 생기고 기존 항목은 남는다.
+
+    이미 담아 둔 항목은 NULL 로 남는다 — 담은 시점에 판독본이 없었던 것이 사실이라
+    지금 값을 만들어 넣으면 거짓이 된다.
+    """
+    data_dir = tmp_path / "v6-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "app.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(LEGACY_SCHEMA)
+        conn.executescript(V6_NOTE_ITEMS_SCHEMA)
+        conn.execute(
+            "INSERT INTO note_items"
+            " (id, note_node_id, source_node_id, source_name, problem_no,"
+            "  crop_snapshot_path, memo, created_at)"
+            " VALUES ('item1', 'note1', 'file1', '풍문고', 5,"
+            "  'note_crops/item1.png', '계산 실수', '2026-08-13T10:00:00+09:00')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        storage.init_db()
+        with storage.transaction() as conn:
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 7
+            assert {"transcript", "transcript_source"} <= storage.table_columns(
+                conn, "note_items"
+            )
+            item = storage.get_note_item(conn, "item1")
+            assert item is not None
+            assert item["memo"] == "계산 실수"
+            assert item["crop_snapshot_path"] == "note_crops/item1.png"
+            assert item["transcript"] is None
+            assert item["transcript_source"] is None
+            # 새 컬럼을 바로 쓸 수 있다.
+            assert (
+                storage.insert_note_item(
+                    conn,
+                    item_id="item2",
+                    note_node_id="note1",
+                    source_node_id="file1",
+                    source_name="풍문고",
+                    problem_no=6,
+                    crop_snapshot_path="",
+                    memo=None,
+                    transcript=r"값 \(x^{2}\)",
+                    transcript_source=storage.TRANSCRIPT_PUA,
+                )
+                is True
+            )
+            saved = storage.get_note_item(conn, "item2")
+            assert saved is not None
+            assert saved["transcript"] == r"값 \(x^{2}\)"
+            assert saved["transcript_source"] == storage.TRANSCRIPT_PUA
     finally:
         config.use_data_dir(original)

@@ -30,8 +30,9 @@ SECTION_NOTE: Final[str] = "note"
 
 # 스키마 버전. 1 = 최초, 2 = nodes.section / chat_messages.problem_no / note_items,
 # 3 = jobs(작업 큐), 4 = variants(변형 저장), 5 = problems.label(원문 번호 표기),
-# 6 = problems.transcript / transcript_source / transcript_note (문항 텍스트화).
-SCHEMA_VERSION: Final[int] = 6
+# 6 = problems.transcript / transcript_source / transcript_note (문항 텍스트화),
+# 7 = note_items.transcript / transcript_source (판독본 스냅샷).
+SCHEMA_VERSION: Final[int] = 7
 
 # `problems.transcript_source` 값. 출처마다 신뢰도가 다르므로 반드시 남긴다.
 #   pua    = PDF 텍스트 레이어 디코딩(AI 호출 0회, 결정적)
@@ -115,6 +116,12 @@ CREATE TABLE IF NOT EXISTS note_items (
     problem_no INTEGER NOT NULL,
     crop_snapshot_path TEXT NOT NULL DEFAULT '',
     memo TEXT NULL,
+    -- 판독본 **스냅샷**. 담은 시점의 `problems.transcript` 를 복사한 값이고,
+    -- 원본 시험지가 지워져도 텍스트로 내보낼 수 있어야 하므로 참조가 아니라
+    -- 복사다(크롭 스냅샷과 같은 규칙, 설계 §3-3).
+    -- 출처도 함께 복사한다 — 고지 문구가 출처마다 다르기 때문이다(§3-4).
+    transcript TEXT NULL,
+    transcript_source TEXT NULL,
     created_at TEXT NOT NULL,
     UNIQUE (note_node_id, source_node_id, problem_no)
 );
@@ -267,6 +274,15 @@ def migrate(conn: sqlite3.Connection) -> None:
         for column in ("transcript", "transcript_source", "transcript_note"):
             if column not in problem_columns:
                 conn.execute(f"ALTER TABLE problems ADD COLUMN {column} TEXT NULL")
+
+    note_item_columns = table_columns(conn, "note_items")
+    if note_item_columns:
+        # 판독본 스냅샷 2열. 이미 담아 둔 항목은 NULL 로 남는다 — 담은 시점에
+        # 판독본이 없었던 것이 사실이므로 지금 값을 만들어 넣으면 거짓이 된다
+        # (다시 담으면 그때의 판독본이 복사된다).
+        for column in ("transcript", "transcript_source"):
+            if column not in note_item_columns:
+                conn.execute(f"ALTER TABLE note_items ADD COLUMN {column} TEXT NULL")
 
     conn.executescript(POST_MIGRATION_SCHEMA)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -1280,6 +1296,10 @@ def _note_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "problem_no": int(row["problem_no"]),
         "crop_snapshot_path": row["crop_snapshot_path"],
         "memo": row["memo"],
+        # 판독본 스냅샷(v7). 마이그레이션 전에 열린 커넥션이 컬럼 없는 행을 줄
+        # 수 있으므로 `_optional_text` 로 방어적으로 읽는다.
+        "transcript": _optional_text(row, "transcript"),
+        "transcript_source": _optional_text(row, "transcript_source"),
         "created_at": row["created_at"],
     }
 
@@ -1306,14 +1326,32 @@ def insert_note_item(
     problem_no: int,
     crop_snapshot_path: str,
     memo: str | None,
+    transcript: str | None = None,
+    transcript_source: str | None = None,
 ) -> bool:
-    """노트 항목을 추가한다. 이미 있으면 아무것도 하지 않고 False."""
+    """노트 항목을 추가한다. 이미 있으면 아무것도 하지 않고 False.
+
+    Args:
+        conn: 열린 커넥션.
+        item_id: 새 항목 id.
+        note_node_id: 담을 오답노트 노드 id.
+        source_node_id: 출처 시험지 노드 id(원본이 지워지면 NULL 이 된다).
+        source_name: 출처 시험지 이름 **스냅샷**.
+        problem_no: 출처 문항 번호.
+        crop_snapshot_path: 크롭 PNG 스냅샷 상대경로(없으면 빈 문자열).
+        memo: 메모(없으면 None).
+        transcript: 담는 시점의 판독본 **스냅샷**(없으면 None).
+        transcript_source: 그 판독본의 출처(`pua` / `ai` / `manual`).
+
+    Returns:
+        실제로 넣었으면 True. 같은 (노트, 시험지, 문항)이 이미 있으면 False.
+    """
     cursor = conn.execute(
         """
         INSERT INTO note_items
             (id, note_node_id, source_node_id, source_name, problem_no,
-             crop_snapshot_path, memo, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             crop_snapshot_path, memo, transcript, transcript_source, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(note_node_id, source_node_id, problem_no) DO NOTHING
         """,
         (
@@ -1324,6 +1362,8 @@ def insert_note_item(
             problem_no,
             crop_snapshot_path,
             memo,
+            transcript,
+            transcript_source,
             now_iso(),
         ),
     )
