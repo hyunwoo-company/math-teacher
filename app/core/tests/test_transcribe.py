@@ -16,11 +16,13 @@ from typing import Any
 
 import pytest
 from conftest import StubProvider, create_job, upload_test_pdf, wait_job
+from fastapi import status
 from fastapi.testclient import TestClient
 
 import ai_service
 import prompts
 import storage
+from errors import ApiError
 from providers.base import DeltaEvent, DoneEvent, ProviderEvent
 
 # 1차 디코딩만으로 끝나는 문항(AI 호출 0회)과, 그림이 있어 AI 로 넘어가는 문항.
@@ -244,10 +246,48 @@ def test_figure_problem_falls_back_to_ai(
     assert row["transcript_note"] is None
 
 
+def test_impossible_verdict_keeps_the_existing_transcript(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`불가` 판정이 **이미 확보한 전문을 지우지 않는다.**
+
+    AI 판정은 비결정적이다. 같은 이미지에서 어제는 `가능`, 오늘은 `불가` 가 나올 수
+    있고 그 변동으로 데이터를 잃으면 안 된다. 이유(note)만 갱신한다.
+    """
+    node_id = upload_test_pdf(client)["node"]["id"]
+
+    _use(monkeypatch, TranscribeProvider())
+    first = create_job(
+        client, kind="transcribe", node_id=node_id, problem_numbers=[FIGURE]
+    )
+    wait_job(client, first["job"]["id"])
+    saved = _problems(node_id)[FIGURE]["transcript"]
+    assert saved
+
+    # 같은 문항을 force 로 다시 판독했는데 이번에는 `불가` 라고 답한다.
+    _use(
+        monkeypatch,
+        TranscribeProvider(verdict="불가 - 도형이 있어 옮길 수 없습니다", body=None),
+    )
+    again = create_job(
+        client,
+        kind="transcribe",
+        node_id=node_id,
+        problem_numbers=[FIGURE],
+        force=True,
+    )
+    assert wait_job(client, again["job"]["id"])["status"] == "done"
+
+    row = _problems(node_id)[FIGURE]
+    assert row["transcript"] == saved  # 전문은 보존된다
+    assert row["transcript_source"] == storage.TRANSCRIPT_AI
+    assert "도형" in (row["transcript_note"] or "")  # 이유만 갱신된다
+
+
 def test_ai_impossible_verdict_stores_reason_only(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`불가` 판정이면 전문은 비우고 이유만 남긴다(내보내기는 이미지로 폴백)."""
+    """전문이 없던 문항이 `불가` 면 전문은 계속 없고 이유만 남는다."""
     provider = TranscribeProvider(
         verdict="불가 - 도형이 있어 옮길 수 없습니다", body=None
     )
@@ -265,6 +305,63 @@ def test_ai_impossible_verdict_stores_reason_only(
     assert "도형" in (row["transcript_note"] or "")
     # 다시 실행하면 또 시도한다(불가는 '이미 판독됨' 이 아니다).
     assert storage_transcribed(node_id) == set()
+
+
+# ── AI 연결이 없을 때 ───────────────────────────────────────────────
+
+
+def _no_provider(requested: str, api_key: str | None) -> Any:
+    raise ApiError(
+        status.HTTP_409_CONFLICT,
+        "no_provider",
+        "사용할 수 있는 AI 연결이 없습니다.",
+        "Claude Code 에 로그인하거나 API 키를 등록하세요.",
+    )
+
+
+def test_works_without_any_ai_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AI 연결이 없어도** 디코딩 가능한 문항은 저장되고 작업은 `done` 이다.
+
+    이 기능의 요점이 "AI 호출 0회로 텍스트를 얻는다" 이므로, AI 가 없다고 작업을
+    시작조차 못 하게 하면 설계 목적이 깎인다.
+    """
+    monkeypatch.setattr(ai_service, "resolve_provider", _no_provider)
+    node_id = upload_test_pdf(client)["node"]["id"]
+
+    # 등록 자체가 409 로 막히지 않아야 한다(create_job 이 201 을 단정한다).
+    body = create_job(
+        client,
+        kind="transcribe",
+        node_id=node_id,
+        problem_numbers=[DECODED[0], FIGURE],
+    )
+    final = wait_job(client, body["job"]["id"])
+    assert final["status"] == "done"
+    assert final["done_count"] == 2
+
+    rows = _problems(node_id)
+    # 디코딩 문항은 정상 저장된다.
+    assert rows[DECODED[0]]["transcript_source"] == storage.TRANSCRIPT_PUA
+    assert rows[DECODED[0]]["transcript"]
+    # AI 가 필요한 문항만 이유가 남는다.
+    assert rows[FIGURE]["transcript"] is None
+    assert "AI 연결" in (rows[FIGURE]["transcript_note"] or "")
+
+
+def test_solve_still_requires_a_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """풀이는 그대로다 — AI 가 없으면 할 수 있는 일이 없으므로 409 로 막는다."""
+    monkeypatch.setattr(ai_service, "resolve_provider", _no_provider)
+    node_id = upload_test_pdf(client)["node"]["id"]
+    for kind, extra in (("solve", {}), ("variant", {"no": 1, "modes": ["number"]})):
+        response = client.post(
+            "/api/jobs", json={"kind": kind, "node_id": node_id, **extra}
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["error_code"] == "no_provider"
 
 
 # ── 작업: 건너뛰기·force ────────────────────────────────────────────
@@ -400,7 +497,7 @@ async def test_events_separate_decoded_from_ai_calls(client: TestClient) -> None
         (name, data)
         async for name, data in ai_service.transcribe_events(
             node_id=node_id,
-            provider=provider,
+            provider_resolver=lambda: provider,
             targets=targets,
             model="claude-sonnet-5",
             effort="low",

@@ -710,6 +710,46 @@ def set_transcript(
     return int(cursor.rowcount or 0) > 0
 
 
+def set_transcript_note(
+    conn: sqlite3.Connection,
+    *,
+    node_id: str,
+    no: int,
+    note: str | None,
+    overwrite_manual: bool = False,
+) -> bool:
+    """전문은 그대로 두고 실패·불가 이유만 갱신한다.
+
+    AI 판정은 **비결정적**이다. 같은 이미지에서 어제는 `가능`, 오늘은 `불가` 가
+    나올 수 있고 그 변동이 이미 확보한 전문을 지워서는 안 된다. 그래서 `불가`
+    판정은 이유만 남기고 `transcript` / `transcript_source` 는 건드리지 않는다
+    (전문이 없던 문항은 그대로 NULL 이므로 결과가 같다).
+
+    Args:
+        conn: 열린 커넥션.
+        node_id: 시험지 노드 id.
+        no: 문항 번호.
+        note: 실패·불가 이유(지우려면 None).
+        overwrite_manual: True 면 `manual` 판독본에도 이유를 남긴다.
+
+    Returns:
+        실제로 쓴 행이 있으면 True.
+    """
+    guard = (
+        ""
+        if overwrite_manual
+        else " AND (transcript_source IS NULL OR transcript_source != ?)"
+    )
+    params: list[Any] = [note, node_id, no]
+    if not overwrite_manual:
+        params.append(TRANSCRIPT_MANUAL)
+    cursor = conn.execute(
+        f"UPDATE problems SET transcript_note = ? WHERE node_id = ? AND no = ?{guard}",
+        tuple(params),
+    )
+    return int(cursor.rowcount or 0) > 0
+
+
 def transcribed_numbers(conn: sqlite3.Connection, node_id: str) -> set[int]:
     """판독본이 있는 문항 번호 집합 (`solved_numbers` 와 같은 역할).
 

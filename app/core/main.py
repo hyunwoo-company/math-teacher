@@ -677,8 +677,15 @@ async def create_job(
     그것을 돌려준다(`existing=true`). 버튼을 두 번 눌러 쿼터를 두 배로 쓰는 것을
     막는다.
     """
-    provider = ai_service.resolve_provider(payload.provider, _api_key(x_api_key))
-    model = ai_service.resolve_model(payload.model, provider.name)
+    # 프로바이더 해석 시점이 kind 마다 다르다.
+    #   solve / variant : AI 없이는 할 일이 없다 -> 지금 해석하고 없으면 409.
+    #   transcribe      : 1차(PDF 디코딩)만으로도 유효하다 -> 지연 해석. 여기서
+    #                     막으면 AI 호출 0회로 끝나는 시험지도 시작조차 못 한다.
+    resolver = ai_service.make_provider_resolver(payload.provider, _api_key(x_api_key))
+    if payload.kind == "transcribe":
+        model = ai_service.resolve_model_optional(payload.model, resolver)
+    else:
+        model = ai_service.resolve_model(payload.model, resolver().name)
 
     existing = await run_in_threadpool(_find_overlapping_job, payload)
     if existing is not None:
@@ -712,7 +719,7 @@ async def create_job(
             total=len(numbers),
             factory=jobs.solve_factory(
                 node_id=payload.node_id,
-                provider=provider,
+                provider=resolver(),
                 mode=mode,
                 targets=targets,
                 model=model,
@@ -722,6 +729,7 @@ async def create_job(
     elif payload.kind == "transcribe":
         # 대상 수 == AI 호출 수가 **아니다.** 1차 디코딩으로 끝나는 문항은
         # 프로바이더를 건드리지 않는다(집계는 진행 이벤트가 알려준다).
+        # 그래서 프로바이더가 아니라 **지연 해석 함수**를 넘긴다.
         transcribe_targets, node_name = await run_in_threadpool(
             partial(
                 ai_service.plan_transcribe_job,
@@ -745,7 +753,7 @@ async def create_job(
             total=len(numbers),
             factory=jobs.transcribe_factory(
                 node_id=payload.node_id,
-                provider=provider,
+                provider_resolver=resolver,
                 targets=transcribe_targets,
                 model=model,
                 effort=payload.effort,
@@ -790,7 +798,7 @@ async def create_job(
             total=len(variant_targets),
             factory=jobs.variant_batch_factory(
                 node_id=payload.node_id,
-                provider=provider,
+                provider=resolver(),
                 mode=mode,
                 targets=variant_targets,
                 model=model,

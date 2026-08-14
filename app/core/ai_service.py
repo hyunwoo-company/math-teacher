@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import base64
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from functools import cache
 from typing import Any, Final, NamedTuple
 
 import anyio
@@ -121,6 +122,56 @@ def resolve_provider(requested: str, api_key: str | None) -> Provider:
         "사용할 수 있는 AI 연결이 없습니다.",
         "Claude Code 에 로그인하거나(구독 모드), 설정에서 Anthropic API 키를 등록하세요.",
     )
+
+
+#: 프로바이더를 **필요한 순간에** 해석하는 함수. 쓸 수 없으면 `ApiError`(409) 를
+#: 올린다. 텍스트화처럼 AI 가 없어도 절반은 성립하는 작업이 쓴다.
+ProviderResolver = Callable[[], Provider]
+
+
+def make_provider_resolver(requested: str, api_key: str | None) -> ProviderResolver:
+    """`resolve_provider` 를 지연 호출하는 함수를 만든다.
+
+    결과는 한 번만 계산해 재사용한다(작업 하나가 프로바이더를 여러 번 만들지
+    않게). 해석이 실패하면 캐시하지 않으므로, 큐에서 기다리는 동안 AI 연결이
+    생기면 그때부터 쓸 수 있다.
+
+    Args:
+        requested: `auto | subscription | apikey | agy`.
+        api_key: 요청/설정에서 얻은 Anthropic API 키(없으면 None).
+
+    Returns:
+        호출하면 프로바이더를 돌려주는(또는 `ApiError` 를 올리는) 함수.
+    """
+
+    @cache
+    def resolver() -> Provider:
+        return resolve_provider(requested, api_key)
+
+    return resolver
+
+
+def resolve_model_optional(model: str | None, resolver: ProviderResolver) -> str:
+    """프로바이더가 있으면 그에 맞춰 모델을 검증하고, 없으면 후보를 그대로 쓴다.
+
+    AI 연결이 없는데 모델 검증으로 400 을 내면, **디코딩만으로 끝나는 작업까지
+    막힌다.** 모델은 AI 를 실제로 부를 때만 쓰이므로 그때까지 미룬다.
+
+    Args:
+        model: 요청한 모델 id(없으면 None).
+        resolver: `make_provider_resolver` 가 만든 지연 해석 함수.
+
+    Returns:
+        검증된 모델 id, 또는 (프로바이더가 없을 때) 요청 후보/기본값.
+
+    Raises:
+        ApiError: 프로바이더는 있는데 그 프로바이더가 모르는 모델일 때(400).
+    """
+    try:
+        provider = resolver()
+    except ApiError:
+        return (model or pricing.DEFAULT_MODEL).strip()
+    return resolve_model(model, provider.name)
 
 
 def resolve_model(model: str | None, provider: str = "auto") -> str:
@@ -1202,10 +1253,28 @@ def _save_transcript(
         )
 
 
+def _save_transcript_note(
+    *, node_id: str, no: int, note: str | None, overwrite_manual: bool
+) -> bool:
+    """이유만 저장하고 전문은 그대로 둔다 (블로킹).
+
+    `불가` 판정이나 AI 연결 부재는 **이미 확보한 전문을 지울 근거가 아니다.**
+    AI 판정은 비결정적이라 같은 이미지에서 다른 답이 나올 수 있다.
+    """
+    with storage.transaction() as conn:
+        return storage.set_transcript_note(
+            conn,
+            node_id=node_id,
+            no=no,
+            note=note,
+            overwrite_manual=overwrite_manual,
+        )
+
+
 async def transcribe_events(
     *,
     node_id: str,
-    provider: Provider,
+    provider_resolver: ProviderResolver,
     targets: Sequence[dict[str, Any]],
     model: str,
     effort: Effort,
@@ -1218,13 +1287,18 @@ async def transcribe_events(
     더한다.
 
     * `problem.route`: 이 문항이 `pua`(디코딩) 인지 `ai` 인지. 미리 알 수 있다.
-    * `done.source`: 실제로 저장한 출처(`pua` / `ai`, 불가면 None).
+    * `done.source`: 이번 실행이 저장한 출처(`pua` / `ai`, 저장 안 했으면 None).
     * `done.decoded_count` / `done.ai_count`: 그 시점까지의 누적.
     * `end.decoded_count` / `end.ai_count` / `end.unavailable_count`: 최종 집계.
 
+    **AI 연결이 없어도 유효한 작업이다.** 프로바이더는 2차 경로가 실제로 필요한
+    문항에서 처음 해석하고, 쓸 수 없으면 그 문항만 이유를 남기고 넘어간다
+    (1차로 끝난 문항은 이미 저장돼 있고 작업은 `done` 으로 끝난다).
+
     Args:
         node_id: 시험지 노드 id.
-        provider: 2차 경로에 쓸 프로바이더(1차만으로 끝나면 호출되지 않는다).
+        provider_resolver: 2차 경로에 쓸 프로바이더를 **필요할 때** 해석하는 함수.
+            1차만으로 끝나면 한 번도 불리지 않는다.
         targets: 대상 문항들. 앞에서부터 순차로 처리한다.
         model: 모델 id.
         effort: 추론 강도.
@@ -1309,6 +1383,31 @@ async def transcribe_events(
                 )
                 continue
 
+            try:
+                provider = provider_resolver()
+            except ApiError as exc:
+                # AI 연결이 없어도 작업 전체를 죽이지 않는다. 1차로 끝난 문항은
+                # 이미 저장됐고, 이 문항만 이유를 남긴다(전문은 건드리지 않는다).
+                logger.info("AI 연결이 없어 2차 판독을 건너뜁니다 (no=%s)", no)
+                await run_in_threadpool(
+                    _save_transcript_note,
+                    node_id=node_id,
+                    no=no,
+                    note=f"AI 연결이 없어 판독하지 못했습니다. ({exc.message})",
+                    overwrite_manual=force,
+                )
+                unavailable_count += 1
+                yield (
+                    "error",
+                    {
+                        "no": no,
+                        "error_code": exc.error_code,
+                        "message": exc.message,
+                        "hint": exc.hint,
+                    },
+                )
+                continue
+
             ai_count += 1
             try:
                 async for chunk in provider.solve_problem(
@@ -1328,20 +1427,27 @@ async def transcribe_events(
 
                     reading = parse_transcription(chunk["text"])
                     if reading.transcript is None:
+                        # `불가` 는 **이유만** 남긴다. 전문을 지우지 않는다 — AI
+                        # 판정은 비결정적이라 어제 `가능` 이던 것이 오늘 `불가` 로
+                        # 나올 수 있고, 그 변동으로 데이터를 잃으면 안 된다.
                         unavailable_count += 1
-                    await run_in_threadpool(
-                        _save_transcript,
-                        node_id=node_id,
-                        no=no,
-                        transcript=reading.transcript,
-                        source=(
-                            storage.TRANSCRIPT_AI
-                            if reading.transcript is not None
-                            else None
-                        ),
-                        note=reading.note,
-                        overwrite_manual=force,
-                    )
+                        await run_in_threadpool(
+                            _save_transcript_note,
+                            node_id=node_id,
+                            no=no,
+                            note=reading.note,
+                            overwrite_manual=force,
+                        )
+                    else:
+                        await run_in_threadpool(
+                            _save_transcript,
+                            node_id=node_id,
+                            no=no,
+                            transcript=reading.transcript,
+                            source=storage.TRANSCRIPT_AI,
+                            note=None,
+                            overwrite_manual=force,
+                        )
                     usage = chunk["usage"]
                     cost = chunk["cost"]
                     has_usage = _accumulate(total_usage, usage) or has_usage
