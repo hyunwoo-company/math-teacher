@@ -79,12 +79,16 @@ export interface ApiClient {
    * `target` 이 무엇을(시험지/변형/오답노트), `format` 이 어떤 형식으로,
    * `include` 가 문제만인지 해설까지인지를 정한다. 파일명은 서버
    * `Content-Disposition` 을 우선한다.
+   *
+   * `source` 는 문서 맨 끝에 한 줄로 들어갈 출처(예: 학원 이름)다. 선택이며
+   * 생략하면 출처 없는 기존 문서가 그대로 나온다.
    */
   exportDocument(
     target: ExportTarget,
     id: string,
     format: ExportFormat,
     include: ExportInclude,
+    source?: string,
   ): Promise<{ blob: Blob; filename: string | null }>;
 
   /** 저장된 변형 목록(시험지를 열 때 스토어를 채운다). */

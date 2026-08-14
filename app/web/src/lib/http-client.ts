@@ -327,6 +327,7 @@ export const httpClient: ApiClient = {
     id: string,
     format: ExportFormat,
     include: ExportInclude,
+    source?: string,
   ): Promise<{ blob: Blob; filename: string | null }> {
     // 바이너리 다운로드. fetch 로 받으므로 헤더 인증(authHeaders)과 ?access= 를 함께 건다
     // (백엔드는 이 경로들에 두 방식 모두 허용). 파일명은 서버 Content-Disposition 우선.
@@ -337,7 +338,12 @@ export const httpClient: ApiClient = {
         : target === 'variants'
           ? `/api/files/${encoded}/variants`
           : `/api/files/${encoded}`;
-    const path = `${base}/export.${format}?include=${include}`;
+    // 출처는 값이 있을 때만 붙인다. 빈 문자열을 보내면 서버가 문서 끝에 빈 줄을
+    // 넣지는 않지만(공백은 걸러진다), 굳이 의미 없는 쿼리를 남기지 않는다.
+    const trimmedSource = source?.trim() ?? '';
+    const path =
+      `${base}/export.${format}?include=${include}` +
+      (trimmedSource === '' ? '' : `&source=${encodeURIComponent(trimmedSource)}`);
     let response: Response;
     try {
       response = await fetch(withAccess(url(path)), {

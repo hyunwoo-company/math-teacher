@@ -74,6 +74,9 @@ def build_hwpx(doc: ExportDoc) -> bytes:
         elif isinstance(block, Text):
             for line in block.text.split("\n"):
                 document.add_paragraph(line)
+    if doc.footer:
+        # 출처 한 줄. 서식을 지정하지 않는 이 모듈의 방침대로 기본 문단으로 넣는다.
+        document.add_paragraph(doc.footer)
     return document.to_bytes()
 
 

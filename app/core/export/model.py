@@ -51,10 +51,13 @@ class ExportDoc:
     Attributes:
         title: 문서 상단 제목.
         blocks: 본문 블록들(순서대로 렌더한다).
+        footer: 문서 맨 끝에 넣을 출처 한 줄. None 이면 아무것도 넣지 않는다
+            (기본값이라 기존 호출부는 지금과 같은 문서를 얻는다).
     """
 
     title: str
     blocks: Sequence[Block]
+    footer: str | None = None
 
 
 __all__ = ["Block", "ExportDoc", "Heading", "Image", "Text"]

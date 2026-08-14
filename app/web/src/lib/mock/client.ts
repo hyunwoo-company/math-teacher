@@ -722,13 +722,18 @@ export const mockClient: ApiClient = {
     id: string,
     format: ExportFormat,
     include: ExportInclude,
+    source?: string,
   ): Promise<{ blob: Blob; filename: string | null }> {
     await sleep(LATENCY_MS);
     requireAuth();
     const node = findNode(id);
     // 목은 실제 문서를 만들지 않는다. 다운로드 흐름(blob→a[download]) 확인용 더미.
+    // 출처는 서버가 문서 끝에 넣는 값이라 목에서도 내용에만 반영한다.
     const type = format === 'hwpx' ? HWPX_MEDIA_TYPE : DOCX_MEDIA_TYPE;
-    const blob = new Blob([`mock ${format}: ${target}/${node.name}/${include}`], { type });
+    const footer = source == null || source.trim() === '' ? '' : `/${source.trim()}`;
+    const blob = new Blob([`mock ${format}: ${target}/${node.name}/${include}${footer}`], {
+      type,
+    });
     return { blob, filename: null };
   },
 

@@ -3,7 +3,7 @@
  * jsdom 에는 URL.createObjectURL 이 없으므로 대역으로 채운다.
  */
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExportButton } from '@/components/center/ExportButton';
@@ -94,7 +94,7 @@ describe('ExportButton', () => {
     await user.click(screen.getByRole('menuitem', { name: label }));
 
     await waitFor(() =>
-      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, format, include),
+      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, format, include, undefined),
     );
     await settleExport();
   });
@@ -108,7 +108,7 @@ describe('ExportButton', () => {
     await user.click(screen.getByRole('menuitem', { name: '문제만 · HWPX' }));
 
     await waitFor(() =>
-      expect(spy).toHaveBeenCalledWith('variants', MOCK_FILE_ID, 'hwpx', 'problems'),
+      expect(spy).toHaveBeenCalledWith('variants', MOCK_FILE_ID, 'hwpx', 'problems', undefined),
     );
     await settleExport();
   });
@@ -132,6 +132,55 @@ describe('ExportButton', () => {
     expect(clickSpy).toHaveBeenCalled();
     // `.pdf` 는 벗기고 구성에 맞는 접미사를 붙인다.
     expect(downloadName).toBe('풍문고_문제와해설.hwpx');
+  });
+
+  it('출처를 입력하면 내보내기 요청에 실려 간다', async () => {
+    const user = userEvent.setup();
+    const spy = vi.spyOn(api, 'exportDocument');
+    render(<ExportButton target="exam" id={MOCK_FILE_ID} name="풍문고.pdf" />);
+
+    await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
+    await user.type(screen.getByLabelText('출처'), 'HY EDU');
+    // 입력하는 동안 드롭다운이 닫히면 안 된다.
+    expect(screen.getByRole('menuitem', { name: '문제만 · DOCX' })).toBeInTheDocument();
+    await user.click(screen.getByRole('menuitem', { name: '문제만 · DOCX' }));
+
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, 'docx', 'problems', 'HY EDU'),
+    );
+    await settleExport();
+  });
+
+  it('출처가 비어 있으면 인자를 보내지 않는다', async () => {
+    const user = userEvent.setup();
+    const spy = vi.spyOn(api, 'exportDocument');
+    render(<ExportButton target="exam" id={MOCK_FILE_ID} name="풍문고.pdf" />);
+
+    await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
+    await user.type(screen.getByLabelText('출처'), '   ');
+    await user.click(screen.getByRole('menuitem', { name: '문제만 · DOCX' }));
+
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith('exam', MOCK_FILE_ID, 'docx', 'problems', undefined),
+    );
+    await settleExport();
+  });
+
+  it('마지막 출처를 기억해 다음 내보내기에 채워 둔다', async () => {
+    const user = userEvent.setup();
+    render(<ExportButton target="exam" id={MOCK_FILE_ID} name="풍문고.pdf" />);
+
+    await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
+    await user.type(screen.getByLabelText('출처'), 'HY EDU');
+    await user.click(screen.getByRole('menuitem', { name: '문제만 · DOCX' }));
+    await settleExport();
+    expect(window.localStorage.getItem('export.source')).toBe('HY EDU');
+
+    // 다시 열면(=새로 마운트해도) 저장된 값이 입력란에 들어 있다.
+    cleanup();
+    render(<ExportButton target="exam" id={MOCK_FILE_ID} name="풍문고.pdf" />);
+    await user.click(screen.getByRole('button', { name: /문제 내보내기/ }));
+    await waitFor(() => expect(screen.getByLabelText('출처')).toHaveValue('HY EDU'));
   });
 
   it('실패하면 토스트를 띄우고 버튼이 다시 활성화된다', async () => {

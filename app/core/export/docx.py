@@ -19,7 +19,7 @@ from docx.document import Document as DocxDocument
 from docx.enum.text import WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, Length, Mm, Pt
+from docx.shared import Inches, Length, Mm, Pt, RGBColor
 from PIL import Image as PilImage
 
 from export import layout
@@ -53,6 +53,10 @@ _HEADING_FONT_SIZES: Final[Mapping[str, Length]] = {
     "Heading 2": Pt(13),
     "Heading 3": Pt(11),
 }
+# 출처(`ExportDoc.footer`) 한 줄의 서식. 본문(10pt)보다 작은 회색이라 문서 끝에
+# 붙어도 문제·해설을 읽는 데 방해가 되지 않는다.
+_FOOTER_FONT_SIZE: Final[Length] = Pt(8)
+_FOOTER_FONT_COLOR: Final[RGBColor] = RGBColor(0x80, 0x80, 0x80)
 # 언어권별 폰트 지정. python-docx 의 `font.name` 은 ascii/hAnsi 만 건드리는데,
 # 한글은 eastAsia, 수학 기호는 cs 를 따라가므로 네 가지를 모두 넣어야 한다.
 _FONT_ATTRIBUTES: Final[tuple[str, ...]] = (
@@ -194,6 +198,11 @@ def build_docx(doc: ExportDoc) -> bytes:
         elif isinstance(block, Text):
             for line in block.text.split("\n"):
                 document.add_paragraph(line)
+    if doc.footer:
+        # 출처는 문서 맨 끝 한 줄. 본문과 섞이지 않게 작은 회색 글씨로 낸다.
+        run = document.add_paragraph().add_run(doc.footer)
+        run.font.size = _FOOTER_FONT_SIZE
+        run.font.color.rgb = _FOOTER_FONT_COLOR
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()

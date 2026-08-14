@@ -132,8 +132,24 @@ def _solution_blocks(solution: str) -> list[Block]:
     return blocks
 
 
+def _footer(source: str | None) -> str | None:
+    """출처를 문서 꼬리말 값으로 정규화한다.
+
+    Args:
+        source: 호출자가 준 출처. None 이거나 공백뿐이면 넣지 않는다.
+
+    Returns:
+        앞뒤 공백을 턴 출처. 넣을 것이 없으면 None.
+    """
+    return (source or "").strip() or None
+
+
 def build_exam_doc(
-    *, title: str, items: Sequence[ExamItem], include_full: bool
+    *,
+    title: str,
+    items: Sequence[ExamItem],
+    include_full: bool,
+    source: str | None = None,
 ) -> ExportDoc:
     """시험지 문서를 조립한다.
 
@@ -144,6 +160,7 @@ def build_exam_doc(
         title: 문서 제목(시험지 이름).
         items: 번호 순으로 정렬된 문항 목록.
         include_full: True 면 풀이까지 넣는다.
+        source: 문서 끝에 넣을 출처. None/빈 문자열이면 넣지 않는다.
 
     Returns:
         조립된 문서.
@@ -154,11 +171,15 @@ def build_exam_doc(
         blocks.append(Image(item.image))
         if include_full and item.solution:
             blocks.extend(_solution_blocks(item.solution))
-    return ExportDoc(title=title, blocks=blocks)
+    return ExportDoc(title=title, blocks=blocks, footer=_footer(source))
 
 
 def build_variants_doc(
-    *, title: str, items: Sequence[VariantItem], include_full: bool
+    *,
+    title: str,
+    items: Sequence[VariantItem],
+    include_full: bool,
+    source: str | None = None,
 ) -> ExportDoc:
     """변형 문서를 조립한다.
 
@@ -169,6 +190,7 @@ def build_variants_doc(
         title: 문서 제목(예: `<시험지명> 변형 문제`).
         items: (번호, mode) 순으로 정렬된 변형 목록.
         include_full: True 면 `## 정답` / `## 풀이` 까지 넣는다.
+        source: 문서 끝에 넣을 출처. None/빈 문자열이면 넣지 않는다.
 
     Returns:
         조립된 문서.
@@ -190,11 +212,15 @@ def build_variants_doc(
                 continue
             blocks.append(Heading(_heading_text(section_title), 3))
             blocks.append(Text(body))
-    return ExportDoc(title=title, blocks=blocks)
+    return ExportDoc(title=title, blocks=blocks, footer=_footer(source))
 
 
 def build_note_doc(
-    *, title: str, items: Sequence[NoteItem], include_full: bool
+    *,
+    title: str,
+    items: Sequence[NoteItem],
+    include_full: bool,
+    source: str | None = None,
 ) -> ExportDoc:
     """오답노트 문서를 조립한다.
 
@@ -204,6 +230,7 @@ def build_note_doc(
         title: 문서 제목(노트 이름).
         items: 담은 순서의 항목 목록.
         include_full: True 면 원본 문항의 저장된 풀이까지 넣는다.
+        source: 문서 끝에 넣을 출처. None/빈 문자열이면 넣지 않는다.
 
     Returns:
         조립된 문서.
@@ -217,7 +244,7 @@ def build_note_doc(
             blocks.append(Text(f"메모: {to_plain_text(item.memo)}"))
         if include_full and item.solution:
             blocks.extend(_solution_blocks(item.solution))
-    return ExportDoc(title=title, blocks=blocks)
+    return ExportDoc(title=title, blocks=blocks, footer=_footer(source))
 
 
 __all__ = [

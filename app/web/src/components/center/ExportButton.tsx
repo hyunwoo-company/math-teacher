@@ -36,6 +36,11 @@ const TARGET_LABEL: Record<ExportTarget, string> = {
   note: '오답노트',
 };
 
+/** 마지막으로 쓴 출처를 기억해 두는 localStorage 키. */
+const SOURCE_STORAGE_KEY = 'export.source';
+/** 출처 입력 상한(백엔드 `source` 쿼리와 같은 값). */
+const SOURCE_MAX_LENGTH = 100;
+
 /** 서버가 파일명을 안 주면 쓸 이름(`.pdf` 는 벗긴다). */
 function fallbackName(
   name: string,
@@ -59,8 +64,15 @@ function fallbackName(
 export function ExportButton({ target, id, name, className }: ExportButtonProps) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [source, setSource] = useState('');
   const showToast = useWorkspace((state) => state.showToast);
   const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // 기억해 둔 출처를 채운다. `useState` 초기값으로 읽으면 정적 내보내기의 서버
+  // 렌더에서 localStorage 가 없어 깨지므로 마운트 후에 읽는다.
+  useEffect(() => {
+    setSource(window.localStorage.getItem(SOURCE_STORAGE_KEY) ?? '');
+  }, []);
 
   // 바깥을 누르거나 Esc 로 닫는다.
   useEffect(() => {
@@ -83,9 +95,18 @@ export function ExportButton({ target, id, name, className }: ExportButtonProps)
     if (busy) return;
     setOpen(false);
     setBusy(true);
+    const trimmed = source.trim();
     let objectUrl: string | null = null;
     try {
-      const { blob, filename } = await api.exportDocument(target, id, item.format, item.include);
+      const { blob, filename } = await api.exportDocument(
+        target,
+        id,
+        item.format,
+        item.include,
+        trimmed === '' ? undefined : trimmed,
+      );
+      // 성공한 값만 기억한다(실패한 오타를 다음번에 되살리지 않는다).
+      window.localStorage.setItem(SOURCE_STORAGE_KEY, trimmed);
       objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = objectUrl;
@@ -140,8 +161,22 @@ export function ExportButton({ target, id, name, className }: ExportButtonProps)
       {open ? (
         <div
           role="menu"
-          className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded border border-slate-200 bg-white py-1 shadow-lg"
+          className="absolute right-0 z-20 mt-1 w-52 overflow-hidden rounded border border-slate-200 bg-white py-1 shadow-lg"
         >
+          {/* 출처는 문서 맨 끝에 한 줄로 들어간다. 비워 두면 넣지 않는다. */}
+          <label className="block px-3 pb-1.5 pt-1 text-[11px] text-slate-500">
+            출처
+            <input
+              type="text"
+              value={source}
+              onChange={(event) => setSource(event.target.value)}
+              aria-label="출처"
+              placeholder="예: HY EDU"
+              maxLength={SOURCE_MAX_LENGTH}
+              className="mt-0.5 block w-full rounded border border-slate-300 px-1.5 py-1 text-[12px] text-slate-700 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none"
+            />
+          </label>
+          <div className="my-1 border-t border-slate-100" />
           {ITEMS.map((item) => (
             <button
               key={`${item.format}-${item.include}`}

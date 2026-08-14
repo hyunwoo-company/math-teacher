@@ -129,6 +129,11 @@ IncludeQuery = Annotated[
     service.ExportInclude,
     Query(description="problems=문제만, full=문제+해설"),
 ]
+# 내보내기 출처(선택). 문서 맨 끝에 한 줄로 들어간다. 생략하면 지금과 같은 문서다.
+SourceQuery = Annotated[
+    str | None,
+    Query(max_length=100, description="문서 끝에 넣을 출처(예: HY EDU). 최대 100자"),
+]
 
 
 @asynccontextmanager
@@ -516,12 +521,29 @@ def _attachment_disposition(filename: str) -> str:
     return f"attachment; filename*=UTF-8''{encoded}"
 
 
+def _clean_source(value: str | None) -> str | None:
+    """내보내기 출처 문자열을 정리한다.
+
+    개행이 들어오면 문서에 빈 줄이 생기므로 공백류를 한 칸으로 접는다.
+
+    Args:
+        value: 쿼리로 받은 출처. 없으면 None.
+
+    Returns:
+        정리된 출처. 비었거나 공백뿐이면 None(=출처를 넣지 않는다).
+    """
+    if value is None:
+        return None
+    return " ".join(value.split()) or None
+
+
 async def _export_response(
     exporter: Callable[..., tuple[bytes, str]],
     node_id: str,
     *,
     fmt: service.ExportFormat,
     include: service.ExportInclude,
+    source: str | None = None,
 ) -> Response:
     """내보내기 서비스를 스레드풀에서 돌려 첨부 응답으로 감싼다.
 
@@ -533,12 +555,13 @@ async def _export_response(
         node_id: 시험지 또는 오답노트 노드 id.
         fmt: `docx` 또는 `hwpx`.
         include: `problems` 또는 `full`.
+        source: 문서 끝에 넣을 출처(정리 전 원문). 없으면 넣지 않는다.
 
     Returns:
         첨부 다운로드 응답(Content-Disposition 은 RFC5987 인코딩).
     """
     content, filename = await run_in_threadpool(
-        exporter, node_id, fmt=fmt, include=include
+        exporter, node_id, fmt=fmt, include=include, source=_clean_source(source)
     )
     return Response(
         content=content,
@@ -554,7 +577,7 @@ async def _export_response(
     responses=_ERRORS,
 )
 async def export_file_docx(
-    node_id: NodeId, include: IncludeQuery = "problems"
+    node_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
 ) -> Response:
     """시험지 DOCX. 기본은 '문제만'(크롭 이미지), `include=full` 이면 풀이도 넣는다.
 
@@ -562,7 +585,7 @@ async def export_file_docx(
     쿼리 인증도 허용한다(`_is_binary_asset`). 문항이 없으면 400 이다.
     """
     return await _export_response(
-        service.export_exam, node_id, fmt="docx", include=include
+        service.export_exam, node_id, fmt="docx", include=include, source=source
     )
 
 
@@ -573,14 +596,14 @@ async def export_file_docx(
     responses=_ERRORS,
 )
 async def export_file_hwpx(
-    node_id: NodeId, include: IncludeQuery = "problems"
+    node_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
 ) -> Response:
     """시험지 HWPX(한글). 구성은 DOCX 와 같다.
 
     수식은 한글 수식 객체가 아니라 유니코드 평문(`x²`)으로 들어간다.
     """
     return await _export_response(
-        service.export_exam, node_id, fmt="hwpx", include=include
+        service.export_exam, node_id, fmt="hwpx", include=include, source=source
     )
 
 
@@ -591,11 +614,11 @@ async def export_file_hwpx(
     responses=_ERRORS,
 )
 async def export_variants_docx(
-    node_id: NodeId, include: IncludeQuery = "problems"
+    node_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
 ) -> Response:
     """저장된 변형 문제 DOCX. 원본 크롭은 넣지 않는다. 변형이 없으면 400 이다."""
     return await _export_response(
-        service.export_variants, node_id, fmt="docx", include=include
+        service.export_variants, node_id, fmt="docx", include=include, source=source
     )
 
 
@@ -606,11 +629,11 @@ async def export_variants_docx(
     responses=_ERRORS,
 )
 async def export_variants_hwpx(
-    node_id: NodeId, include: IncludeQuery = "problems"
+    node_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
 ) -> Response:
     """저장된 변형 문제 HWPX(한글). 구성은 DOCX 와 같다."""
     return await _export_response(
-        service.export_variants, node_id, fmt="hwpx", include=include
+        service.export_variants, node_id, fmt="hwpx", include=include, source=source
     )
 
 
@@ -1196,7 +1219,7 @@ def read_note_item_crop(note_id: NodeId, item_id: NodeId) -> FileResponse:
     responses=_ERRORS,
 )
 async def export_note_docx(
-    note_id: NodeId, include: IncludeQuery = "problems"
+    note_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
 ) -> Response:
     """오답노트 DOCX. 스냅샷 크롭을 담고, `include=full` 이면 원본 풀이도 넣는다.
 
@@ -1204,7 +1227,7 @@ async def export_note_docx(
     항목이 없으면 400 이다.
     """
     return await _export_response(
-        service.export_note, note_id, fmt="docx", include=include
+        service.export_note, note_id, fmt="docx", include=include, source=source
     )
 
 
@@ -1215,11 +1238,11 @@ async def export_note_docx(
     responses=_ERRORS,
 )
 async def export_note_hwpx(
-    note_id: NodeId, include: IncludeQuery = "problems"
+    note_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
 ) -> Response:
     """오답노트 HWPX(한글). 구성은 DOCX 와 같다."""
     return await _export_response(
-        service.export_note, note_id, fmt="hwpx", include=include
+        service.export_note, note_id, fmt="hwpx", include=include, source=source
     )
 
 

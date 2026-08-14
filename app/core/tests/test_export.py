@@ -24,6 +24,7 @@ from PIL import Image as PilImage
 
 import config
 import storage
+from export import build as export_build
 from export import docx as export_docx
 from export import hwpx as export_hwpx
 from export import model as export_model
@@ -430,6 +431,167 @@ def test_variants_and_note_export_allow_access_query(
     ):
         assert client.get(path).status_code == 401
         assert client.get(f"{path}?access={password}").status_code == 200
+
+
+# ------------------------------------------------------------------- 출처
+SOURCE_LINE = "HY EDU"
+
+
+def _document_text(payload: bytes, suffix: str) -> str:
+    """내보낸 문서의 본문 XML(형식별). 텍스트가 들어갔는지 확인할 때 쓴다."""
+    if suffix == "hwpx":
+        return _section_text(payload)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        return archive.read("word/document.xml").decode("utf-8")
+
+
+def _exam_items(tmp_path: Path) -> list[export_build.ExamItem]:
+    """조립만 검증할 때 쓸 문항 1개(빈 크롭 PNG)."""
+    crop = tmp_path / "crop.png"
+    PilImage.new("RGB", (600, 200), "white").save(crop)
+    return [export_build.ExamItem(no=1, image=crop)]
+
+
+def test_build_exam_doc_puts_source_in_the_footer(tmp_path: Path) -> None:
+    """출처는 본문 블록이 아니라 문서 끝 한 줄(`footer`)로 들어간다."""
+    doc = export_build.build_exam_doc(
+        title="시험지",
+        items=_exam_items(tmp_path),
+        include_full=False,
+        source=SOURCE_LINE,
+    )
+    assert doc.footer == SOURCE_LINE
+
+
+def test_build_exam_doc_without_source_has_no_footer(tmp_path: Path) -> None:
+    """빈 값이면 지금과 똑같은 문서가 나온다(기존 호출부 보호)."""
+    items = _exam_items(tmp_path)
+    default = export_build.build_exam_doc(
+        title="시험지", items=items, include_full=False
+    )
+    blank = export_build.build_exam_doc(
+        title="시험지", items=items, include_full=False, source="   "
+    )
+    assert default.footer is None
+    assert blank.footer is None
+
+
+def test_build_variants_and_note_docs_take_source(tmp_path: Path) -> None:
+    """세 조립 함수가 모두 같은 방식으로 출처를 받는다."""
+    variants = export_build.build_variants_doc(
+        title="변형",
+        items=[export_build.VariantItem(no=1, mode="number", text=VARIANT_TEXT)],
+        include_full=False,
+        source=SOURCE_LINE,
+    )
+    note = export_build.build_note_doc(
+        title="오답노트",
+        items=[export_build.NoteItem(source_name="풍문고", problem_no=1)],
+        include_full=False,
+        source=SOURCE_LINE,
+    )
+    assert variants.footer == SOURCE_LINE
+    assert note.footer == SOURCE_LINE
+
+
+def test_docx_renders_source_line() -> None:
+    """docx 는 출처를 마지막 문단으로 낸다."""
+    payload = export_docx.build_docx(
+        export_model.ExportDoc(title="시험지", blocks=[], footer=SOURCE_LINE)
+    )
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        document = archive.read("word/document.xml").decode("utf-8")
+    assert SOURCE_LINE in document
+
+
+def test_hwpx_renders_source_line() -> None:
+    """hwpx 도 같은 한 줄을 낸다(서식은 지정하지 않는 기존 방침)."""
+    payload = export_hwpx.build_hwpx(
+        export_model.ExportDoc(title="시험지", blocks=[], footer=SOURCE_LINE)
+    )
+    assert SOURCE_LINE in _section_text(payload)
+
+
+def test_docx_omits_the_footer_when_there_is_none() -> None:
+    """출처가 없으면 문단이 늘지 않는다 — 지금과 완전히 같은 문서다."""
+    blocks = [export_model.Text("본문")]
+    without = _document_text(
+        export_docx.build_docx(export_model.ExportDoc(title="시험지", blocks=blocks)),
+        "docx",
+    )
+    with_source = _document_text(
+        export_docx.build_docx(
+            export_model.ExportDoc(title="시험지", blocks=blocks, footer=SOURCE_LINE)
+        ),
+        "docx",
+    )
+    assert SOURCE_LINE not in without
+    assert without.count("<w:p>") + 1 == with_source.count("<w:p>")
+
+
+@pytest.mark.parametrize("suffix", ["docx", "hwpx"])
+def test_exam_export_route_accepts_source_query(
+    client: TestClient, suffix: str
+) -> None:
+    """시험지 라우트가 `source` 를 받아 문서 끝까지 흘린다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    response = client.get(
+        f"/api/files/{node_id}/export.{suffix}", params={"source": SOURCE_LINE}
+    )
+    assert response.status_code == 200, response.text
+    assert SOURCE_LINE in _document_text(response.content, suffix)
+
+
+@pytest.mark.parametrize("suffix", ["docx", "hwpx"])
+def test_variants_and_note_export_routes_accept_source_query(
+    client: TestClient, suffix: str
+) -> None:
+    """변형·오답노트 라우트도 같은 파라미터를 받는다(6개 라우트 전부)."""
+    source_id = upload_test_pdf(client)["node"]["id"]
+    _save_variant(source_id, 1, "number")
+    note_id = make_note(client, "이현우 오답")
+    client.post(
+        f"/api/notes/{note_id}/items",
+        json={"source_node_id": source_id, "problem_numbers": [1]},
+    )
+
+    for path in (
+        f"/api/files/{source_id}/variants/export.{suffix}",
+        f"/api/notes/{note_id}/export.{suffix}",
+    ):
+        response = client.get(path, params={"source": SOURCE_LINE})
+        assert response.status_code == 200, response.text
+        assert SOURCE_LINE in _document_text(response.content, suffix), path
+
+
+def test_export_source_is_squeezed_and_blank_is_dropped(client: TestClient) -> None:
+    """개행·연속 공백은 한 칸으로 접고, 공백뿐이면 출처가 없는 것으로 본다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    messy = client.get(
+        f"/api/files/{node_id}/export.hwpx",
+        params={"source": "HY\nEDU   학원"},
+    )
+    assert messy.status_code == 200, messy.text
+    assert "HY EDU 학원" in _section_text(messy.content)
+
+    blank = client.get(
+        f"/api/files/{node_id}/export.hwpx", params={"source": "   "}
+    )
+    plain = client.get(f"/api/files/{node_id}/export.hwpx")
+    assert blank.status_code == 200
+    # 문단 수로 비교한다 — python-hwpx 가 문단 id 를 난수로 넣어 바이트는 매번 다르다.
+    assert _section_text(blank.content).count("<hp:p ") == _section_text(
+        plain.content
+    ).count("<hp:p ")
+
+
+def test_export_source_too_long_422(client: TestClient) -> None:
+    """상한 100자를 넘기면 문서를 만들지 않는다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    response = client.get(
+        f"/api/files/{node_id}/export.docx", params={"source": "가" * 101}
+    )
+    assert response.status_code == 422
 
 
 # -------------------------------------------------------- hwpx 지면(회귀)

@@ -529,6 +529,7 @@ def export_exam(
     *,
     fmt: ExportFormat = "docx",
     include: ExportInclude = "problems",
+    source: str | None = None,
 ) -> tuple[bytes, str]:
     """시험지를 문서로 내보낸다.
 
@@ -539,6 +540,7 @@ def export_exam(
         node_id: 시험지 파일 노드 id.
         fmt: `docx` 또는 `hwpx`.
         include: `problems`(문제만) 또는 `full`(문제+해설).
+        source: 문서 끝에 넣을 출처(예: 학원 이름). None 이면 넣지 않는다.
 
     Returns:
         (문서 바이트, 다운로드 파일명).
@@ -582,7 +584,10 @@ def export_exam(
 
     display_name = _display_exam_name(str(node["name"]))
     doc = export_build.build_exam_doc(
-        title=display_name, items=items, include_full=include == "full"
+        title=display_name,
+        items=items,
+        include_full=include == "full",
+        source=source,
     )
     filename = _export_filename(
         display_name, variants=False, fmt=fmt, include=include
@@ -595,6 +600,7 @@ def export_variants(
     *,
     fmt: ExportFormat = "docx",
     include: ExportInclude = "problems",
+    source: str | None = None,
 ) -> tuple[bytes, str]:
     """저장된 변형 문제를 문서로 내보낸다.
 
@@ -605,6 +611,7 @@ def export_variants(
         node_id: 시험지 파일 노드 id.
         fmt: `docx` 또는 `hwpx`.
         include: `problems`(변형 문제만) 또는 `full`(정답·풀이 포함).
+        source: 문서 끝에 넣을 출처(예: 학원 이름). None 이면 넣지 않는다.
 
     Returns:
         (문서 바이트, 다운로드 파일명).
@@ -633,6 +640,7 @@ def export_variants(
         title=f"{display_name} 변형 문제",
         items=items,
         include_full=include == "full",
+        source=source,
     )
     filename = _export_filename(display_name, variants=True, fmt=fmt, include=include)
     return _RENDERERS[fmt](doc), filename
@@ -643,6 +651,7 @@ def export_note(
     *,
     fmt: ExportFormat = "docx",
     include: ExportInclude = "problems",
+    source: str | None = None,
 ) -> tuple[bytes, str]:
     """오답노트를 문서로 내보낸다.
 
@@ -654,6 +663,7 @@ def export_note(
         note_id: 오답노트 노드 id.
         fmt: `docx` 또는 `hwpx`.
         include: `problems`(문제만) 또는 `full`(문제+해설).
+        source: 문서 끝에 넣을 출처(예: 학원 이름). None 이면 넣지 않는다.
 
     Returns:
         (문서 바이트, 다운로드 파일명).
@@ -698,7 +708,10 @@ def export_note(
 
     display_name = _display_exam_name(str(node["name"]))
     doc = export_build.build_note_doc(
-        title=display_name, items=items, include_full=include == "full"
+        title=display_name,
+        items=items,
+        include_full=include == "full",
+        source=source,
     )
     filename = _export_filename(
         display_name, variants=False, fmt=fmt, include=include
