@@ -6,6 +6,7 @@ import {
   renderMathToHtml,
   splitInline,
   splitMath,
+  stripVerification,
 } from '@/lib/math-text';
 
 describe('splitMath', () => {
@@ -148,5 +149,98 @@ describe('parseBlocks', () => {
 
   it('닫히지 않은 디스플레이 구분자는 리터럴 문단으로 둔다', () => {
     expect(parseBlocks('$$ 열기만 함')).toEqual([{ kind: 'paragraph', content: '$$ 열기만 함' }]);
+  });
+});
+
+/* ── 검산 언급 제거(표시용) ─────────────────────────────────────── */
+
+describe('stripVerification', () => {
+  describe('지운다', () => {
+    it('검산했다는 문장만 남은 줄을 지운다', () => {
+      expect(stripVerification('## 정답\n$x=2$\n\n검산했습니다.')).toBe('## 정답\n$x=2$');
+    });
+
+    it('검산 라벨로 시작하는 줄을 통째로 지운다', () => {
+      expect(stripVerification('검산: $x=2$ 를 대입하면 성립한다. ✔')).toBe('');
+    });
+
+    it('줄 안의 검산 문장만 지우고 앞 문장은 남긴다', () => {
+      expect(stripVerification('따라서 $x=2$ 이다. 검산했습니다.')).toBe('따라서 $x=2$ 이다.');
+    });
+
+    it('검산 문장을 지운 뒤 홀로 남은 ✔ 도 걷어낸다', () => {
+      expect(stripVerification('답은 2이다. 검산했습니다. ✔')).toBe('답은 2이다.');
+    });
+
+    it('## 검산 섹션은 그 안의 내용까지 지운다', () => {
+      expect(stripVerification('## 검산\n좌변과 우변이 같다.\n\n## 정답\n$x=2$')).toBe(
+        '## 정답\n$x=2$',
+      );
+    });
+
+    it('검산 섹션 안의 더 깊은 제목도 섹션에 딸려 사라진다', () => {
+      expect(stripVerification('## 검산\n### 대입\n확인했다.\n\n## 정답\n2')).toBe('## 정답\n2');
+    });
+
+    it('✔ 만 있는 줄을 지운다', () => {
+      expect(stripVerification('답은 2이다.\n✔')).toBe('답은 2이다.');
+    });
+
+    it('목록 항목의 검산 언급도 지운다', () => {
+      expect(stripVerification('- 답: 2\n- 검산했음')).toBe('- 답: 2');
+    });
+
+    it('굵게 감싼 검산 완료 표기도 지운다', () => {
+      expect(stripVerification('**검산 완료**')).toBe('');
+    });
+
+    it('짧은 도입부 뒤의 검산 완료 언급도 지운다', () => {
+      expect(stripVerification('위 결과를 검산하였다.')).toBe('');
+    });
+
+    it('검산 줄만 지우고 여러 줄 디스플레이 수식은 원문 그대로 남긴다', () => {
+      expect(stripVerification('값:\n$$\n\\frac{a}{b}\n$$\n검산 완료 ✔')).toBe(
+        '값:\n$$\n\\frac{a}{b}\n$$',
+      );
+    });
+
+    it('\\[...\\] 구분자도 원문 그대로 보존한다', () => {
+      expect(stripVerification('\\[a+b\\]\n검산했습니다.')).toBe('\\[a+b\\]');
+    });
+  });
+
+  describe('지우지 않는다', () => {
+    it('검산이 없으면 원문을 그대로 돌려준다', () => {
+      const source = '## 풀이\n1. 양변을 정리한다.\n2. $x=2$ 를 얻는다.\n\n## 정답\n$x=2$';
+      expect(stripVerification(source)).toBe(source);
+    });
+
+    it('검산을 지시하는 문제 문장은 남긴다', () => {
+      expect(stripVerification('다음 계산을 검산하시오.')).toBe('다음 계산을 검산하시오.');
+    });
+
+    it('검산이 주제로 쓰인 문장은 남긴다', () => {
+      expect(stripVerification('검산의 정의를 서술하라.')).toBe('검산의 정의를 서술하라.');
+      expect(stripVerification('검산기를 쓰면 안 된다.')).toBe('검산기를 쓰면 안 된다.');
+    });
+
+    it('앞말이 긴 문장은 실제 내용으로 보고 남긴다 (보수적으로 덜 지운다)', () => {
+      const source = '정답은 $x=2$ 이며, 이는 검산했을 때에도 어긋나지 않는다.';
+      expect(stripVerification(source)).toBe(source);
+    });
+
+    it('검산이 아닌 제목과 그 내용은 건드리지 않는다', () => {
+      const source = '## 정답 및 채점 기준\n부분점수는 없다.';
+      expect(stripVerification(source)).toBe(source);
+    });
+
+    it('본문 속 ✔ 는 그대로 둔다 (검산 문장을 지운 줄이 아니다)', () => {
+      expect(stripVerification('조건 ✔ 를 만족한다.')).toBe('조건 ✔ 를 만족한다.');
+    });
+
+    it('수식 안의 문자열은 손대지 않는다', () => {
+      const source = '$\\text{검산}$ 표기를 설명한다.';
+      expect(stripVerification(source)).toBe(source);
+    });
   });
 });

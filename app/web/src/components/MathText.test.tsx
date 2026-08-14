@@ -141,4 +141,20 @@ describe('MathText', () => {
     expect(strong?.querySelector('.katex')).not.toBeNull();
     expect(container.textContent).not.toContain('**');
   });
+
+  it('검산했다는 잔여 문구는 화면에 그리지 않는다 (옛 풀이 대비)', () => {
+    const { container } = render(
+      <MathText>{'## 정답\n$x=2$\n\n검산했습니다. ✔\n\n## 검산\n좌변과 우변이 같다.'}</MathText>,
+    );
+    expect(container.textContent).not.toContain('검산');
+    expect(container.textContent).not.toContain('✔');
+    // 정상 내용은 그대로 남는다.
+    expect(container.querySelector('h2')?.textContent).toBe('정답');
+    expect(container.querySelector('.katex')).not.toBeNull();
+  });
+
+  it('검산이 의미 있게 쓰인 문장은 지우지 않는다', () => {
+    const { container } = render(<MathText>{'다음 계산을 검산하시오.'}</MathText>);
+    expect(container.textContent).toContain('검산하시오');
+  });
 });

@@ -1,5 +1,12 @@
 import { Fragment, useMemo, type ReactNode } from 'react';
-import { parseBlocks, renderMathToHtml, splitInline, splitMath, type Block } from '@/lib/math-text';
+import {
+  parseBlocks,
+  renderMathToHtml,
+  splitInline,
+  splitMath,
+  stripVerification,
+  type Block,
+} from '@/lib/math-text';
 
 interface MathTextProps {
   /** AI 응답 원문. 수식 구분자와 블록 마크다운(제목/목록)을 포함할 수 있다. */
@@ -11,9 +18,12 @@ interface MathTextProps {
  * 수식이 섞인 텍스트를 렌더한다.
  * 블록(제목/목록/문단/디스플레이 수식)으로 나눈 뒤, 각 블록의 텍스트는
  * 인라인 수식·굵게·코드까지 그대로 통과시킨다.
+ *
+ * 렌더 직전에 `stripVerification` 으로 검산 언급만 남은 문장/섹션을 걷어낸다.
+ * **표시 전용**이다 — 원문은 그대로 남아 "복사(AI 대화용)" 는 마크다운 원문을 준다.
  */
 export function MathText({ children, className }: MathTextProps) {
-  const blocks = useMemo(() => parseBlocks(children), [children]);
+  const blocks = useMemo(() => parseBlocks(stripVerification(children)), [children]);
   return <div className={className}>{blocks.map((block, index) => renderBlock(block, index))}</div>;
 }
 
