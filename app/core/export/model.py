@@ -89,11 +89,16 @@ class ExportDoc:
         blocks: 본문 블록들(순서대로 렌더한다).
         footer: 문서 맨 끝에 넣을 출처 한 줄. None 이면 아무것도 넣지 않는다
             (기본값이라 기존 호출부는 지금과 같은 문서를 얻는다).
+        notice: **첫 페이지 제목 바로 아래**에 넣을 고지 한 줄. 판독본 텍스트로
+            내보낸 문서에만 들어간다(설계 §3-4). `footer` 와 서식은 같지만 위치가
+            정반대라 같은 필드로 쓸 수 없다 — 고지는 읽기 전에 보여야 한다.
+            None 이면 아무것도 넣지 않는다(기본값 = 기존 문서와 동일).
     """
 
     title: str
     blocks: Sequence[Block]
     footer: str | None = None
+    notice: str | None = None
 
 
 __all__ = [

@@ -17,11 +17,35 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 import markdown_sections
 from export.model import Block, ExportDoc, Heading, Image, MathRun, Run, Text, TextRun
 from to_plain_text import PlainSegment, to_plain_segments, to_plain_text
+
+# 문항 본문을 무엇으로 낼지(설계 §3-4).
+#   image = 지금까지와 같은 크롭 이미지. **기본값이고 결과물이 바뀌지 않는다.**
+#   text  = 판독본(`transcript`) 텍스트. 판독본이 없는 문항은 조용히 이미지로 낸다.
+BodyMode = Literal["image", "text"]
+
+# 판독본 출처 값. `storage.TRANSCRIPT_AI` / `TRANSCRIPT_MANUAL` 과 같은 문자열이다.
+# 이 모듈은 DB 를 모르므로(모듈 docstring) 상수를 import 하지 않고 계약으로만
+# 받는다. 두 곳이 어긋나지 않는지는 `tests/test_transcript_export.py` 가 못박는다.
+_SOURCE_AI: Final[str] = "ai"
+_SOURCE_MANUAL: Final[str] = "manual"
+
+# 텍스트로 나간 문서 첫 페이지의 고지(설계 §3-4). 복원이 완벽하다고 약속하지
+# 않는다 — 배포 전 대조를 요구하는 것이 이 한 줄의 목적이다.
+NOTICE_RESTORED: Final[str] = (
+    "이 문서의 문항은 원본 PDF 에서 복원한 것입니다. 배포 전 원본과 대조하십시오."
+)
+# AI 판독본이 섞였을 때 덧붙이는 문구. 디코딩본과 신뢰도가 다르므로 밝힌다.
+NOTICE_AI_SUFFIX: Final[str] = "일부 문항은 AI 판독본입니다."
+# 넣은 항목이 **전부** 사용자가 직접 확인·수정한 것(`manual`)일 때의 문구.
+# 사람이 이미 원본과 대조한 상태라 "배포 전 대조" 를 다시 요구하지 않는다.
+NOTICE_MANUAL: Final[str] = (
+    "이 문서의 문항은 원본 PDF 에서 복원한 뒤 직접 확인·수정한 것입니다."
+)
 
 # 변형 종류의 표시 라벨. 프론트(`web/src/lib/variant.ts`)와 문구를 맞춘다.
 VARIANT_MODE_LABEL: Final[dict[str, str]] = {
@@ -58,13 +82,19 @@ class ExamItem:
 
     Attributes:
         no: 문항 번호.
-        image: 크롭 PNG 경로.
+        image: 크롭 PNG 경로. 크롭이 없고 판독본만 있는 문항은 None 이다
+            (`body="image"` 에서는 호출자가 그런 항목을 아예 넘기지 않는다).
         solution: 저장된 풀이 원문(마크다운). 없으면 None.
+        transcript: 복원한 문항 전문(LaTeX 포함). `body="text"` 일 때만 쓰인다.
+        transcript_source: 판독본 출처(`pua` / `ai` / `manual`). 고지 문구를
+            정하는 데만 쓴다.
     """
 
     no: int
-    image: Path
+    image: Path | None = None
     solution: str | None = None
+    transcript: str | None = None
+    transcript_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +122,9 @@ class NoteItem:
         image: 크롭 스냅샷 PNG 경로. 스냅샷이 없으면 None.
         memo: 메모. 없으면 None.
         solution: 원본 문항의 저장된 풀이 원문. 원본이 지워졌거나 풀이가 없으면 None.
+        transcript: 담을 때 복사한 판독본 **스냅샷**(크롭 스냅샷과 같은 규칙).
+            원본 시험지가 지워져도 남는다. `body="text"` 일 때만 쓰인다.
+        transcript_source: 판독본 스냅샷의 출처(`pua` / `ai` / `manual`).
     """
 
     source_name: str
@@ -99,6 +132,8 @@ class NoteItem:
     image: Path | None = None
     memo: str | None = None
     solution: str | None = None
+    transcript: str | None = None
+    transcript_source: str | None = None
 
 
 def _heading_text(title: str) -> str:
@@ -200,6 +235,45 @@ def _solution_blocks(solution: str) -> list[Block]:
     return blocks
 
 
+def _transcript_blocks(transcript: str) -> list[Block]:
+    """판독본 전문을 본문 블록으로 만든다.
+
+    새 변환 경로를 만들지 않는다 — 풀이·변형과 똑같이 `_body`(`to_plain_segments`)를
+    타므로 수식 구간은 렌더러의 수식 개체 조판(`omml.py` / `hwpeq.py`)으로 간다.
+
+    Args:
+        transcript: 복원한 문항 전문(마크다운 + LaTeX).
+
+    Returns:
+        본문 블록 목록. 평문화 결과가 비면 빈 목록(호출자가 이미지로 폴백한다).
+    """
+    body = _body(transcript)
+    return [] if body is None else [body]
+
+
+def _notice(sources: Sequence[str | None]) -> str | None:
+    """텍스트로 나간 항목들의 출처를 보고 첫 페이지 고지 문구를 정한다.
+
+    출처마다 신뢰도가 다르므로 문구도 달라야 한다(설계 §3-4). AI 판독본이 하나라도
+    섞이면 그 사실을 밝히고, 전부 사용자가 확인한 것이면 경고 강도를 낮춘다.
+
+    Args:
+        sources: 실제로 **텍스트로 렌더한** 항목들의 `transcript_source`.
+            이미지로 폴백한 항목은 포함하지 않는다.
+
+    Returns:
+        고지 한 줄. 텍스트로 나간 항목이 없으면 None(고지를 넣지 않는다).
+    """
+    if not sources:
+        return None
+    kinds = {source or "" for source in sources}
+    if kinds == {_SOURCE_MANUAL}:
+        return NOTICE_MANUAL
+    if _SOURCE_AI in kinds:
+        return f"{NOTICE_RESTORED} {NOTICE_AI_SUFFIX}"
+    return NOTICE_RESTORED
+
+
 def _footer(source: str | None) -> str | None:
     """출처를 문서 꼬리말 값으로 정규화한다.
 
@@ -218,28 +292,50 @@ def build_exam_doc(
     items: Sequence[ExamItem],
     include_full: bool,
     source: str | None = None,
+    body: BodyMode = "image",
 ) -> ExportDoc:
     """시험지 문서를 조립한다.
 
-    구성은 문항마다 `N번`(제목) + 크롭 이미지이고, `include_full` 이면 그 뒤에
+    구성은 문항마다 `N번`(제목) + 문항 본문이고, `include_full` 이면 그 뒤에
     저장된 풀이를 섹션별로 붙인다.
+
+    문항 본문은 `body` 가 정한다. `image`(기본)면 예전과 똑같이 크롭 이미지만
+    넣는다 — 항목에 판독본이 실려 있어도 보지 않는다. `text` 면 판독본을
+    텍스트로 조판하고, **판독본이 없거나 평문화 결과가 빈 문항은 조용히
+    이미지로 폴백**한다(혼합 문서가 정상 동작이다).
 
     Args:
         title: 문서 제목(시험지 이름).
         items: 번호 순으로 정렬된 문항 목록.
         include_full: True 면 풀이까지 넣는다.
         source: 문서 끝에 넣을 출처. None/빈 문자열이면 넣지 않는다.
+        body: `image`(기본) 또는 `text`.
 
     Returns:
-        조립된 문서.
+        조립된 문서. `body="text"` 로 텍스트가 하나라도 들어갔으면 `notice` 가 찬다.
     """
     blocks: list[Block] = []
+    used_sources: list[str | None] = []
     for item in items:
         blocks.append(Heading(f"{item.no}번", 2))
-        blocks.append(Image(item.image))
+        text_blocks = (
+            _transcript_blocks(item.transcript)
+            if body == "text" and item.transcript
+            else []
+        )
+        if text_blocks:
+            blocks.extend(text_blocks)
+            used_sources.append(item.transcript_source)
+        elif item.image is not None:
+            blocks.append(Image(item.image))
         if include_full and item.solution:
             blocks.extend(_solution_blocks(item.solution))
-    return ExportDoc(title=title, blocks=blocks, footer=_footer(source))
+    return ExportDoc(
+        title=title,
+        blocks=blocks,
+        footer=_footer(source),
+        notice=_notice(used_sources),
+    )
 
 
 def build_variants_doc(
@@ -289,35 +385,57 @@ def build_note_doc(
     items: Sequence[NoteItem],
     include_full: bool,
     source: str | None = None,
+    body: BodyMode = "image",
 ) -> ExportDoc:
     """오답노트 문서를 조립한다.
 
-    원본이 삭제된 항목도 스냅샷 크롭으로 넣는다(풀이만 빠진다).
+    원본이 삭제된 항목도 스냅샷(크롭·판독본)으로 넣는다(풀이만 빠진다).
+    본문 선택 규칙은 `build_exam_doc` 과 같다 — `body="text"` 면 판독본
+    스냅샷을 텍스트로, 없으면 크롭 스냅샷으로 낸다.
 
     Args:
         title: 문서 제목(노트 이름).
         items: 담은 순서의 항목 목록.
         include_full: True 면 원본 문항의 저장된 풀이까지 넣는다.
         source: 문서 끝에 넣을 출처. None/빈 문자열이면 넣지 않는다.
+        body: `image`(기본) 또는 `text`.
 
     Returns:
-        조립된 문서.
+        조립된 문서. `body="text"` 로 텍스트가 하나라도 들어갔으면 `notice` 가 찬다.
     """
     blocks: list[Block] = []
+    used_sources: list[str | None] = []
     for item in items:
         blocks.append(Heading(f"{item.source_name} {item.problem_no}번", 2))
-        if item.image is not None:
+        text_blocks = (
+            _transcript_blocks(item.transcript)
+            if body == "text" and item.transcript
+            else []
+        )
+        if text_blocks:
+            blocks.extend(text_blocks)
+            used_sources.append(item.transcript_source)
+        elif item.image is not None:
             blocks.append(Image(item.image))
         if item.memo:
             blocks.append(_prefixed(_MEMO_PREFIX, _body(item.memo)))
         if include_full and item.solution:
             blocks.extend(_solution_blocks(item.solution))
-    return ExportDoc(title=title, blocks=blocks, footer=_footer(source))
+    return ExportDoc(
+        title=title,
+        blocks=blocks,
+        footer=_footer(source),
+        notice=_notice(used_sources),
+    )
 
 
 __all__ = [
+    "NOTICE_AI_SUFFIX",
+    "NOTICE_MANUAL",
+    "NOTICE_RESTORED",
     "VARIANT_MODE_LABEL",
     "VARIANT_MODE_ORDER",
+    "BodyMode",
     "ExamItem",
     "NoteItem",
     "VariantItem",

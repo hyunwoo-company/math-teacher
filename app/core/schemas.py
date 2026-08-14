@@ -94,6 +94,10 @@ class ProblemOut(BaseModel):
 
     `no` 는 저장·조회에 쓰는 통짜 순번이고, `label` 은 문제지에 찍힌 표기다.
     구획마다 번호가 1 부터 다시 시작하는 교재에서만 둘이 다르다.
+
+    판독본(문항 텍스트화)은 **본문을 싣지 않는다** — 풀이(`has_solution`)와 같은
+    규칙이다. 여기에는 배지에 필요한 만큼(있는지 / 출처 / 실패 이유)만 담고,
+    전문은 `GET /api/files/{id}/transcripts` 로 받는다.
     """
 
     no: int
@@ -103,6 +107,13 @@ class ProblemOut(BaseModel):
     image_w: int
     image_h: int
     has_solution: bool
+    #: 판독본(`transcript`)이 저장돼 있는지. 없으면 내보낼 때 이미지로 폴백한다.
+    has_transcript: bool = False
+    #: 판독본 출처. `pua`(디코딩) / `ai`(AI 판독) / `manual`(직접 수정). 없으면 null.
+    #: 나중에 값이 늘어도 조회가 깨지지 않도록 `str` 로 둔다(Literal 로 좁히지 않음).
+    transcript_source: str | None = None
+    #: 판독 실패·불가 이유(예: "불가 - 좌표평면 그래프"). 없으면 null.
+    transcript_note: str | None = None
 
 
 class FileDetailResponse(BaseModel):
@@ -350,6 +361,39 @@ class VariantsResponse(BaseModel):
     """`GET /api/files/{id}/variants` 응답 (문항 번호 → 변형 종류 순)."""
 
     variants: list[VariantOut]
+
+
+class TranscriptOut(BaseModel):
+    """문항 판독본 1건(문항 텍스트화).
+
+    `transcript` 가 null 이고 `transcript_note` 만 있으면 판독하지 못한 문항이다
+    (이유를 화면 배지로 보여주고, 내보낼 때는 이미지로 폴백한다).
+    """
+
+    no: int
+    transcript: str | None = None
+    #: `pua`(디코딩) / `ai`(AI 판독) / `manual`(직접 수정). 없으면 null.
+    transcript_source: str | None = None
+    transcript_note: str | None = None
+
+
+class TranscriptsResponse(BaseModel):
+    """`GET /api/files/{id}/transcripts` 응답 (문항 번호 순).
+
+    판독본도 이유도 없는(= 아직 판독하지 않은) 문항은 빠진다.
+    """
+
+    transcripts: list[TranscriptOut]
+
+
+class TranscriptSave(BaseModel):
+    """`PATCH /api/files/{id}/problems/{no}/transcript` 요청.
+
+    사용자가 대조 화면에서 고친 전문을 저장한다(`transcript_source='manual'`).
+    **빈 문자열이면 판독본을 지운다** — 되돌리는 경로다.
+    """
+
+    text: Annotated[str, Field(max_length=config.MAX_TRANSCRIPT_LENGTH)]
 
 
 class SolutionContentSave(BaseModel):

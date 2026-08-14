@@ -62,10 +62,10 @@ _HEADING_FONT_SIZES: Final[Mapping[str, Length]] = {
     "Heading 2": Pt(13),
     "Heading 3": Pt(11),
 }
-# 출처(`ExportDoc.footer`) 한 줄의 서식. 본문(10pt)보다 작은 회색이라 문서 끝에
-# 붙어도 문제·해설을 읽는 데 방해가 되지 않는다.
-_FOOTER_FONT_SIZE: Final[Length] = Pt(8)
-_FOOTER_FONT_COLOR: Final[RGBColor] = RGBColor(0x80, 0x80, 0x80)
+# 부속 한 줄(첫 페이지 고지 `ExportDoc.notice` / 문서 끝 출처 `ExportDoc.footer`)의
+# 서식. 본문(10pt)보다 작은 회색이라 문제·해설을 읽는 데 방해가 되지 않는다.
+_ASIDE_FONT_SIZE: Final[Length] = Pt(8)
+_ASIDE_FONT_COLOR: Final[RGBColor] = RGBColor(0x80, 0x80, 0x80)
 # 언어권별 폰트 지정. python-docx 의 `font.name` 은 ascii/hAnsi 만 건드리는데,
 # 한글은 eastAsia, 수학 기호는 cs 를 따라가므로 네 가지를 모두 넣어야 한다.
 _FONT_ATTRIBUTES: Final[tuple[str, ...]] = (
@@ -200,6 +200,18 @@ def _add_math(paragraph: Paragraph, run: MathRun) -> None:
     paragraph._p.append(parse_xml(math_xml))
 
 
+def _add_aside(document: DocxDocument, text: str) -> None:
+    """작은 회색 한 줄을 문단으로 붙인다(첫 페이지 고지 / 문서 끝 출처 공용).
+
+    Args:
+        document: 대상 문서.
+        text: 넣을 한 줄.
+    """
+    run = document.add_paragraph().add_run(text)
+    run.font.size = _ASIDE_FONT_SIZE
+    run.font.color.rgb = _ASIDE_FONT_COLOR
+
+
 def _add_text(document: DocxDocument, block: Text) -> None:
     """본문 블록을 문단들로 넣는다.
 
@@ -232,6 +244,9 @@ def build_docx(doc: ExportDoc) -> bytes:
     `_tighten` 으로 문단 여백을 0 으로 눌러 두고, `_set_page` 로 용지를 A4 로
     맞춘 다음 시작한다.
 
+    `doc.notice` 가 있으면 제목 바로 아래(첫 페이지)에, `doc.footer` 는 문서 맨
+    끝에 작은 회색 한 줄로 넣는다. 둘 다 없으면 예전과 똑같은 문서다.
+
     Args:
         doc: 렌더할 문서.
 
@@ -242,6 +257,9 @@ def build_docx(doc: ExportDoc) -> bytes:
     _set_page(document)
     _tighten(document)
     document.add_heading(doc.title, level=0)
+    if doc.notice:
+        # 고지는 **제목 바로 아래**(= 첫 페이지)다. 읽기 전에 보여야 의미가 있다.
+        _add_aside(document, doc.notice)
     for block in doc.blocks:
         if isinstance(block, Heading):
             document.add_heading(block.text, level=block.level)
@@ -251,9 +269,7 @@ def build_docx(doc: ExportDoc) -> bytes:
             _add_text(document, block)
     if doc.footer:
         # 출처는 문서 맨 끝 한 줄. 본문과 섞이지 않게 작은 회색 글씨로 낸다.
-        run = document.add_paragraph().add_run(doc.footer)
-        run.font.size = _FOOTER_FONT_SIZE
-        run.font.color.rgb = _FOOTER_FONT_COLOR
+        _add_aside(document, doc.footer)
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()

@@ -117,6 +117,9 @@ def build_hwpx(doc: ExportDoc) -> bytes:
 
     본문 텍스트는 줄 단위로 문단을 나눈다(docx 렌더러와 동일).
 
+    `doc.notice` 가 있으면 제목 바로 아래(첫 페이지)에, `doc.footer` 는 문서 맨
+    끝에 넣는다. 이 모듈의 방침대로 서식은 지정하지 않고 기본 문단으로 낸다.
+
     Args:
         doc: 렌더할 문서.
 
@@ -125,6 +128,9 @@ def build_hwpx(doc: ExportDoc) -> bytes:
     """
     document = HwpxDocument.new()
     document.add_paragraph(doc.title)
+    if doc.notice:
+        # 고지는 **제목 바로 아래**(= 첫 페이지)다. 읽기 전에 보여야 의미가 있다.
+        document.add_paragraph(doc.notice)
     for block in doc.blocks:
         if isinstance(block, Heading):
             document.add_paragraph(block.text)

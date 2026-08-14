@@ -27,6 +27,10 @@ AGY_ONLY_ENV: Final[str] = "MATH_TEACHER_AGY_ONLY"
 
 MAX_UPLOAD_BYTES: Final[int] = 50 * 1024 * 1024  # 50MB
 MAX_NAME_LENGTH: Final[int] = 200
+# 사용자가 직접 고친 판독본(`problems.transcript`) 한 건의 길이 상한.
+# 문항 하나가 이보다 길 일은 없고, 상한이 없으면 실수나 장난으로 DB 가 부푼다.
+# 요청 검증(`schemas`)과 서비스 검증(`service.save_transcript`)이 같은 값을 쓴다.
+MAX_TRANSCRIPT_LENGTH: Final[int] = 20_000
 
 # 풀이 1건의 출력 상한. API 키 모드에서만 강제된다(구독 모드는 CLI 가 관리).
 DEFAULT_MAX_TOKENS: Final[int] = 8000

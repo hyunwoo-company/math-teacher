@@ -442,9 +442,107 @@ def file_detail(node_id: str) -> dict[str, Any]:
                 "image_w": problem["image_w"],
                 "image_h": problem["image_h"],
                 "has_solution": problem["no"] in solved,
+                # 판독본은 **본문을 싣지 않는다**(풀이와 같은 규칙).
+                # 전문은 `GET /api/files/{id}/transcripts` 로 받는다.
+                "has_transcript": bool(problem.get("transcript")),
+                "transcript_source": problem.get("transcript_source"),
+                "transcript_note": problem.get("transcript_note"),
             }
             for problem in problems
         ],
+    }
+
+
+# --------------------------------------------------------------- 판독본
+# 조회는 풀이(`solutions`)와 같은 모양이다 — 목록 응답에는 있음/출처만 싣고
+# 전문은 전용 라우트로 받는다. 판독본은 문항당 최대 2만 자라 파일 상세에 통째로
+# 실으면 시험지를 열 때마다 수백 KB 를 내려보내게 된다.
+
+
+def transcripts(node_id: str) -> list[dict[str, Any]]:
+    """`GET /api/files/{id}/transcripts` 용 판독본 목록(문항 번호 순).
+
+    판독본도 없고 이유도 없는(= 아직 판독하지 않은) 문항은 빼고 돌려준다.
+    빈 항목을 실어 보내도 화면에 그릴 것이 없다.
+
+    Args:
+        node_id: 시험지 파일 노드 id.
+
+    Returns:
+        `{"no", "transcript", "transcript_source", "transcript_note"}` 목록.
+
+    Raises:
+        ApiError: 파일 노드가 아니거나 없을 때.
+    """
+    with storage.transaction() as conn:
+        require_file_node(conn, node_id)
+        problems = storage.list_problems(conn, node_id)
+    return [
+        {
+            "no": int(problem["no"]),
+            "transcript": problem.get("transcript"),
+            "transcript_source": problem.get("transcript_source"),
+            "transcript_note": problem.get("transcript_note"),
+        }
+        for problem in problems
+        if problem.get("transcript") or problem.get("transcript_note")
+    ]
+
+
+def save_transcript(node_id: str, no: int, text: str) -> dict[str, Any]:
+    """사용자가 고친 판독본을 저장한다(`transcript_source='manual'`).
+
+    빈 문자열(공백뿐인 값 포함)이면 판독본을 **지운다** — 사용자가 되돌리는
+    경로다. 지우면 출처와 이유도 함께 비므로 다음 재실행이 그 문항을 다시
+    판독한다(`storage.transcribed_numbers` 가 빈 판독본을 세지 않는다).
+
+    `manual` 은 `force` 없는 재실행이 덮지 않는다(`storage.set_transcript` 의
+    보호 조건). 여기서는 사용자가 직접 쓰는 경로라 기존 값이 `manual` 이어도
+    덮어쓴다.
+
+    Args:
+        node_id: 시험지 파일 노드 id.
+        no: 문항 번호.
+        text: 저장할 전문. 빈 문자열이면 삭제.
+
+    Returns:
+        저장 후 상태(`transcripts` 항목과 같은 모양).
+
+    Raises:
+        ApiError: 파일 노드가 아니거나 문항이 없을 때(400/404),
+            길이 상한을 넘겼을 때(400).
+    """
+    cleaned = text.strip()
+    if len(cleaned) > config.MAX_TRANSCRIPT_LENGTH:
+        raise bad_request(
+            "transcript_too_long",
+            "판독본이 너무 깁니다."
+            f" {config.MAX_TRANSCRIPT_LENGTH:,}자 이내로 줄여 주세요.",
+            f"현재 {len(cleaned):,}자입니다.",
+        )
+    with storage.transaction() as conn:
+        require_file_node(conn, node_id)
+        if storage.get_problem(conn, node_id, no) is None:
+            raise not_found(
+                f"{no}번 문항이 없습니다.",
+                "문제 목록을 새로고침해 번호를 확인하세요.",
+            )
+        storage.set_transcript(
+            conn,
+            node_id=node_id,
+            no=no,
+            transcript=cleaned or None,
+            source=storage.TRANSCRIPT_MANUAL if cleaned else None,
+            note=None,
+            overwrite_manual=True,
+        )
+        saved = storage.get_problem(conn, node_id, no)
+    problem = saved or {}
+    return {
+        "no": no,
+        "transcript": problem.get("transcript"),
+        "transcript_source": problem.get("transcript_source"),
+        "transcript_note": problem.get("transcript_note"),
     }
 
 
@@ -504,6 +602,8 @@ def _display_exam_name(name: str) -> str:
 # 내보내기 형식(확장자)과 구성. `include` 기본값은 하위호환을 위해 `problems` 다.
 ExportFormat = Literal["docx", "hwpx"]
 ExportInclude = Literal["problems", "full"]
+# 문항 본문(크롭 이미지 / 판독본 텍스트). 단일 소스는 `export.build` 다.
+ExportBody = export_build.BodyMode
 
 _RENDERERS: Final[dict[str, Callable[[ExportDoc], bytes]]] = {
     "docx": export.build_docx,
@@ -530,17 +630,23 @@ def export_exam(
     fmt: ExportFormat = "docx",
     include: ExportInclude = "problems",
     source: str | None = None,
+    body: ExportBody = "image",
 ) -> tuple[bytes, str]:
     """시험지를 문서로 내보낸다.
 
     문항을 **번호 순서대로** 순회하며 크롭 PNG 를 삽입한다. `include="full"` 이면
     저장된 풀이를 문항 뒤에 붙인다(`## 문제 확인` 은 제외).
 
+    `body="text"` 면 크롭 대신 판독본(`problems.transcript`)을 텍스트로 조판하고,
+    판독본이 없는 문항만 이미지로 낸다(혼합). 판독본만 있고 크롭 파일이 사라진
+    문항도 이때는 내보낼 수 있다.
+
     Args:
         node_id: 시험지 파일 노드 id.
         fmt: `docx` 또는 `hwpx`.
         include: `problems`(문제만) 또는 `full`(문제+해설).
         source: 문서 끝에 넣을 출처(예: 학원 이름). None 이면 넣지 않는다.
+        body: `image`(기본, 지금과 동일) 또는 `text`(판독본 우선).
 
     Returns:
         (문서 바이트, 다운로드 파일명).
@@ -569,11 +675,20 @@ def export_exam(
     items: list[export_build.ExamItem] = []
     for problem in sorted(problems, key=lambda item: int(item["no"])):
         crop = config.data_dir() / str(problem["crop_path"])
-        if not crop.is_file():
+        has_crop = crop.is_file()
+        transcript = problem.get("transcript") if body == "text" else None
+        if not has_crop and not transcript:
+            # 낼 것이 아무것도 없는 문항. 제목만 남기지 않고 통째로 건너뛴다.
             continue
         no = int(problem["no"])
         items.append(
-            export_build.ExamItem(no=no, image=crop, solution=solutions_by_no.get(no))
+            export_build.ExamItem(
+                no=no,
+                image=crop if has_crop else None,
+                solution=solutions_by_no.get(no),
+                transcript=transcript,
+                transcript_source=problem.get("transcript_source"),
+            )
         )
     if not items:
         raise bad_request(
@@ -588,6 +703,7 @@ def export_exam(
         items=items,
         include_full=include == "full",
         source=source,
+        body=body,
     )
     filename = _export_filename(
         display_name, variants=False, fmt=fmt, include=include
@@ -601,6 +717,7 @@ def export_variants(
     fmt: ExportFormat = "docx",
     include: ExportInclude = "problems",
     source: str | None = None,
+    body: ExportBody = "image",
 ) -> tuple[bytes, str]:
     """저장된 변형 문제를 문서로 내보낸다.
 
@@ -612,6 +729,10 @@ def export_variants(
         fmt: `docx` 또는 `hwpx`.
         include: `problems`(변형 문제만) 또는 `full`(정답·풀이 포함).
         source: 문서 끝에 넣을 출처(예: 학원 이름). None 이면 넣지 않는다.
+        body: **받기만 하고 쓰지 않는다.** 변형 문서에는 애초에 크롭 이미지가 없고
+            본문이 이미 텍스트다. 내보내기 6개 라우트가 같은 쿼리를 받도록
+            시그니처만 맞춘다(판독본 고지도 붙이지 않는다 — 변형은 복원본이
+            아니라 AI 가 새로 만든 문제다).
 
     Returns:
         (문서 바이트, 다운로드 파일명).
@@ -652,6 +773,7 @@ def export_note(
     fmt: ExportFormat = "docx",
     include: ExportInclude = "problems",
     source: str | None = None,
+    body: ExportBody = "image",
 ) -> tuple[bytes, str]:
     """오답노트를 문서로 내보낸다.
 
@@ -659,11 +781,16 @@ def export_note(
     `include="full"` 이면 **원본이 살아 있고 저장된 풀이가 있는** 항목에만
     풀이가 붙는다.
 
+    `body="text"` 면 담을 때 복사한 판독본 스냅샷(`note_items.transcript`)을
+    쓴다 — 원본 시험지가 지워진 항목도 텍스트로 나간다. 현재 원본의 판독본을
+    다시 읽지 않는 것이 요점이다(크롭 스냅샷과 같은 규칙).
+
     Args:
         note_id: 오답노트 노드 id.
         fmt: `docx` 또는 `hwpx`.
         include: `problems`(문제만) 또는 `full`(문제+해설).
         source: 문서 끝에 넣을 출처(예: 학원 이름). None 이면 넣지 않는다.
+        body: `image`(기본, 지금과 동일) 또는 `text`(판독본 스냅샷 우선).
 
     Returns:
         (문서 바이트, 다운로드 파일명).
@@ -703,6 +830,8 @@ def export_note(
                 image=image if image is not None and image.is_file() else None,
                 memo=row["memo"],
                 solution=solutions_by_item.get(str(row["id"])),
+                transcript=row.get("transcript") if body == "text" else None,
+                transcript_source=row.get("transcript_source"),
             )
         )
 
@@ -712,6 +841,7 @@ def export_note(
         items=items,
         include_full=include == "full",
         source=source,
+        body=body,
     )
     filename = _export_filename(
         display_name, variants=False, fmt=fmt, include=include
@@ -1084,8 +1214,9 @@ def add_note_items(
 ) -> dict[str, list[int]]:
     """여러 문항을 한 번에 담는다. 이미 있는 문항은 `skipped` 로 돌려준다(멱등).
 
-    추가 시점의 시험지 이름과 크롭 PNG 를 **스냅샷으로 복사**해 둔다. 원본
-    크롭 경로를 참조하면 원본 삭제 시 깨지기 때문이다.
+    추가 시점의 시험지 이름·크롭 PNG·**판독본**을 스냅샷으로 복사해 둔다. 원본을
+    참조하면 원본 삭제 시 깨지기 때문이다(설계 §3-3). 담은 뒤에 원본 판독본을
+    다시 만들거나 고쳐도 이미 담은 항목은 담긴 그 시점의 텍스트로 남는다.
 
     Raises:
         ApiError: 노트/시험지를 찾을 수 없거나 없는 문항 번호일 때.
@@ -1131,6 +1262,8 @@ def add_note_items(
                 problem_no=no,
                 crop_snapshot_path=snapshot,
                 memo=memo,
+                transcript=by_no[no].get("transcript"),
+                transcript_source=by_no[no].get("transcript_source"),
             )
             if not inserted:  # 동시 요청이 먼저 넣은 경우
                 skipped.append(no)
@@ -1217,7 +1350,9 @@ __all__ = [
     "require_note_node",
     "save_conversation_assistant_message",
     "save_conversation_user_message",
+    "save_transcript",
     "solutions",
+    "transcripts",
     "update_node",
     "validate_pdf",
     "variants",

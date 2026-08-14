@@ -89,6 +89,9 @@ from schemas import (
     SolutionsResponse,
     SubscriptionInfo,
     SubscriptionProviderInfo,
+    TranscriptOut,
+    TranscriptSave,
+    TranscriptsResponse,
     TreeResponse,
     UsageSummaryResponse,
     VariantsResponse,
@@ -133,6 +136,11 @@ IncludeQuery = Annotated[
 SourceQuery = Annotated[
     str | None,
     Query(max_length=100, description="문서 끝에 넣을 출처(예: HY EDU). 최대 100자"),
+]
+# 문항 본문. 기본값 `image` 라 생략하면 지금까지와 **같은 문서**가 나온다.
+BodyQuery = Annotated[
+    service.ExportBody,
+    Query(description="image=크롭 이미지(기본), text=판독본 텍스트(없으면 이미지)"),
 ]
 
 
@@ -512,6 +520,48 @@ def read_problem_crop(node_id: NodeId, no: Annotated[int, Path(ge=1)]) -> FileRe
     return FileResponse(service.crop_path(node_id, no), media_type="image/png")
 
 
+# --------------------------------------------------------------- 판독본
+# 조회를 파일 상세(`GET /api/files/{id}`)에 합치지 않는다. 판독본 전문은 문항당
+# 최대 2만 자라 시험지를 열 때마다 수백 KB 를 내려보내게 된다. 풀이도 같은 이유로
+# `has_solution`(목록) + `GET .../solutions`(전문)로 나뉘어 있으므로 그 규칙을 따른다.
+# 파일 상세에는 배지에 필요한 `has_transcript` / `transcript_source` /
+# `transcript_note` 만 들어간다(`ProblemOut`).
+
+
+@app.get(
+    "/api/files/{node_id}/transcripts",
+    response_model=TranscriptsResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def read_transcripts(node_id: NodeId) -> TranscriptsResponse:
+    """저장된 판독본 목록(문항 번호 순).
+
+    아직 판독하지 않은 문항은 빠진다. 판독하지 못한 문항은 `transcript=null` +
+    `transcript_note`(이유)로 들어온다.
+    """
+    items = await run_in_threadpool(service.transcripts, node_id)
+    return TranscriptsResponse.model_validate({"transcripts": items})
+
+
+@app.patch(
+    "/api/files/{node_id}/problems/{no}/transcript",
+    response_model=TranscriptOut,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+async def save_transcript(
+    node_id: NodeId, no: Annotated[int, Path(ge=1)], payload: TranscriptSave
+) -> TranscriptOut:
+    """대조 화면에서 고친 판독본을 저장한다(`transcript_source='manual'`).
+
+    빈 문자열을 보내면 판독본을 지운다(되돌리기). 지운 문항은 다음 텍스트화
+    재실행이 다시 판독한다. `manual` 판독본은 `force` 없는 재실행이 덮지 않는다.
+    """
+    saved = await run_in_threadpool(service.save_transcript, node_id, no, payload.text)
+    return TranscriptOut.model_validate(saved)
+
+
 def _attachment_disposition(filename: str) -> str:
     """RFC5987(UTF-8)로 인코딩한 첨부 `Content-Disposition` 헤더 값.
 
@@ -544,6 +594,7 @@ async def _export_response(
     fmt: service.ExportFormat,
     include: service.ExportInclude,
     source: str | None = None,
+    body: service.ExportBody = "image",
 ) -> Response:
     """내보내기 서비스를 스레드풀에서 돌려 첨부 응답으로 감싼다.
 
@@ -556,12 +607,19 @@ async def _export_response(
         fmt: `docx` 또는 `hwpx`.
         include: `problems` 또는 `full`.
         source: 문서 끝에 넣을 출처(정리 전 원문). 없으면 넣지 않는다.
+        body: `image`(기본) 또는 `text`. 세 exporter 가 모두 받는다(변형은 본문이
+            이미 텍스트라 값을 쓰지 않는다).
 
     Returns:
         첨부 다운로드 응답(Content-Disposition 은 RFC5987 인코딩).
     """
     content, filename = await run_in_threadpool(
-        exporter, node_id, fmt=fmt, include=include, source=_clean_source(source)
+        exporter,
+        node_id,
+        fmt=fmt,
+        include=include,
+        source=_clean_source(source),
+        body=body,
     )
     return Response(
         content=content,
@@ -577,15 +635,26 @@ async def _export_response(
     responses=_ERRORS,
 )
 async def export_file_docx(
-    node_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
+    node_id: NodeId,
+    include: IncludeQuery = "problems",
+    source: SourceQuery = None,
+    body: BodyQuery = "image",
 ) -> Response:
     """시험지 DOCX. 기본은 '문제만'(크롭 이미지), `include=full` 이면 풀이도 넣는다.
+
+    `body=text` 면 판독본이 있는 문항을 텍스트로 조판하고(없는 문항은 이미지),
+    첫 페이지에 복원 고지를 넣는다. 생략하면 지금까지와 같은 문서다.
 
     브라우저가 직접 GET 으로 내려받는 바이너리 라우트라, 미들웨어에서 `?access=`
     쿼리 인증도 허용한다(`_is_binary_asset`). 문항이 없으면 400 이다.
     """
     return await _export_response(
-        service.export_exam, node_id, fmt="docx", include=include, source=source
+        service.export_exam,
+        node_id,
+        fmt="docx",
+        include=include,
+        source=source,
+        body=body,
     )
 
 
@@ -596,14 +665,19 @@ async def export_file_docx(
     responses=_ERRORS,
 )
 async def export_file_hwpx(
-    node_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
+    node_id: NodeId,
+    include: IncludeQuery = "problems",
+    source: SourceQuery = None,
+    body: BodyQuery = "image",
 ) -> Response:
-    """시험지 HWPX(한글). 구성은 DOCX 와 같다.
-
-    수식은 한글 수식 객체가 아니라 유니코드 평문(`x²`)으로 들어간다.
-    """
+    """시험지 HWPX(한글). 구성은 DOCX 와 같다(`body=text` 도 같게 동작한다)."""
     return await _export_response(
-        service.export_exam, node_id, fmt="hwpx", include=include, source=source
+        service.export_exam,
+        node_id,
+        fmt="hwpx",
+        include=include,
+        source=source,
+        body=body,
     )
 
 
@@ -614,11 +688,22 @@ async def export_file_hwpx(
     responses=_ERRORS,
 )
 async def export_variants_docx(
-    node_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
+    node_id: NodeId,
+    include: IncludeQuery = "problems",
+    source: SourceQuery = None,
+    body: BodyQuery = "image",
 ) -> Response:
-    """저장된 변형 문제 DOCX. 원본 크롭은 넣지 않는다. 변형이 없으면 400 이다."""
+    """저장된 변형 문제 DOCX. 원본 크롭은 넣지 않는다. 변형이 없으면 400 이다.
+
+    `body` 는 받기만 한다 — 변형 문서에는 크롭 이미지가 없고 본문이 이미 텍스트다.
+    """
     return await _export_response(
-        service.export_variants, node_id, fmt="docx", include=include, source=source
+        service.export_variants,
+        node_id,
+        fmt="docx",
+        include=include,
+        source=source,
+        body=body,
     )
 
 
@@ -629,11 +714,19 @@ async def export_variants_docx(
     responses=_ERRORS,
 )
 async def export_variants_hwpx(
-    node_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
+    node_id: NodeId,
+    include: IncludeQuery = "problems",
+    source: SourceQuery = None,
+    body: BodyQuery = "image",
 ) -> Response:
     """저장된 변형 문제 HWPX(한글). 구성은 DOCX 와 같다."""
     return await _export_response(
-        service.export_variants, node_id, fmt="hwpx", include=include, source=source
+        service.export_variants,
+        node_id,
+        fmt="hwpx",
+        include=include,
+        source=source,
+        body=body,
     )
 
 
@@ -1261,15 +1354,24 @@ def read_note_item_crop(note_id: NodeId, item_id: NodeId) -> FileResponse:
     responses=_ERRORS,
 )
 async def export_note_docx(
-    note_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
+    note_id: NodeId,
+    include: IncludeQuery = "problems",
+    source: SourceQuery = None,
+    body: BodyQuery = "image",
 ) -> Response:
     """오답노트 DOCX. 스냅샷 크롭을 담고, `include=full` 이면 원본 풀이도 넣는다.
 
     원본 시험지가 지워진 항목도 스냅샷으로 들어간다(풀이만 빠진다).
+    `body=text` 면 담을 때 복사한 판독본 스냅샷을 텍스트로 낸다.
     항목이 없으면 400 이다.
     """
     return await _export_response(
-        service.export_note, note_id, fmt="docx", include=include, source=source
+        service.export_note,
+        note_id,
+        fmt="docx",
+        include=include,
+        source=source,
+        body=body,
     )
 
 
@@ -1280,11 +1382,19 @@ async def export_note_docx(
     responses=_ERRORS,
 )
 async def export_note_hwpx(
-    note_id: NodeId, include: IncludeQuery = "problems", source: SourceQuery = None
+    note_id: NodeId,
+    include: IncludeQuery = "problems",
+    source: SourceQuery = None,
+    body: BodyQuery = "image",
 ) -> Response:
     """오답노트 HWPX(한글). 구성은 DOCX 와 같다."""
     return await _export_response(
-        service.export_note, note_id, fmt="hwpx", include=include, source=source
+        service.export_note,
+        note_id,
+        fmt="hwpx",
+        include=include,
+        source=source,
+        body=body,
     )
 
 
