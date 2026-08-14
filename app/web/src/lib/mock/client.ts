@@ -107,8 +107,8 @@ interface MockState {
 /** 목 작업. `script` 는 미리 만들어 둔 대본이고 워커가 하나씩 소비한다. */
 interface MockJob {
   record: Job;
-  /** 중복 판정을 위해 무엇을 대상으로 하는지 기억한다. */
-  targets: { numbers?: number[]; no?: number; modes?: VariantMode[] };
+  /** 중복 판정을 위해 무엇을 대상으로 하는지 기억한다(변형도 문항 목록이다). */
+  targets: { numbers?: number[]; modes?: VariantMode[] };
   script: MockSseEvent[];
   cursor: number;
   partialText: string;
@@ -1010,6 +1010,7 @@ export const mockClient: ApiClient = {
     const script: MockSseEvent[] = [];
     let total = 0;
     let solveTargets: number[] = [];
+    let variantNumbers: number[] = [];
     if (body.kind === 'solve') {
       const problems = state.problems.get(body.node_id) ?? [];
       const solved = state.solutions.get(body.node_id) ?? new Map<number, Solution>();
@@ -1037,17 +1038,23 @@ export const mockClient: ApiClient = {
         script.push(event);
       }
     } else {
-      const no = body.no ?? 1;
+      // 다중 선택은 problem_numbers 로 온다. 없으면 기존 단일 경로(no).
+      variantNumbers =
+        body.problem_numbers && body.problem_numbers.length > 0
+          ? [...new Set(body.problem_numbers)]
+          : [body.no ?? 1];
       const modes = body.modes ?? ['number'];
-      total = modes.length;
+      total = variantNumbers.length * modes.length;
       script.push({ event: 'start', data: { total }, delayMs: 40 });
-      for (const mode of modes) {
-        for await (const event of variantScript(no, mode, {
-          provider: body.provider,
-          model: body.model,
-        })) {
-          const data = (event.data ?? {}) as Record<string, unknown>;
-          script.push({ ...event, data: { ...data, mode } });
+      for (const no of variantNumbers) {
+        for (const mode of modes) {
+          for await (const event of variantScript(no, mode, {
+            provider: body.provider,
+            model: body.model,
+          })) {
+            const data = (event.data ?? {}) as Record<string, unknown>;
+            script.push({ ...event, data: { ...data, mode } });
+          }
         }
       }
       script.push({
@@ -1076,7 +1083,7 @@ export const mockClient: ApiClient = {
       targets:
         body.kind === 'solve'
           ? { numbers: solveTargets }
-          : { no: body.no ?? 1, modes: body.modes ?? ['number'] },
+          : { numbers: variantNumbers, modes: body.modes ?? ['number'] },
       script,
       cursor: 0,
       partialText: '',
@@ -1120,7 +1127,12 @@ function overlapsTarget(existing: MockJob, body: JobCreateRequest): boolean {
     const wanted = new Set(body.problem_numbers);
     return existing.targets.numbers?.some((no) => wanted.has(no)) ?? false;
   }
-  if (existing.targets.no !== body.no) return false;
+  const wantedNumbers = new Set(
+    body.problem_numbers && body.problem_numbers.length > 0
+      ? body.problem_numbers
+      : [body.no ?? 1],
+  );
+  if (!existing.targets.numbers?.some((no) => wantedNumbers.has(no))) return false;
   const wanted = new Set(body.modes ?? ['number']);
   return existing.targets.modes?.some((mode) => wanted.has(mode)) ?? false;
 }

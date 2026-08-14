@@ -29,6 +29,7 @@ import {
   type ProviderConfig,
 } from '@/lib/provider-config';
 import { isDescendantOf } from '@/lib/tree';
+import { variantModesOf, type VariantPickKind } from '@/lib/variant';
 import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { uploadTargetLabel } from '@/lib/upload-target';
 import {
@@ -413,6 +414,30 @@ interface WorkspaceState {
   toggleNotePick: (no: number) => void;
   /** 주어진 번호들로 선택을 통째로 바꾼다(전체 선택/해제용). */
   setNotePicked: (numbers: number[]) => void;
+
+  /**
+   * 변형을 만들 문항 고르기 모드.
+   *
+   * 담기 모드(`notePicking`)와 **상호 배타**다 — 한쪽을 켜면 다른 쪽은 꺼진다.
+   * 두 모드가 같은 체크박스를 쓰므로, 동시에 켜지면 체크 하나가 두 뜻을 갖는다.
+   */
+  variantPicking: boolean;
+  /** 변형을 만들 문항 번호(오름차순). */
+  variantPicked: number[];
+  /** 만들 변형 유형. `'all'` 은 3종 모두를 뜻한다. */
+  variantKind: VariantPickKind;
+  /** 변형 모드를 켠다(담기 모드는 끈다). 이전 선택은 버린다. */
+  startVariantPicking: () => void;
+  /** 변형 모드를 끄고 선택을 비운다. */
+  stopVariantPicking: () => void;
+  /** 문항 하나를 선택/해제한다. */
+  toggleVariantPick: (no: number) => void;
+  /** 주어진 번호들로 선택을 통째로 바꾼다(전체 선택/해제용). */
+  setVariantPicked: (numbers: number[]) => void;
+  /** 만들 변형 유형을 고른다(단일 선택). */
+  setVariantKind: (kind: VariantPickKind) => void;
+  /** 고른 문항 × 고른 유형을 한 작업으로 걸고 변형 모드를 닫는다. */
+  startVariantBatch: () => Promise<void>;
   /**
    * 취소를 요청했지만 아직 서버가 멈추지 않은 작업 id.
    *
@@ -916,6 +941,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   cancelingJobIds: [],
   notePicking: false,
   notePicked: [],
+  variantPicking: false,
+  variantPicked: [],
+  variantKind: 'number',
 
   openKind: 'none',
   selectedFileId: null,
@@ -1466,9 +1494,12 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       solutionsStatus: 'loading',
       solve: emptySolve,
       focusRequest: null,
-      // 다른 시험지를 열면 담기 선택을 버린다(엉뚱한 문항을 담는 사고 방지).
+      // 다른 시험지를 열면 담기·변형 선택을 버린다(엉뚱한 문항을 담거나
+      // 엉뚱한 문항의 변형을 만드는 사고 방지).
       notePicking: false,
       notePicked: [],
+      variantPicking: false,
+      variantPicked: [],
     });
     // 새로고침 복원용: 마지막으로 연 파일을 기록한다.
     persistPrefs({ lastFileId: id });
@@ -1968,7 +1999,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
   startNotePicking() {
     // 이전 선택을 반드시 버린다. 남기면 담기 모달을 닫기만 했을 때 그 선택이
     // 다음 담기에 딸려가 엉뚱한 문항이 노트에 들어간다.
-    set({ notePicking: true, notePicked: [] });
+    // 변형 모드는 같은 체크박스를 쓰므로 함께 끈다(체크 하나에 뜻은 하나).
+    set({ notePicking: true, notePicked: [], variantPicking: false, variantPicked: [] });
   },
 
   stopNotePicking() {
@@ -1985,6 +2017,94 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
 
   setNotePicked(numbers: number[]) {
     set({ notePicked: [...numbers].sort((a, b) => a - b) });
+  },
+
+  startVariantPicking() {
+    // 담기 모드와 같은 규칙: 이전 선택을 버리고 시작한다(엉뚱한 문항 방지).
+    set({ variantPicking: true, variantPicked: [], notePicking: false, notePicked: [] });
+  },
+
+  stopVariantPicking() {
+    set({ variantPicking: false, variantPicked: [] });
+  },
+
+  toggleVariantPick(no: number) {
+    set((state) => ({
+      variantPicked: state.variantPicked.includes(no)
+        ? state.variantPicked.filter((item) => item !== no)
+        : [...state.variantPicked, no].sort((a, b) => a - b),
+    }));
+  },
+
+  setVariantPicked(numbers: number[]) {
+    set({ variantPicked: [...numbers].sort((a, b) => a - b) });
+  },
+
+  setVariantKind(kind: VariantPickKind) {
+    set({ variantKind: kind });
+  },
+
+  async startVariantBatch() {
+    const { selectedFileId, variantPicked, variantKind, model, effort, provider } = get();
+    if (!selectedFileId) {
+      get().showToast({ kind: 'info', message: '먼저 왼쪽에서 시험지 파일을 선택하세요.' });
+      return;
+    }
+    if (variantPicked.length === 0) {
+      // 모드는 열어 둔다 — 사용자가 이어서 고르면 된다.
+      get().showToast({ kind: 'info', message: '변형을 만들 문항을 먼저 고르세요.' });
+      return;
+    }
+
+    const modes = variantModesOf(variantKind);
+    let created;
+    try {
+      created = await api.createJob({
+        kind: 'variant',
+        node_id: selectedFileId,
+        problem_numbers: variantPicked,
+        modes,
+        provider,
+        model,
+        effort,
+      });
+    } catch (error) {
+      // "이미 모두 만들어져 있습니다" 같은 거절도 여기로 온다. 선택은 남겨 둔다.
+      get().showToast({ kind: 'info', message: toUserMessage(error) });
+      return;
+    }
+
+    // 진행 이벤트는 (문항, 종류)별 항목을 **갱신**하므로 자리를 먼저 만들어 둔다.
+    // 이미 done 인 조합은 서버도 건너뛰므로 그대로 둔다(스트리밍으로 되돌리면
+    // 오지 않을 이벤트를 기다리며 영원히 "생성 중" 으로 남는다).
+    set((state) => {
+      let variants = state.variants;
+      for (const no of variantPicked) {
+        const key = variantKey(selectedFileId, no);
+        for (const mode of modes) {
+          if (variants[key]?.[mode]?.status === 'done') continue;
+          variants = setVariant(variants, key, mode, {
+            mode,
+            text: '',
+            streamingText: '',
+            status: 'streaming',
+            usage: null,
+            cost: null,
+            error: null,
+          });
+        }
+      }
+      return { variants, activeTab: 'solutions' };
+    });
+
+    get().stopVariantPicking();
+    get().showToast({
+      kind: 'success',
+      message: `${variantPicked.length}개 문항의 변형을 만들기 시작했습니다.`,
+      hint: '화면을 떠나도 계속 진행됩니다. 진행 상황은 상단 배너에서 볼 수 있습니다.',
+    });
+    await get().loadJobs();
+    void watchJob(created.job);
   },
 
   async cancelJob(jobId: string) {
@@ -2151,6 +2271,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         node_id: fileId,
         no,
         modes: [mode],
+        // 서버도 이미 만든 (문항, 종류)를 건너뛴다. "다시 생성" 은 그 규칙을
+        // 넘어야 하므로 force 를 실어야 한다(안 실으면 400 으로 거절된다).
+        force,
         provider,
         model,
         effort,

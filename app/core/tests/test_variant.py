@@ -107,6 +107,143 @@ def test_variant_multiple_modes_in_one_job(
     assert len(stub_provider.calls) == 3
 
 
+def test_variant_job_accepts_multiple_problems(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """문항 여러 개 x 유형 여러 개를 한 작업으로 만든다(요청 1·2)."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    body = create_job(
+        client,
+        kind="variant",
+        node_id=node_id,
+        problem_numbers=[1, 2],
+        modes=["number", "condition"],
+    )
+    assert body["job"]["total"] == 4  # 2문항 x 2유형
+
+    with storage.transaction() as conn:
+        record = storage.get_job(conn, body["job"]["id"])
+    assert record is not None
+    assert record["targets"]["numbers"] == [1, 2]
+    assert record["targets"]["modes"] == ["number", "condition"]
+
+    final = wait_job(client, body["job"]["id"])
+    assert final["status"] == "done"
+    assert final["done_count"] == 4
+
+    saved = client.get(f"/api/files/{node_id}/variants").json()["variants"]
+    assert {(item["no"], item["mode"]) for item in saved} == {
+        (1, "number"),
+        (1, "condition"),
+        (2, "number"),
+        (2, "condition"),
+    }
+
+
+def test_variant_job_single_problem_still_works(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """기존 단일 경로(no)를 깨지 않는다 — VariantPanel 이 계속 쓴다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    body = create_job(
+        client, kind="variant", node_id=node_id, no=1, modes=["number"]
+    )
+    assert body["job"]["total"] == 1
+
+    with storage.transaction() as conn:
+        record = storage.get_job(conn, body["job"]["id"])
+    assert record is not None
+    assert record["targets"]["numbers"] == [1]
+    assert record["targets"]["modes"] == ["number"]
+    assert wait_job(client, body["job"]["id"])["status"] == "done"
+
+
+def test_variant_batch_skips_already_generated(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """force 가 아니면 이미 만든 (문항, 유형)은 건너뛴다(풀이 규칙과 같다)."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    first = create_job(client, kind="variant", node_id=node_id, no=1, modes=["number"])
+    wait_job(client, first["job"]["id"])
+
+    second = create_job(
+        client,
+        kind="variant",
+        node_id=node_id,
+        problem_numbers=[1, 2],
+        modes=["number"],
+    )
+    assert second["job"]["total"] == 1  # (1, number) 는 이미 있다
+
+    with storage.transaction() as conn:
+        record = storage.get_job(conn, second["job"]["id"])
+    assert record is not None
+    assert record["targets"]["numbers"] == [2]
+
+    wait_job(client, second["job"]["id"])
+    assert len(stub_provider.calls) == 2  # 재생성이 아니라 새 문항 1건만
+
+
+def test_variant_batch_all_already_generated_400(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """남는 대상이 없으면 400 으로 알린다(쿼터를 헛되이 쓰지 않는다)."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    first = create_job(client, kind="variant", node_id=node_id, no=1, modes=["number"])
+    wait_job(client, first["job"]["id"])
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "kind": "variant",
+            "node_id": node_id,
+            "problem_numbers": [1],
+            "modes": ["number"],
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error_code"] == "already_generated"
+
+
+def test_variant_batch_force_regenerates(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """force 면 이미 있는 (문항, 유형)도 다시 만든다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    first = create_job(client, kind="variant", node_id=node_id, no=1, modes=["number"])
+    wait_job(client, first["job"]["id"])
+
+    second = create_job(
+        client,
+        kind="variant",
+        node_id=node_id,
+        problem_numbers=[1],
+        modes=["number"],
+        force=True,
+    )
+    assert second["job"]["total"] == 1
+    assert wait_job(client, second["job"]["id"])["status"] == "done"
+    assert len(stub_provider.calls) == 2
+
+
+def test_variant_batch_unknown_problem_404(
+    client: TestClient, stub_provider: StubProvider
+) -> None:
+    """다중 선택 안에 없는 문항이 섞이면 404(단일 경로와 같은 규칙)."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    response = client.post(
+        "/api/jobs",
+        json={
+            "kind": "variant",
+            "node_id": node_id,
+            "problem_numbers": [1, 999],
+            "modes": ["number"],
+        },
+    )
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "not_found"
+
+
 def test_variant_invalid_mode_422(
     client: TestClient, stub_provider: StubProvider
 ) -> None:

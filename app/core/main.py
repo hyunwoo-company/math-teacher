@@ -16,6 +16,7 @@ import os
 import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Annotated, Any, Final, Literal
 from urllib.parse import quote
 
@@ -696,34 +697,46 @@ async def create_job(
             ),
         )
     else:
-        if payload.no is None:
+        numbers = _variant_numbers(payload)
+        if not numbers:
             raise bad_request(
                 "no_required",
                 "변형 작업에는 문항 번호가 필요합니다.",
-                "no 필드를 넣어 주세요.",
+                "problem_numbers 또는 no 를 넣어 주세요.",
             )
-        kinds = list(payload.modes or ["number"])
-        mode, problem, node_name = await run_in_threadpool(
-            ai_service.plan_variant_job, payload.node_id, payload.no
+        kinds = list(dict.fromkeys(payload.modes or ["number"]))
+        mode, variant_targets, node_name = await run_in_threadpool(
+            partial(
+                ai_service.plan_variant_batch,
+                payload.node_id,
+                numbers,
+                kinds,
+                force=payload.force,
+            )
         )
         record = await run_in_threadpool(
             _insert_job,
             kind="variant",
             node_id=payload.node_id,
             node_name=node_name,
-            targets={"no": payload.no, "modes": kinds},
+            # 실제로 만들 대상만 남긴다(건너뛴 문항은 numbers 에도 없다).
+            targets={
+                "numbers": sorted(
+                    {int(target.problem["no"]) for target in variant_targets}
+                ),
+                "modes": kinds,
+            },
             params=params,
-            total=len(kinds),
+            total=len(variant_targets),
         )
         jobs.runner.submit(
             job_id=record["id"],
-            total=len(kinds),
+            total=len(variant_targets),
             factory=jobs.variant_batch_factory(
                 node_id=payload.node_id,
                 provider=provider,
                 mode=mode,
-                problem=problem,
-                kinds=kinds,
+                targets=variant_targets,
                 model=model,
                 effort=payload.effort,
             ),
@@ -734,6 +747,23 @@ async def create_job(
         existing=False,
         position=max(0, jobs.runner.queued_count - 1),
     )
+
+
+def _variant_numbers(payload: JobCreate) -> list[int]:
+    """변형 작업의 대상 문항 번호들(중복 제거, 요청 순서 유지).
+
+    다중 선택은 `problem_numbers` 로 온다. 없으면 기존 단일 경로(`no`)를 쓴다 —
+    문항별 `VariantPanel` 이 계속 그 형태로 보낸다.
+
+    Args:
+        payload: 작업 요청.
+
+    Returns:
+        대상 문항 번호들. 둘 다 비었으면 빈 목록.
+    """
+    if payload.problem_numbers:
+        return list(dict.fromkeys(int(no) for no in payload.problem_numbers))
+    return [] if payload.no is None else [int(payload.no)]
 
 
 def _find_overlapping_job(payload: JobCreate) -> dict[str, Any] | None:
@@ -766,15 +796,36 @@ def _find_overlapping_job(payload: JobCreate) -> dict[str, Any] | None:
         return None
 
     wanted_modes = set(payload.modes or ["number"])
+    wanted_numbers = set(_variant_numbers(payload))
     for job in active:
         targets = job["targets"]
         if not isinstance(targets, dict):
             continue
-        if targets.get("no") != payload.no:
+        if not wanted_numbers & _job_variant_numbers(targets):
             continue
         if wanted_modes & set(targets.get("modes") or []):
             return job
     return None
+
+
+def _job_variant_numbers(targets: dict[str, Any]) -> set[int]:
+    """변형 작업 targets 에서 문항 번호 집합을 꺼낸다.
+
+    다중 선택 이전에 만들어진 작업은 `{"no": 3, ...}` 형태다. 서버를 새로
+    띄우면 남은 작업은 `interrupted` 가 되지만, 무중단 배포 중 겹치는 순간이
+    있으므로 옛 형태도 읽어 준다.
+
+    Args:
+        targets: 작업 행의 targets(JSON 파싱된 dict).
+
+    Returns:
+        그 작업이 다루는 문항 번호 집합.
+    """
+    numbers = targets.get("numbers")
+    if isinstance(numbers, list):
+        return {int(no) for no in numbers}
+    single = targets.get("no")
+    return set() if single is None else {int(single)}
 
 
 def _insert_job(**kwargs: Any) -> dict[str, Any]:

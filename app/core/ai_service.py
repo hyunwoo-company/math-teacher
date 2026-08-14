@@ -918,16 +918,112 @@ def plan_solve_job(
     return mode, remaining, str(node["name"])
 
 
+class VariantTarget(NamedTuple):
+    """만들 변형 하나 = (소스 문항, 변형 종류).
+
+    문항마다 이미 만들어 둔 종류가 다를 수 있어(예: 1번은 숫자만 있고 2번은
+    없음) 단순한 문항x종류 곱으로는 대상을 표현할 수 없다. 그래서 실제로
+    만들 조합만 납작한 목록으로 들고 다닌다.
+    """
+
+    problem: dict[str, Any]
+    kind: str
+
+
+def _load_variant_sources(
+    node_id: str, numbers: Sequence[int]
+) -> tuple[Mode, list[dict[str, Any]], str]:
+    """변형 소스 문항들을 한 번에 읽어온다 (블로킹).
+
+    Args:
+        node_id: 시험지 노드 id.
+        numbers: 소스 문항 번호들(중복은 첫 등장 순서로 정리한다).
+
+    Returns:
+        (모드, 소스 문항들, 표시용 시험지 이름).
+
+    Raises:
+        ApiError: 파일이 없거나(404) 없는 문항 번호가 섞였을 때(404).
+    """
+    with storage.transaction() as conn:
+        node = service.require_file_node(conn, node_id)
+        meta = storage.get_file(conn, node_id)
+        problems = {
+            int(problem["no"]): problem
+            for problem in storage.list_problems(conn, node_id)
+        }
+
+    mode: Mode = "image" if (meta or {}).get("mode") == "image" else "text"
+    wanted = list(dict.fromkeys(int(no) for no in numbers))
+    missing = [no for no in wanted if no not in problems]
+    if missing:
+        listed = ", ".join(str(no) for no in missing)
+        raise not_found(
+            f"{listed}번 문항이 없습니다.",
+            "문제 목록을 새로고침해 번호를 확인하세요.",
+        )
+    return mode, [problems[no] for no in wanted], str(node["name"])
+
+
 def plan_variant_job(node_id: str, no: int) -> tuple[Mode, dict[str, Any], str]:
-    """변형 작업 대상을 정한다 (블로킹).
+    """변형 작업 대상을 정한다 (블로킹, 단일 문항).
+
+    Args:
+        node_id: 시험지 노드 id.
+        no: 소스 문항 번호.
 
     Returns:
         (모드, 소스 문항, 표시용 시험지 이름).
+
+    Raises:
+        ApiError: 파일이나 문항이 없을 때 (404).
     """
-    mode, problem = load_variant_target(node_id, no)
+    mode, problems, node_name = _load_variant_sources(node_id, [no])
+    return mode, problems[0], node_name
+
+
+def plan_variant_batch(
+    node_id: str,
+    numbers: Sequence[int],
+    kinds: Sequence[str],
+    *,
+    force: bool,
+) -> tuple[Mode, list[VariantTarget], str]:
+    """변형 일괄 작업 대상을 정한다 (블로킹).
+
+    이미 만들어 둔 (문항, 종류)를 건너뛰는 규칙을 **서버에서** 적용한다.
+    풀이(`plan_solve_job`)와 같은 규칙이다 — 잡을 만든 창이 아니어도 통한다.
+
+    Args:
+        node_id: 시험지 노드 id.
+        numbers: 대상 문항 번호들.
+        kinds: 만들 변형 종류들.
+        force: True 면 이미 만든 조합도 다시 만든다.
+
+    Returns:
+        (모드, 만들 조합들(문항 → 종류 순), 표시용 시험지 이름).
+
+    Raises:
+        ApiError: 파일/문항이 없을 때(404). 남는 조합이 없으면
+            400 `already_generated`.
+    """
+    mode, problems, node_name = _load_variant_sources(node_id, numbers)
+    wanted_kinds = list(dict.fromkeys(kinds))
     with storage.transaction() as conn:
-        node = service.require_file_node(conn, node_id)
-    return mode, problem, str(node["name"])
+        made = set() if force else storage.variant_keys(conn, node_id)
+    targets = [
+        VariantTarget(problem, kind)
+        for problem in problems
+        for kind in wanted_kinds
+        if (int(problem["no"]), kind) not in made
+    ]
+    if not targets:
+        raise bad_request(
+            "already_generated",
+            "요청한 변형은 이미 모두 만들어져 있습니다.",
+            '다시 만들려면 "다시 생성" 을 눌러 주세요.',
+        )
+    return mode, targets, node_name
 
 
 async def variant_batch_events(
@@ -935,18 +1031,29 @@ async def variant_batch_events(
     node_id: str,
     provider: Provider,
     mode: Mode,
-    problem: dict[str, Any],
-    kinds: Sequence[str],
+    targets: Sequence[VariantTarget],
     model: str,
     effort: Effort,
 ) -> AsyncIterator[Event]:
-    """한 문항의 여러 변형 종류를 순차로 만들며 이벤트를 흘린다.
+    """여러 (문항, 변형 종류) 조합을 순차로 만들며 이벤트를 흘린다.
 
-    작업 하나가 여러 변형(숫자/조건/숫자+조건)을 담을 수 있게 감싼 것이다.
-    `done` / `error` 데이터에 어떤 종류인지 알 수 있도록 `mode` 키를 더한다.
+    작업 하나가 여러 문항 x 여러 변형(숫자/조건/숫자+조건)을 담을 수 있게 감싼
+    것이다. `done` / `error` 데이터에 어떤 종류인지 알 수 있도록 `mode` 키를
+    더한다(문항 번호는 각 이벤트의 `no` 가 이미 갖고 있다).
+
+    Args:
+        node_id: 시험지 노드 id.
+        provider: 사용할 프로바이더.
+        mode: 문항 표현 방식(`image` / `text`).
+        targets: 만들 조합들. 앞에서부터 순차로 처리한다.
+        model: 모델 id.
+        effort: 추론 강도.
+
+    Yields:
+        `start` → (조합마다 delta/done/error) → `end` 이벤트.
     """
-    yield ("start", {"total": len(kinds)})
-    for kind in kinds:
+    yield ("start", {"total": len(targets)})
+    for problem, kind in targets:
         async for name, data in variant_events(
             node_id=node_id,
             provider=provider,

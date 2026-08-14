@@ -775,6 +775,23 @@ def list_variants(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]
     return [_variant_row_to_dict(row) for row in rows]
 
 
+def variant_keys(conn: sqlite3.Connection, node_id: str) -> set[tuple[int, str]]:
+    """변형이 이미 있는 (문항 번호, 종류) 조합.
+
+    일괄 생성에서 이미 만든 것을 건너뛰는 데 쓴다(풀이의 `solved_numbers` 와
+    같은 역할). 본문까지 읽는 `list_variants` 와 달리 키만 읽는다.
+
+    Args:
+        conn: 열린 커넥션.
+        node_id: 시험지 노드 id.
+
+    Returns:
+        (문항 번호, 변형 종류) 집합.
+    """
+    rows = conn.execute("SELECT no, mode FROM variants WHERE node_id = ?", (node_id,))
+    return {(int(row["no"]), str(row["mode"])) for row in rows}
+
+
 def get_variant(
     conn: sqlite3.Connection, node_id: str, no: int, mode: str
 ) -> dict[str, Any] | None:

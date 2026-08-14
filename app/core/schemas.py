@@ -242,15 +242,20 @@ JobStatus = Literal["queued", "running", "done", "error", "canceled", "interrupt
 class JobCreate(BaseModel):
     """`POST /api/jobs` 요청.
 
-    `kind="solve"` 면 `problem_numbers`(null = 전체)를,
-    `kind="variant"` 면 `no` 와 `modes` 를 쓴다.
+    `kind="solve"` 면 `problem_numbers`(null = 전체)를 쓴다.
+
+    `kind="variant"` 는 대상 문항을 두 가지로 받는다. `problem_numbers` 가 오면
+    그 문항들을, 없으면 `no` 하나를 대상으로 삼는다(문항별 `VariantPanel` 이
+    계속 `no` 를 쓴다). 만들 조합은 (문항 x `modes`) 이며, `force` 가 아니면
+    이미 만들어 둔 조합은 건너뛴다.
     """
 
     kind: JobKind
+    #: 시험지 노드 id.
     node_id: str
-    #: solve 전용. null 이면 전체 문항.
+    #: solve: 대상 문항(null = 전체). variant: 대상 문항들(null 이면 `no` 를 쓴다).
     problem_numbers: list[int] | None = None
-    #: variant 전용. 소스 문항 번호.
+    #: variant 전용. 소스 문항 번호(단일 경로, 하위호환).
     no: int | None = None
     #: variant 전용. 만들 변형 종류들.
     modes: list[VariantKind] | None = None

@@ -11,10 +11,14 @@ import { CopyButton } from '@/components/ui/CopyButton';
 import { toPlainText } from '@/lib/to-plain-text';
 import { EmptyState, InlineBadge, LoadingState, Spinner } from '@/components/ui/Feedback';
 import { costAmounts, formatDateTime, formatInt, formatKrw, formatUsd, totalTokens } from '@/lib/format';
+import { VARIANT_PICK_KINDS, VARIANT_PICK_LABEL } from '@/lib/variant';
 import { useWorkspace, type SolutionEntry } from '@/store/workspace';
 import type { Problem } from '@/types/api';
 
 const EMPTY_PROBLEMS: Problem[] = [];
+
+/** 문항 행의 체크박스가 무엇을 고르는 중인지. 두 모드는 동시에 켜지지 않는다. */
+type PickMode = 'none' | 'note' | 'variant';
 
 /** 중앙 [풀이] 탭: 문제별 아코디언. */
 export function SolutionsTab() {
@@ -25,6 +29,15 @@ export function SolutionsTab() {
   const picking = useWorkspace((state) => state.notePicking);
   const notePicked = useWorkspace((state) => state.notePicked);
   const toggleNotePick = useWorkspace((state) => state.toggleNotePick);
+  const variantPicking = useWorkspace((state) => state.variantPicking);
+  const variantPicked = useWorkspace((state) => state.variantPicked);
+  const variantKind = useWorkspace((state) => state.variantKind);
+  const startVariantPicking = useWorkspace((state) => state.startVariantPicking);
+  const stopVariantPicking = useWorkspace((state) => state.stopVariantPicking);
+  const toggleVariantPick = useWorkspace((state) => state.toggleVariantPick);
+  const setVariantPicked = useWorkspace((state) => state.setVariantPicked);
+  const setVariantKind = useWorkspace((state) => state.setVariantKind);
+  const startVariantBatch = useWorkspace((state) => state.startVariantBatch);
   const solutions = useWorkspace((state) => state.solutions);
   const solutionsStatus = useWorkspace((state) => state.solutionsStatus);
   const selectedProblemNo = useWorkspace((state) => state.selectedProblemNo);
@@ -73,7 +86,9 @@ export function SolutionsTab() {
     );
   }
 
-  const pickedSet = new Set(notePicked);
+  // 두 모드는 상호 배타라 체크박스 하나가 언제나 한 가지 뜻만 갖는다.
+  const pickMode: PickMode = variantPicking ? 'variant' : picking ? 'note' : 'none';
+  const pickedSet = new Set(pickMode === 'variant' ? variantPicked : notePicked);
   // 이 시험지에서 진행 중인 풀이 작업(문항 행의 중단 버튼이 이걸 취소한다).
   const runningJob =
     jobs.find(
@@ -105,7 +120,21 @@ export function SolutionsTab() {
             {solve.currentNo != null ? ` (현재 ${solve.currentNo}번)` : ''}
           </span>
         ) : null}
-        <label className="ml-auto flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => (variantPicking ? stopVariantPicking() : startVariantPicking())}
+          aria-pressed={variantPicking}
+          title="문항을 여러 개 골라 변형 문제를 한 번에 만듭니다"
+          className={clsx(
+            'ml-auto rounded border px-2 py-0.5 text-[11px] font-medium',
+            variantPicking
+              ? 'border-violet-600 bg-violet-600 text-white hover:bg-violet-700'
+              : 'border-violet-300 bg-white text-violet-700 hover:bg-violet-50',
+          )}
+        >
+          변형 만들기
+        </button>
+        <label className="flex items-center gap-1.5">
           <input
             type="checkbox"
             checked={unsolvedOnly}
@@ -115,6 +144,62 @@ export function SolutionsTab() {
           미풀이만 보기
         </label>
       </div>
+
+      {variantPicking ? (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-violet-200 bg-violet-50 px-3 py-1.5 text-[12px] text-slate-700">
+          <span className="font-medium text-violet-900">변형 유형</span>
+          <div className="flex items-center gap-1">
+            {VARIANT_PICK_KINDS.map((kind) => (
+              <button
+                key={kind}
+                type="button"
+                onClick={() => setVariantKind(kind)}
+                aria-pressed={variantKind === kind}
+                className={clsx(
+                  'rounded border px-2 py-0.5 text-[11px]',
+                  variantKind === kind
+                    ? 'border-violet-600 bg-violet-600 text-white'
+                    : 'border-violet-300 bg-white text-violet-700 hover:bg-violet-100',
+                )}
+              >
+                {VARIANT_PICK_LABEL[kind]}
+              </button>
+            ))}
+          </div>
+          <span className="text-violet-900">{variantPicked.length}개 문항 선택됨</span>
+          <button
+            type="button"
+            onClick={() => setVariantPicked(visible.map((problem) => problem.no))}
+            className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+          >
+            전체 선택
+          </button>
+          <button
+            type="button"
+            onClick={() => setVariantPicked([])}
+            className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+          >
+            선택 해제
+          </button>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void startVariantBatch()}
+              disabled={variantPicked.length === 0}
+              className="rounded border border-violet-600 bg-violet-600 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+            >
+              {variantPicked.length}개 문항 변형 생성
+            </button>
+            <button
+              type="button"
+              onClick={() => stopVariantPicking()}
+              className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="min-h-0 flex-1 overflow-auto">
         {visible.length === 0 ? (
@@ -152,9 +237,13 @@ export function SolutionsTab() {
                     ? `이 시험지의 풀이 작업(${runningJob.total}문항) 전체가 중단됩니다`
                     : '이 문제 풀이를 중단합니다'
                 }
-                picking={picking}
+                pickMode={pickMode}
                 picked={pickedSet.has(problem.no)}
-                onTogglePick={() => toggleNotePick(problem.no)}
+                onTogglePick={() =>
+                  pickMode === 'variant'
+                    ? toggleVariantPick(problem.no)
+                    : toggleNotePick(problem.no)
+                }
               />
             ))}
           </ul>
@@ -182,9 +271,9 @@ interface SolutionRowProps {
   /** 중단 버튼 문구(단일 문항인지 전체 풀이인지에 따라 다르다). */
   cancelLabel: string;
   cancelTitle: string;
-  /** 오답노트 담기 모드인지. */
-  picking: boolean;
-  /** 이 문항이 담기 대상으로 골라졌는지. */
+  /** 지금 체크박스가 무엇을 고르는 중인지('none' 이면 체크박스를 숨긴다). */
+  pickMode: PickMode;
+  /** 이 문항이 고른 대상인지. */
   picked: boolean;
   onTogglePick: () => void;
 }
@@ -204,7 +293,7 @@ function SolutionRow({
   canceling,
   cancelLabel,
   cancelTitle,
-  picking,
+  pickMode,
   picked,
   onTogglePick,
 }: SolutionRowProps) {
@@ -215,16 +304,26 @@ function SolutionRow({
   const tokens = totalTokens(entry?.usage);
 
   return (
-    <li className={clsx(selected && 'bg-blue-50/40', picking && picked && 'bg-rose-50/60')}>
+    <li
+      className={clsx(
+        selected && 'bg-blue-50/40',
+        picked && pickMode === 'note' && 'bg-rose-50/60',
+        // 변형 모드는 담기(rose)와 다른 색으로 구분한다.
+        picked && pickMode === 'variant' && 'bg-violet-50/60',
+      )}
+    >
       <div className="flex w-full items-start gap-3 px-3 py-2">
-        {/* 담기 모드에서만 체크박스가 보인다. 상단 번호 줄과 같은 선택을 공유한다. */}
-        {picking ? (
+        {/* 담기·변형 모드에서만 체크박스가 보인다. 상단 번호 줄과 같은 선택을 공유한다. */}
+        {pickMode !== 'none' ? (
           <input
             type="checkbox"
             checked={picked}
             onChange={() => onTogglePick()}
-            aria-label={`${problem.no}번 오답노트 선택`}
-            className="mt-1 h-4 w-4 shrink-0 accent-rose-600"
+            aria-label={`${problem.no}번 ${pickMode === 'variant' ? '변형' : '오답노트'} 선택`}
+            className={clsx(
+              'mt-1 h-4 w-4 shrink-0',
+              pickMode === 'variant' ? 'accent-violet-600' : 'accent-rose-600',
+            )}
           />
         ) : null}
         <button

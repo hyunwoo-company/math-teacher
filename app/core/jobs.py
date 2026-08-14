@@ -329,7 +329,7 @@ def solve_factory(**kwargs: Any) -> Callable[[], AsyncIterator[Event]]:
 
 
 def variant_batch_factory(**kwargs: Any) -> Callable[[], AsyncIterator[Event]]:
-    """변형 이벤트 팩토리(한 문항의 여러 변형 종류를 순차 실행)."""
+    """변형 이벤트 팩토리(여러 문항 x 여러 변형 종류를 순차 실행)."""
 
     def make() -> AsyncIterator[Event]:
         return ai_service.variant_batch_events(**kwargs)

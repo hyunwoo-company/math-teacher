@@ -154,6 +154,82 @@ describe('변형 문제 생성 (목 API)', () => {
     expect(variants[__internal.variantKey(MOCK_FILE_ID, 2)]?.number?.status).toBe('done');
   }, 30_000);
 
+  it('변형 모드와 담기 모드는 동시에 켜지지 않는다', () => {
+    useWorkspace.getState().startNotePicking();
+    expect(useWorkspace.getState().notePicking).toBe(true);
+
+    useWorkspace.getState().startVariantPicking();
+    expect(useWorkspace.getState().variantPicking).toBe(true);
+    expect(useWorkspace.getState().notePicking).toBe(false);
+
+    // 반대 방향도 같다: 담기를 켜면 변형 모드가 꺼진다.
+    useWorkspace.getState().startNotePicking();
+    expect(useWorkspace.getState().notePicking).toBe(true);
+    expect(useWorkspace.getState().variantPicking).toBe(false);
+  });
+
+  it('변형 모드를 다시 켜면 이전 선택이 남지 않는다', () => {
+    const store = useWorkspace.getState();
+    store.startVariantPicking();
+    store.toggleVariantPick(2);
+    expect(useWorkspace.getState().variantPicked).toEqual([2]);
+
+    useWorkspace.getState().startVariantPicking();
+    expect(useWorkspace.getState().variantPicked).toEqual([]);
+  });
+
+  it("유형 '전체' 는 3종 모두를 보낸다", async () => {
+    const spy = vi.spyOn(api, 'createJob');
+    useWorkspace.setState({ selectedFileId: MOCK_FILE_ID });
+
+    const store = useWorkspace.getState();
+    store.startVariantPicking();
+    store.setVariantKind('all');
+    store.setVariantPicked([1, 2]);
+    await useWorkspace.getState().startVariantBatch();
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[0]).toMatchObject({
+      kind: 'variant',
+      node_id: MOCK_FILE_ID,
+      problem_numbers: [1, 2],
+      modes: ['number', 'condition', 'number_condition'],
+    });
+    // 작업을 걸었으면 선택 모드는 닫힌다(같은 선택으로 두 번 거는 사고 방지).
+    expect(useWorkspace.getState().variantPicking).toBe(false);
+    expect(useWorkspace.getState().variantPicked).toEqual([]);
+  }, 30_000);
+
+  it('일괄 생성 결과가 문항별 variants 에 그대로 쌓인다', async () => {
+    useWorkspace.setState({ selectedFileId: MOCK_FILE_ID });
+    const key2 = __internal.variantKey(MOCK_FILE_ID, 2);
+
+    const store = useWorkspace.getState();
+    store.startVariantPicking();
+    store.setVariantKind('number');
+    store.setVariantPicked([1, 2]);
+    await useWorkspace.getState().startVariantBatch();
+
+    await until(
+      () =>
+        useWorkspace.getState().variants[KEY]?.number?.status === 'done' &&
+        useWorkspace.getState().variants[key2]?.number?.status === 'done',
+    );
+    expect(useWorkspace.getState().variants[KEY]?.number?.text).toContain('## 문제');
+    expect(useWorkspace.getState().variants[key2]?.number?.text).toContain('## 문제');
+  }, 45_000);
+
+  it('고른 문항이 없으면 작업을 걸지 않는다', async () => {
+    const spy = vi.spyOn(api, 'createJob');
+    useWorkspace.setState({ selectedFileId: MOCK_FILE_ID });
+    useWorkspace.getState().startVariantPicking();
+
+    await useWorkspace.getState().startVariantBatch();
+    expect(spy).not.toHaveBeenCalled();
+    // 고르라고 알려 주고 모드는 계속 열어 둔다.
+    expect(useWorkspace.getState().variantPicking).toBe(true);
+  });
+
   it('API 키 모드에서는 토큰과 비용이 누적된다', async () => {
     useWorkspace.setState({ provider: 'apikey' });
     await useWorkspace.getState().generateVariant(MOCK_FILE_ID, 1, 'number');
