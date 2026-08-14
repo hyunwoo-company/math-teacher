@@ -965,23 +965,6 @@ def _load_variant_sources(
     return mode, [problems[no] for no in wanted], str(node["name"])
 
 
-def plan_variant_job(node_id: str, no: int) -> tuple[Mode, dict[str, Any], str]:
-    """변형 작업 대상을 정한다 (블로킹, 단일 문항).
-
-    Args:
-        node_id: 시험지 노드 id.
-        no: 소스 문항 번호.
-
-    Returns:
-        (모드, 소스 문항, 표시용 시험지 이름).
-
-    Raises:
-        ApiError: 파일이나 문항이 없을 때 (404).
-    """
-    mode, problems, node_name = _load_variant_sources(node_id, [no])
-    return mode, problems[0], node_name
-
-
 def plan_variant_batch(
     node_id: str,
     numbers: Sequence[int],
