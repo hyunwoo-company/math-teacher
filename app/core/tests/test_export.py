@@ -470,9 +470,23 @@ def test_docx_uses_a_font_that_covers_math_glyphs() -> None:
         assert f'{attribute}="맑은 고딕"' in normal
 
 
+def test_docx_body_font_size_matches_hwpx() -> None:
+    """본문은 10pt 다. 같은 시험지의 hwpx 본문(`charPr height="1000"`)과 같다.
+
+    글자 크기가 다르면 긴 줄이 접히는 횟수가 달라져 두 형식의 페이지 수가
+    끝내 수렴하지 않는다. `w:sz` 는 half-point 단위라 10pt = 20 이다.
+    """
+    payload = export_docx.build_docx(
+        export_model.ExportDoc(title="시험지", blocks=[export_model.Text("본문")])
+    )
+    normal = _docx_style(payload, "Normal")
+    assert '<w:sz w:val="20"/>' in normal
+    assert '<w:szCs w:val="20"/>' in normal
+
+
 @pytest.mark.parametrize("style_id", ["Title", "Heading1", "Heading2", "Heading3"])
 def test_docx_heading_styles_are_tight_and_use_the_body_font(style_id: str) -> None:
-    """제목 스타일도 여백을 줄이고 같은 폰트를 쓴다(설계 §3-6)."""
+    """제목 스타일도 여백을 줄이고 같은 폰트를 쓰되 본문(10pt)보다 크다(설계 §3-6)."""
     payload = export_docx.build_docx(
         export_model.ExportDoc(
             title="시험지",
@@ -489,3 +503,7 @@ def test_docx_heading_styles_are_tight_and_use_the_body_font(style_id: str) -> N
     assert int(after.group(1)) <= 100
     for attribute in ("w:ascii", "w:eastAsia", "w:hAnsi", "w:cs"):
         assert f'{attribute}="맑은 고딕"' in style
+    size = re.search(r'<w:sz w:val="(\d+)"/>', style)
+    assert size is not None, f"{style_id} 에 w:sz 가 없다"
+    # 본문 10pt(=20) 보다 크고, 제목이라도 16pt(=32) 를 넘지 않는다.
+    assert 20 < int(size.group(1)) <= 32
