@@ -6,6 +6,7 @@ import { MathText } from '@/components/MathText';
 import { plainPreview } from '@/lib/math-text';
 import { ProblemCrop } from '@/components/center/ProblemCrop';
 import { VariantPanel } from '@/components/center/VariantPanel';
+import { TranscriptPanel } from '@/components/center/TranscriptPanel';
 import { ReextractButton } from '@/components/center/ReextractButton';
 import { CopyButton } from '@/components/ui/CopyButton';
 import { toPlainText } from '@/lib/to-plain-text';
@@ -20,7 +21,17 @@ import {
   variantProgressOf,
   type VariantProgress,
 } from '@/lib/variant';
-import { useWorkspace, type SolutionEntry } from '@/store/workspace';
+import {
+  allTranscribed,
+  transcribedCount,
+  transcriptCacheKey,
+  transcriptProgressOf,
+  transcriptSourceLabel,
+  transcriptSourceTone,
+  untranscribedNumbers,
+  type TranscriptProgress,
+} from '@/lib/transcript';
+import { useWorkspace, type SolutionEntry, type TranscriptEntry } from '@/store/workspace';
 import type { Problem } from '@/types/api';
 
 const EMPTY_PROBLEMS: Problem[] = [];
@@ -47,6 +58,8 @@ export function SolutionsTab() {
   const setVariantKind = useWorkspace((state) => state.setVariantKind);
   const startVariantBatch = useWorkspace((state) => state.startVariantBatch);
   const variants = useWorkspace((state) => state.variants);
+  const transcripts = useWorkspace((state) => state.transcripts);
+  const startTranscribe = useWorkspace((state) => state.startTranscribe);
   const solutions = useWorkspace((state) => state.solutions);
   const solutionsStatus = useWorkspace((state) => state.solutionsStatus);
   const selectedProblemNo = useWorkspace((state) => state.selectedProblemNo);
@@ -94,6 +107,28 @@ export function SolutionsTab() {
   /** 고른 문항 전부가 지금 고른 유형으로 생성 중 = 다시 걸 게 없다. */
   const pickedAllRunning =
     fileId != null && allPicksRunning(variants, fileId, variantPicked, variantKind);
+
+  /**
+   * 판독 진행 상황. 변형과 같은 규칙으로 **저장된 자리**를 본다. 그래서 문항 안
+   * 대조 패널이 "판독 중…" 이면 위에도 반드시 보인다(집계 상태를 따로 두지 않는다).
+   */
+  const transcriptProgress = useMemo(
+    () => (fileId ? transcriptProgressOf({ transcripts, fileId, jobs }) : null),
+    [fileId, transcripts, jobs],
+  );
+  /** 판독본이 있는 문항 수(헤더 카운트). */
+  const transcribed = useMemo(
+    () => (fileId ? transcribedCount(transcripts, fileId, problems) : 0),
+    [fileId, transcripts, problems],
+  );
+  /** 재실행이 실제로 대상으로 삼을 문항 수(= 아직 판독본이 없는 문항). */
+  const remainingTranscripts = useMemo(
+    () => (fileId ? untranscribedNumbers(transcripts, fileId, problems).length : 0),
+    [fileId, transcripts, problems],
+  );
+  /** 전부 판독됐으면 전체 실행을 막는다(서버도 400 으로 거절한다). */
+  const everythingTranscribed =
+    fileId != null && allTranscribed(transcripts, fileId, problems);
 
   if (!fileId) {
     return <EmptyState title="파일을 먼저 선택하세요" />;
@@ -148,6 +183,11 @@ export function SolutionsTab() {
             {solve.currentNo != null ? ` (현재 ${solve.currentNo}번)` : ''}
           </span>
         ) : null}
+        {/* 판독본 수도 저장된 값에서 센다(파일 상세의 has_transcript 를 따로 보지 않는다). */}
+        <span title="크롭 이미지 대신 텍스트로 내보낼 수 있는 문항 수입니다">
+          텍스트화 <span className="font-semibold text-slate-800">{transcribed}</span> /{' '}
+          {problems.length}
+        </span>
         {/* 아래 패널이 "생성 중…" 이면 여기도 반드시 보인다(같은 자리를 본다). */}
         {variantProgress ? (
           <VariantProgressNotice
@@ -156,6 +196,38 @@ export function SolutionsTab() {
             onCancel={(jobId) => void cancelJob(jobId)}
           />
         ) : null}
+        {/* 판독도 같은 규칙 — 문항 안 대조 패널이 판독 중이면 여기도 보인다. */}
+        {transcriptProgress ? (
+          <TranscribeProgressNotice
+            progress={transcriptProgress}
+            cancelingJobIds={cancelingJobIds}
+            onCancel={(jobId) => void cancelJob(jobId)}
+          />
+        ) : null}
+        {/*
+          텍스트화는 문항 선택 모드를 만들지 않는다. 담기·변형이 이미 체크박스
+          하나를 나눠 쓰고 있어 세 번째 뜻을 얹으면 체크 하나가 무슨 뜻인지
+          알 수 없게 된다. 여기서는 전체 실행만 하고, 문항별 재실행은 대조 패널의
+          [다시 판독] 이 맡는다.
+        */}
+        <button
+          type="button"
+          onClick={() => void startTranscribe(null)}
+          disabled={everythingTranscribed || transcriptProgress != null}
+          title={
+            everythingTranscribed
+              ? '모든 문항이 이미 텍스트로 옮겨져 있습니다. 다시 판독하려면 문항을 펼쳐 [다시 판독] 을 누르세요'
+              : transcriptProgress != null
+                ? '이미 문항 텍스트화가 진행 중입니다'
+                : `아직 판독하지 않은 ${remainingTranscripts}개 문항을 텍스트로 옮깁니다. PDF 에서 바로 읽는 것이 1차라 대부분 AI 호출이 없습니다`
+          }
+          className="ml-auto inline-flex items-center gap-1 rounded border border-teal-300 bg-white px-2 py-0.5 text-[11px] font-medium text-teal-700 hover:bg-teal-50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          문항 텍스트화
+          {remainingTranscripts > 0 && !everythingTranscribed ? (
+            <span className="text-teal-500">{remainingTranscripts}</span>
+          ) : null}
+        </button>
         <button
           type="button"
           onClick={() => {
@@ -176,7 +248,8 @@ export function SolutionsTab() {
               : '문항을 여러 개 골라 변형 문제를 한 번에 만듭니다'
           }
           className={clsx(
-            'ml-auto inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] font-medium',
+            // ml-auto 는 앞의 [문항 텍스트화] 가 갖는다(두 버튼이 함께 오른쪽에 붙는다).
+            'inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] font-medium',
             variantPicking
               ? 'border-violet-600 bg-violet-600 text-white hover:bg-violet-700'
               : 'border-violet-300 bg-white text-violet-700 hover:bg-violet-50',
@@ -333,6 +406,7 @@ export function SolutionsTab() {
                     : '이 문제 풀이를 중단합니다'
                 }
                 pickMode={pickMode}
+                transcript={transcripts[transcriptCacheKey(fileId, problem.no)]}
                 variantRunning={hasRunningVariant(variants, fileId, problem.no)}
                 picked={pickedSet.has(problem.no)}
                 onTogglePick={() =>
@@ -369,6 +443,8 @@ interface SolutionRowProps {
   cancelTitle: string;
   /** 지금 체크박스가 무엇을 고르는 중인지('none' 이면 체크박스를 숨긴다). */
   pickMode: PickMode;
+  /** 이 문항의 판독본(행 배지용). 아직 판독하지 않았으면 undefined. */
+  transcript: TranscriptEntry | undefined;
   /** 이 문항의 변형이 유형 하나라도 생성 중인지(변형 모드에서 배지로 알린다). */
   variantRunning: boolean;
   /** 이 문항이 고른 대상인지. */
@@ -414,6 +490,59 @@ function VariantProgressNotice({
   );
 }
 
+/**
+ * 상단 판독 진행 표시 + [판독 중단].
+ *
+ * 중단 관례는 풀이·변형과 같다: 요청을 보내면 "중단하는 중…" 으로 바뀌고,
+ * 서버가 현재 문항을 마친 뒤 실제로 멈춘다.
+ */
+function TranscribeProgressNotice({
+  progress,
+  cancelingJobIds,
+  onCancel,
+}: {
+  progress: TranscriptProgress;
+  cancelingJobIds: readonly string[];
+  onCancel: (jobId: string) => void;
+}) {
+  const { jobId } = progress;
+  const canceling = jobId != null && cancelingJobIds.includes(jobId);
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="text-teal-700">
+        판독 중… {progress.doneCount}/{progress.total}
+        {progress.currentNo != null ? ` (현재 ${progress.currentNo}번)` : ''}
+      </span>
+      {jobId != null ? (
+        <button
+          type="button"
+          onClick={() => onCancel(jobId)}
+          disabled={canceling}
+          title={`이 시험지의 문항 텍스트화 작업(${progress.total}문항) 전체가 중단됩니다`}
+          className="rounded border border-rose-300 bg-white px-2 py-0.5 text-[11px] font-medium text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {canceling ? '중단하는 중…' : '판독 중단'}
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+/** 문항 행의 판독 상태 배지. 어떤 문항이 텍스트로 나갈지 한눈에 보여준다. */
+function TranscriptRowBadge({ entry }: { entry: TranscriptEntry | undefined }) {
+  if (!entry) return null;
+  if (entry.status === 'running') return <InlineBadge tone="blue">판독 중</InlineBadge>;
+  if (entry.text !== '') {
+    const label = transcriptSourceLabel(entry.source);
+    return label == null ? null : (
+      <InlineBadge tone={transcriptSourceTone(entry.source)}>{label}</InlineBadge>
+    );
+  }
+  // 전문 없이 이유만 있으면 판독하지 못한 문항이다(내보낼 때 이미지로 나간다).
+  if (entry.note != null) return <InlineBadge tone="amber">판독 불가</InlineBadge>;
+  return null;
+}
+
 function SolutionRow({
   fileId,
   problem,
@@ -430,6 +559,7 @@ function SolutionRow({
   cancelLabel,
   cancelTitle,
   pickMode,
+  transcript,
   variantRunning,
   picked,
   onTogglePick,
@@ -482,6 +612,8 @@ function SolutionRow({
               ) : null}
               <span className="text-[11px] text-slate-400">{problem.page}쪽</span>
               <StatusBadge status={status} truncated={entry?.truncated ?? false} />
+              {/* 어떤 문항이 텍스트로 나갈지(그리고 그 출처가 무엇인지) 행에서 보인다. */}
+              <TranscriptRowBadge entry={transcript} />
               {/* 변형 모드에서 어떤 문항이 이미 돌고 있는지 행에서 바로 보이게. */}
               {pickMode === 'variant' && variantRunning ? (
                 <InlineBadge tone="violet">변형 생성 중</InlineBadge>
@@ -613,6 +745,9 @@ function SolutionRow({
               </div>
             ) : null}
           </div>
+
+          {/* 대조는 이 기능의 안전장치다 — 펼치면 원본 크롭과 나란히 보인다. */}
+          <TranscriptPanel fileId={fileId} no={problem.no} />
 
           <VariantPanel fileId={fileId} no={problem.no} />
         </div>
