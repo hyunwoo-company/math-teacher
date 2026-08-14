@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -235,7 +236,34 @@ def _solution_blocks(solution: str) -> list[Block]:
     return blocks
 
 
-def _transcript_blocks(transcript: str) -> list[Block]:
+# 판독본 앞머리의 문항 번호(`1.` / `1)` / `1]`). 원본 시험지가 번호를 문항 안에
+# 조판하므로 판독본에도 딸려 온다.
+_LEADING_NO_RE: Final[re.Pattern[str]] = re.compile(r"^[ \t]*(\d+)[ \t]*[).\]][ \t]*")
+
+
+def _strip_leading_no(transcript: str, no: int) -> str:
+    """판독본 앞머리의 문항 번호를 지운다.
+
+    문서는 이미 `N번` 제목을 붙이므로 본문에 번호가 또 있으면 `1번 1. …` 로 두 번
+    보인다. 크롭 이미지는 번호가 그림 안에 있어 드러나지 않았지만 텍스트로 내면 보인다.
+
+    **그 문항의 번호와 일치할 때만 지운다.** 5번 문항의 본문이 `3. …` 로 시작하면
+    그것은 내용일 수 있으므로 건드리지 않는다.
+
+    Args:
+        transcript: 복원한 문항 전문.
+        no: 문항 번호.
+
+    Returns:
+        번호를 지운 전문. 지울 것이 없으면 원문 그대로.
+    """
+    match = _LEADING_NO_RE.match(transcript)
+    if match is not None and int(match.group(1)) == no:
+        return transcript[match.end() :]
+    return transcript
+
+
+def _transcript_blocks(transcript: str, no: int) -> list[Block]:
     """판독본 전문을 본문 블록으로 만든다.
 
     새 변환 경로를 만들지 않는다 — 풀이·변형과 똑같이 `_body`(`to_plain_segments`)를
@@ -243,11 +271,12 @@ def _transcript_blocks(transcript: str) -> list[Block]:
 
     Args:
         transcript: 복원한 문항 전문(마크다운 + LaTeX).
+        no: 문항 번호. 앞머리 번호 중복을 지우는 데 쓴다.
 
     Returns:
         본문 블록 목록. 평문화 결과가 비면 빈 목록(호출자가 이미지로 폴백한다).
     """
-    body = _body(transcript)
+    body = _body(_strip_leading_no(transcript, no))
     return [] if body is None else [body]
 
 
@@ -319,7 +348,7 @@ def build_exam_doc(
     for item in items:
         blocks.append(Heading(f"{item.no}번", 2))
         text_blocks = (
-            _transcript_blocks(item.transcript)
+            _transcript_blocks(item.transcript, item.no)
             if body == "text" and item.transcript
             else []
         )
@@ -408,7 +437,7 @@ def build_note_doc(
     for item in items:
         blocks.append(Heading(f"{item.source_name} {item.problem_no}번", 2))
         text_blocks = (
-            _transcript_blocks(item.transcript)
+            _transcript_blocks(item.transcript, item.problem_no)
             if body == "text" and item.transcript
             else []
         )

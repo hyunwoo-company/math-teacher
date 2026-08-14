@@ -419,3 +419,63 @@ def test_plain_transcript_without_math_still_exports(client: TestClient) -> None
     section = _hwpx_section(response.content)
     assert TRANSCRIPT_PLAIN in section
     assert "<hp:equation" not in section
+
+
+def _texts(doc: object) -> str:
+    """문서의 Text 블록을 모두 이어붙인다(제목 제외)."""
+    from export.model import Text
+
+    blocks = getattr(doc, "blocks", [])
+    return "\n".join(b.text for b in blocks if isinstance(b, Text))
+
+
+def test_leading_problem_number_is_dropped_from_transcript() -> None:
+    """판독본 앞머리의 문항 번호를 지운다.
+
+    문서는 이미 `N번` 제목을 붙이므로 본문에 `N.` 이 또 나오면 `1번 1. …` 로
+    번호가 두 번 보인다. 크롭 이미지에는 번호가 그림으로 들어 있어 문제가 없었으나
+    텍스트로 내면 중복이 드러난다.
+    """
+    doc = export_build.build_exam_doc(
+        title="t",
+        items=[
+            export_build.ExamItem(
+                no=1,
+                transcript=r"1. 두 다항식 \(A=3x^{2}\)에 대하여",
+                transcript_source=storage.TRANSCRIPT_PUA,
+            ),
+            export_build.ExamItem(
+                no=2,
+                transcript="2) 이차방정식의 근은?",
+                transcript_source=storage.TRANSCRIPT_PUA,
+            ),
+        ],
+        include_full=False,
+        body="text",
+    )
+    body = _texts(doc)
+    assert "두 다항식" in body
+    assert "이차방정식의 근은?" in body
+    assert not body.lstrip().startswith("1.")
+    assert "2)" not in body
+
+
+def test_leading_number_of_a_different_problem_is_kept() -> None:
+    """번호가 그 문항 번호와 다르면 지우지 않는다(본문 훼손 방지).
+
+    `16. [단답형 1]` 처럼 번호가 실제로 그 문항의 것이면 지우지만, 5번 문항의
+    본문이 `3.14 …` 로 시작한다면 그것은 내용이다.
+    """
+    doc = export_build.build_exam_doc(
+        title="t",
+        items=[
+            export_build.ExamItem(
+                no=5,
+                transcript="3. 이 값을 구하시오",
+                transcript_source=storage.TRANSCRIPT_PUA,
+            )
+        ],
+        include_full=False,
+        body="text",
+    )
+    assert "3. 이 값을 구하시오" in _texts(doc)
