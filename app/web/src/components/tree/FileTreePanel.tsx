@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import { useWorkspace } from '@/store/workspace';
 import { buildTree, countDescendants, type TreeItem } from '@/lib/tree';
 import { resolveDropTarget, resolveUploadTarget } from '@/lib/upload-target';
+import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { ContextMenu, type ContextMenuItem } from '@/components/tree/ContextMenu';
 import { NODE_MIME, TreeRow } from '@/components/tree/TreeRow';
 import { ConfirmDialog, PromptDialog } from '@/components/ui/Dialog';
@@ -229,7 +230,7 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
           ) : (
             <EmptyState
               title="아직 보관함이 비어 있습니다"
-              description="아래 [+ 폴더] 로 학기·과목 폴더를 만들고, [+ 파일 업로드] 로 시험지 PDF를 넣어 보세요. 파일을 이 영역에 끌어다 놓아도 됩니다."
+              description={`아래 [+ 폴더] 로 학기·과목 폴더를 만들고, [+ 파일 업로드] 로 시험지 PDF를 넣어 보세요. 파일을 이 영역에 끌어다 놓아도 됩니다. ${UPLOAD_NOTICE}`}
               icon="📁"
             />
           )
@@ -297,6 +298,7 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
             <span className="text-slate-400"> (폴더를 클릭하면 그 안에 만듭니다)</span>
           ) : null}
         </p>
+        {isNote ? null : <p className="mt-1 text-[11px] text-amber-700">{UPLOAD_NOTICE}</p>}
       </footer>
 
       <input

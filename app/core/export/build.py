@@ -33,6 +33,13 @@ VARIANT_MODE_ORDER: Final[tuple[str, ...]] = (
     "number_condition",
 )
 
+# 내보내기에서 통째로 버리는 섹션.
+# - `문제 확인`: 모델이 문제를 어떻게 읽었는지는 학생에게 불필요하다.
+# - `검산`: 프롬프트가 출력을 금지하지만(설계 3-3) 모델이 어길 때를 위한 안전망.
+_SKIPPED_SECTIONS: Final[frozenset[str]] = frozenset(
+    {markdown_sections.PROBLEM_CHECK_TITLE, markdown_sections.VERIFY_TITLE}
+)
+
 # 변형 응답의 문제 본문 섹션 제목. 문항 제목이 이미 있어 소제목을 붙이지 않는다.
 _PROBLEM_TITLE: Final[str] = "문제"
 # 섹션이 없는 풀이에 붙이는 소제목.
@@ -96,8 +103,8 @@ def _heading_text(title: str) -> str:
 def _solution_blocks(solution: str) -> list[Block]:
     """풀이 원문을 섹션별 소제목 + 본문 블록으로 만든다.
 
-    `## 문제 확인` 은 넣지 않는다(모델이 문제를 어떻게 읽었는지는 학생에게
-    불필요하다). 섹션이 하나도 없는 응답이면 전체를 `풀이` 로 묶는다.
+    `_SKIPPED_SECTIONS`(`## 문제 확인` / `## 검산`)는 넣지 않는다. 섹션이 하나도
+    없는 응답이면 전체를 `풀이` 로 묶는다.
 
     Args:
         solution: 저장된 풀이 원문(마크다운).
@@ -115,7 +122,7 @@ def _solution_blocks(solution: str) -> list[Block]:
 
     blocks: list[Block] = []
     for title, raw in sections.items():
-        if title == markdown_sections.PROBLEM_CHECK_TITLE:
+        if title in _SKIPPED_SECTIONS:
             continue
         body = to_plain_text(raw)
         if not body:
@@ -171,7 +178,7 @@ def build_variants_doc(
         label = VARIANT_MODE_LABEL.get(item.mode, item.mode)
         blocks.append(Heading(f"{item.no}번 · {label}", 2))
         for section_title, raw in markdown_sections.split_sections(item.text).items():
-            if section_title == markdown_sections.PROBLEM_CHECK_TITLE:
+            if section_title in _SKIPPED_SECTIONS:
                 continue
             body = to_plain_text(raw)
             if not body:

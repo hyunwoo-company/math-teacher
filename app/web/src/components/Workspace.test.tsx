@@ -11,6 +11,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Workspace } from '@/components/Workspace';
 import { resetMockState } from '@/lib/mock/client';
+import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { useWorkspace } from '@/store/workspace';
 
 vi.mock('@/components/center/PdfViewer', () => ({
@@ -238,6 +239,16 @@ describe('워크스페이스 화면 (목 모드)', () => {
     expect(screen.getByText(/폴더를 클릭하면 그 안에 만듭니다/)).toBeInTheDocument();
   });
 
+  it('업로드 안내 문구가 좌측 패널 하단에 보인다', async () => {
+    const user = await openWorkspace();
+    expect(screen.getByText(/문항만 있는 PDF/)).toBeInTheDocument();
+
+    // 오답노트 섹션은 PDF 업로드 대상이 아니라 안내를 걸지 않는다.
+    await user.click(screen.getByRole('tab', { name: '오답노트' }));
+    await screen.findByRole('treeitem', { name: /이현우/ });
+    expect(screen.queryByText(/문항만 있는 PDF/)).toBeNull();
+  }, 15_000);
+
   it('폴더를 클릭하면 업로드 위치가 그 폴더로 바뀐다', async () => {
     const user = await openWorkspace();
 
@@ -274,8 +285,9 @@ describe('워크스페이스 화면 (목 모드)', () => {
       .getState()
       .nodes.find((node) => node.name === '기말고사.pdf');
     expect(uploaded?.parent_id).toBe('folder-calculus');
-    // 토스트가 어느 폴더에 넣었는지 알려 준다.
+    // 토스트가 어느 폴더에 넣었는지 알려 주고, 답안지 혼입 안내를 함께 붙인다.
     expect(useWorkspace.getState().toast?.message).toBe('미적분 에 1개 업로드했습니다.');
+    expect(useWorkspace.getState().toast?.hint).toBe(UPLOAD_NOTICE);
   }, 30_000);
 
   it('폴더 우클릭 → 파일 업로드도 그 폴더로 올린다', async () => {

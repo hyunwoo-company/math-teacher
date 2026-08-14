@@ -51,11 +51,40 @@ $12$
 2단계: 넓이를 계산합니다.
 """
 
+# 모델이 프롬프트 지시를 어기고 `## 검산` 을 낸 응답. 내보내기에서 걸러져야 한다.
+SOLUTION_WITH_VERIFY = """## 문제 확인
+이 문항은 이차함수의 최댓값을 묻습니다.
 
-def _save_solution(client: TestClient, node_id: str, no: int) -> None:
+## 풀이
+꼭짓점 $\\left(1, 4\\right)$ 에서 최댓값을 갖습니다.
+
+## 검산
+구한 값을 원식에 도로 넣으면 성립합니다.
+
+## 정답
+$4$
+"""
+
+VARIANT_TEXT_WITH_VERIFY = """## 문제
+곡선 $y = x^2$ 위의 점 P 에 대하여 넓이를 구하시오. [3점]
+
+## 정답
+$12$
+
+## 검산
+구한 값을 원식에 도로 넣으면 성립합니다.
+
+## 풀이
+1단계: 접선의 기울기를 봅니다.
+"""
+
+
+def _save_solution(
+    client: TestClient, node_id: str, no: int, text: str = SOLUTION_TEXT
+) -> None:
     response = client.post(
         f"/api/files/{node_id}/problems/{no}/solution",
-        json={"content": SOLUTION_TEXT},
+        json={"content": text},
     )
     assert response.status_code == 200, response.text
 
@@ -69,6 +98,16 @@ def _save_variant(node_id: str, no: int, mode: str, text: str = VARIANT_TEXT) ->
 def _bin_data_names(content: bytes) -> list[str]:
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         return [name for name in archive.namelist() if name.startswith("BinData/")]
+
+
+def _section_text(content: bytes) -> str:
+    """hwpx 본문(`Contents/section*`)을 하나의 문자열로 이어 붙인다."""
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        return b"".join(
+            archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("Contents/section")
+        ).decode("utf-8")
 
 
 def _mimetype(content: bytes) -> bytes:
@@ -135,6 +174,21 @@ def test_exam_full_hwpx_contains_solution_text(client: TestClient) -> None:
     assert "문제 확인" not in body
     # LaTeX 구분자가 그대로 남지 않는다.
     assert "\\left" not in body
+
+
+def test_exam_full_drops_verification_section(client: TestClient) -> None:
+    """모델이 규칙을 어기고 `## 검산` 을 내도 문서에는 넣지 않는다(요청 4)."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _save_solution(client, node_id, 1, SOLUTION_WITH_VERIFY)
+
+    response = client.get(
+        f"/api/files/{node_id}/export.hwpx", params={"include": "full"}
+    )
+    assert response.status_code == 200
+    body = _section_text(response.content)
+    assert "꼭짓점 (1, 4) 에서 최댓값을 갖습니다." in body
+    assert "검산" not in body
+    assert "도로 넣으면 성립합니다" not in body
 
 
 def test_exam_filename_is_rfc5987_encoded(client: TestClient) -> None:
@@ -225,6 +279,21 @@ def test_variants_full_is_larger_and_labeled(client: TestClient) -> None:
     assert full.headers["content-disposition"].endswith(
         quote("_변형문제와해설.hwpx", safe="")
     )
+
+
+def test_variants_full_drops_verification_section(client: TestClient) -> None:
+    """변형 응답에 `## 검산` 이 섞여도 문서에는 넣지 않는다(요청 4)."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _save_variant(node_id, 1, "number", VARIANT_TEXT_WITH_VERIFY)
+
+    response = client.get(
+        f"/api/files/{node_id}/variants/export.hwpx", params={"include": "full"}
+    )
+    assert response.status_code == 200
+    body = _section_text(response.content)
+    assert "1단계: 접선의 기울기를 봅니다." in body
+    assert "검산" not in body
+    assert "도로 넣으면 성립합니다" not in body
 
 
 def test_variants_no_variants_400(client: TestClient) -> None:

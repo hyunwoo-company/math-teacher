@@ -29,6 +29,7 @@ import {
   type ProviderConfig,
 } from '@/lib/provider-config';
 import { isDescendantOf } from '@/lib/tree';
+import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { uploadTargetLabel } from '@/lib/upload-target';
 import {
   DEFAULT_EFFORT,
@@ -1315,6 +1316,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       get().showToast({
         kind: 'success',
         message: `${targetLabel} 에 ${files.length}개 업로드했습니다.`,
+        // 답안지가 섞인 PDF 를 올려 놓고 오인식을 버그로 신고하는 일이 잦다.
+        hint: UPLOAD_NOTICE,
       });
     } catch (error) {
       get().showToast({ kind: 'error', message: toUserMessage(error) });

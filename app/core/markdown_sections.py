@@ -20,6 +20,9 @@ FALLBACK_TITLE: Final[str] = "문제"
 # 내보내기에서 제외한다.
 PROBLEM_CHECK_TITLE: Final[str] = "문제 확인"
 
+# 모델이 지시를 어기고 검산을 섹션으로 낼 때가 있다. 내보내기에서 제외한다.
+VERIFY_TITLE: Final[str] = "검산"
+
 # `## 제목` 한 줄. 들여쓰기는 3칸까지 마크다운으로 인정한다(`#{1,6}` 아님에 주의).
 _SECTION_RE: Final[re.Pattern[str]] = re.compile(
     r"^[ \t]{0,3}##[ \t]+(.+?)[ \t]*$", re.MULTILINE
@@ -61,4 +64,9 @@ def split_sections(text: str) -> dict[str, str]:
     return sections
 
 
-__all__ = ["FALLBACK_TITLE", "PROBLEM_CHECK_TITLE", "split_sections"]
+__all__ = [
+    "FALLBACK_TITLE",
+    "PROBLEM_CHECK_TITLE",
+    "VERIFY_TITLE",
+    "split_sections",
+]

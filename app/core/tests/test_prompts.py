@@ -54,6 +54,19 @@ def test_solve_core_instructions_preserved() -> None:
     assert "별도 줄 수식: `\\[ ... \\]`" in solve
 
 
+def test_solve_prompt_forbids_printing_verification() -> None:
+    """검산은 시키되 출력은 막는다(요청 4)."""
+    assert "검산" in prompts.SOLVE_SYSTEM_PROMPT
+    assert "검산 과정은 답변에 쓰지 마십시오" in prompts.SOLVE_SYSTEM_PROMPT
+    # 옛 지시("✔ 를 붙이십시오")가 남아 있으면 모델이 혼란스러워한다.
+    assert "✔ 를 붙이십시오" not in prompts.SOLVE_SYSTEM_PROMPT
+
+
+def test_variant_prompt_shares_the_same_rule() -> None:
+    """변형도 같은 공유 스킬을 쓰므로 같은 규약이 걸린다."""
+    assert "검산 과정은 답변에 쓰지 마십시오" in prompts.VARIANT_SYSTEM_PROMPT
+
+
 def test_variant_keeps_its_own_output_order_and_instructions() -> None:
     """변형은 고유 출력형식(## 문제 → ## 정답 → ## 풀이)과 지시를 유지한다."""
     variant = prompts.VARIANT_SYSTEM_PROMPT
