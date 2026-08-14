@@ -5,7 +5,8 @@
  * DOM 이벤트가 아니라 값만 다루므로 여기만 단위 테스트로 굳힌다.
  */
 
-import type { TreeItem } from '@/lib/tree';
+import { isDescendantOf, type TreeItem } from '@/lib/tree';
+import type { TreeNode } from '@/types/api';
 
 /** Ctrl/Cmd·Shift 조합. 클릭 이벤트에서 뽑아 넘긴다. */
 export interface SelectionModifiers {
@@ -117,6 +118,75 @@ export function dragPayloadIds(
   if (!selected.has(draggedId)) return [draggedId];
   const ordered = visibleIds.filter((id) => selected.has(id));
   return ordered.length > 0 ? ordered : [draggedId];
+}
+
+/* ── 삭제 확인 문구의 근거 ─────────────────────────────────────── */
+
+export interface DeleteSummary {
+  /** 고른 노드 이름들(고른 순서). 확인 창에 나열한다. */
+  names: string[];
+  /** 고른 것 중 폴더 수. */
+  folders: number;
+  /** 고른 것 중 파일형(시험지/오답노트) 수. */
+  files: number;
+  /** 고른 것에 딸려 함께 사라지는 하위 폴더 수. */
+  descendantFolders: number;
+  /** 고른 것에 딸려 함께 사라지는 하위 파일 수. */
+  descendantFiles: number;
+  /** 실제로 사라지는 노드 총 개수(고른 것 + 하위). */
+  total: number;
+}
+
+/**
+ * 삭제 확인 창에 쓸 개수를 센다.
+ *
+ * 삭제는 되돌릴 수 없으므로 "무엇이 몇 개 사라지는지" 를 정확히 보여줘야 한다.
+ * 상위와 하위를 함께 골랐어도 총 개수를 두 번 세지 않는다.
+ *
+ * @param nodes 지금 트리의 플랫 노드 목록.
+ * @param ids 지우려고 고른 노드 id 들. 이미 사라진 id 는 무시한다.
+ */
+export function deleteSummary(
+  nodes: readonly TreeNode[],
+  ids: readonly string[],
+): DeleteSummary {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const picked: TreeNode[] = [];
+  const pickedIds = new Set<string>();
+  for (const id of ids) {
+    const node = byId.get(id);
+    if (!node || pickedIds.has(id)) continue;
+    picked.push(node);
+    pickedIds.add(id);
+  }
+
+  let folders = 0;
+  let files = 0;
+  for (const node of picked) {
+    if (node.type === 'folder') folders += 1;
+    else files += 1;
+  }
+
+  let descendantFolders = 0;
+  let descendantFiles = 0;
+  let extra = 0;
+  for (const node of nodes) {
+    if (pickedIds.has(node.id)) continue;
+    // 고른 것 중 하나라도의 자손이면 함께 사라진다(중복 없이 한 번만 센다).
+    if (!picked.some((target) => isDescendantOf(nodes, target.id, node.id))) continue;
+    extra += 1;
+    if (node.type === 'folder') descendantFolders += 1;
+    else descendantFiles += 1;
+  }
+
+  return {
+    names: picked.map((node) => node.name),
+    folders,
+    files,
+    descendantFolders,
+    descendantFiles,
+    total: picked.length + extra,
+  };
 }
 
 /* ── 고무줄(마퀴) 선택 ─────────────────────────────────────────── */

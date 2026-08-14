@@ -324,6 +324,14 @@ interface WorkspaceState {
    */
   moveNodes: (ids: string[], parentId: string | null) => Promise<void>;
   deleteNode: (id: string) => Promise<boolean>;
+  /**
+   * 여러 노드를 지운다(트리 다중 선택 · 드래그 삭제).
+   *
+   * `moveNodes` 와 같은 관례다: 서버 삭제를 순차로 부르고, 실패만 모아 토스트 한 건으로
+   * 알리고, 하나라도 지웠으면 마지막에 트리를 한 번만 다시 읽는다.
+   * 상위와 하위가 함께 넘어오면 상위만 부른다(하위는 서버가 함께 지운다).
+   */
+  deleteNodes: (ids: string[]) => Promise<void>;
   uploadFiles: (files: File[], parentId: string | null) => Promise<void>;
 
   /**
@@ -1436,6 +1444,84 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       return false;
     } finally {
       set({ pendingOp: null });
+    }
+  },
+
+  async deleteNodes(ids: string[]) {
+    const unique = Array.from(new Set(ids));
+    if (unique.length === 0) return;
+
+    // 상위와 하위가 함께 선택된 경우 상위만 부른다. 하위는 서버가 함께 지우므로
+    // 따로 부르면 404 가 되고 실패 토스트만 늘어난다.
+    const before = get().nodes;
+    const targets = unique.filter(
+      (id) => !unique.some((other) => other !== id && isDescendantOf(before, other, id)),
+    );
+
+    const failures: string[] = [];
+    const removed = new Set<string>();
+    let deleted = 0;
+
+    set({ pendingOp: '삭제하고 있습니다…' });
+    try {
+      for (const id of targets) {
+        const current = get().nodes;
+        const node = current.find((candidate) => candidate.id === id);
+        // 이미 사라진 노드는 조용히 건너뛴다(선택에 낡은 id 가 남은 경우).
+        if (!node) continue;
+        try {
+          await api.deleteNode(id);
+          deleted += 1;
+          removed.add(id);
+          for (const candidate of current) {
+            if (isDescendantOf(current, id, candidate.id)) removed.add(candidate.id);
+          }
+          set((state) => ({ nodes: state.nodes.filter((candidate) => !removed.has(candidate.id)) }));
+        } catch (error) {
+          failures.push(`${node.name}: ${toUserMessage(error)}`);
+        }
+      }
+    } finally {
+      set({ pendingOp: null });
+    }
+
+    if (removed.size > 0) {
+      // 지워진 노드에 포커스가 남으면 업로드 대상이 유령 폴더가 된다.
+      set((state) => ({
+        focusedNodeId:
+          state.focusedNodeId && removed.has(state.focusedNodeId) ? null : state.focusedNodeId,
+      }));
+      const { selectedFileId, selectedNoteId } = get();
+      if (selectedFileId && removed.has(selectedFileId)) {
+        set({
+          openKind: 'none',
+          selectedFileId: null,
+          fileDetail: null,
+          fileStatus: 'idle',
+          selectedProblemNo: null,
+          solutions: {},
+          solve: emptySolve,
+        });
+        // 삭제된 파일을 복원하지 않도록 stale prefs 를 정리한다.
+        persistPrefs({ lastFileId: null });
+      }
+      if (selectedNoteId && removed.has(selectedNoteId)) {
+        set({ openKind: 'none', selectedNoteId: null, noteDetail: null, noteStatus: 'idle' });
+      }
+      // 정렬·부모 관계를 서버 기준으로 맞춘다. 여기서 딱 한 번만 읽는다.
+      await get().loadTree();
+    }
+
+    if (failures.length > 0) {
+      get().showToast({
+        kind: 'error',
+        message: `${failures.length}개를 삭제하지 못했습니다.`,
+        hint: failures.join(' / '),
+      });
+      return;
+    }
+    if (deleted > 1) {
+      get().showToast({ kind: 'success', message: `${deleted}개를 삭제했습니다.` });
     }
   },
 

@@ -9,6 +9,7 @@ import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { ContextMenu, type ContextMenuItem } from '@/components/tree/ContextMenu';
 import { NODE_MIME, TreeRow, type DragState } from '@/components/tree/TreeRow';
 import {
+  deleteSummary,
   dragPayloadIds,
   exceedsMarqueeThreshold,
   marqueeSelection,
@@ -47,7 +48,8 @@ type DialogState =
   | { kind: 'newFolder'; parentId: string | null }
   | { kind: 'newNote'; parentId: string | null }
   | { kind: 'rename'; id: string; current: string }
-  | { kind: 'delete'; id: string };
+  // 삭제는 항목 하나(컨텍스트 메뉴)일 수도, 선택 전체(드래그 삭제)일 수도 있다.
+  | { kind: 'delete'; ids: string[] };
 
 /** 좌측 패널: [시험지]/[오답노트] 2섹션 트리. 너비는 부모가 정하고 이 패널은 채운다. */
 export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
@@ -70,6 +72,7 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const renameNode = useWorkspace((state) => state.renameNode);
   const moveNodes = useWorkspace((state) => state.moveNodes);
   const deleteNode = useWorkspace((state) => state.deleteNode);
+  const deleteNodes = useWorkspace((state) => state.deleteNodes);
   const uploadFiles = useWorkspace((state) => state.uploadFiles);
   const focusNode = useWorkspace((state) => state.focusNode);
 
@@ -78,6 +81,8 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [rootDragOver, setRootDragOver] = useState(false);
   const [drag, setDrag] = useState<DragState | null>(null);
+  // 드래그 삭제 영역 위에 올라와 있는지. 영역 자체는 드래그 중에만 그린다.
+  const [trashOver, setTrashOver] = useState(false);
   // 다중 선택(이동용). 열려 있는 파일(selectedFileId)과는 다른 개념이다.
   const [pickedIds, setPickedIds] = useState<ReadonlySet<string>>(() => new Set());
   const [anchorId, setAnchorId] = useState<string | null>(null);
@@ -261,7 +266,7 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     items.push({
       label: '삭제',
       tone: 'danger',
-      onSelect: () => setDialog({ kind: 'delete', id: node.id }),
+      onSelect: () => setDialog({ kind: 'delete', ids: [node.id] }),
     });
     setMenu({ x: event.clientX, y: event.clientY, items });
   };
@@ -291,14 +296,20 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     setMenu({ x: event.clientX, y: event.clientY, items });
   };
 
-  const deleteTarget = dialog.kind === 'delete' ? nodes.find((node) => node.id === dialog.id) : null;
+  // 항목 하나를 지울 때는 지금까지의 문구를 그대로 쓰고, 여러 개일 때만 요약으로 바꾼다.
+  const deleteIds = dialog.kind === 'delete' ? dialog.ids : [];
+  const singleDeleteId = deleteIds.length === 1 ? deleteIds[0] : null;
+  const deleteTarget =
+    singleDeleteId != null ? nodes.find((node) => node.id === singleDeleteId) : null;
   const deleteCounts =
-    dialog.kind === 'delete' && deleteTarget?.type === 'folder'
-      ? countDescendants(nodes, dialog.id)
+    singleDeleteId != null && deleteTarget?.type === 'folder'
+      ? countDescendants(nodes, singleDeleteId)
       : null;
+  const multiDelete = deleteIds.length > 1 ? deleteSummary(nodes, deleteIds) : null;
 
   return (
-    <aside className="flex h-full w-full min-w-0 flex-col border-r border-slate-200 bg-white">
+    // relative: 드래그 삭제 영역을 하단에 겹쳐 띄운다(레이아웃이 밀리지 않게).
+    <aside className="relative flex h-full w-full min-w-0 flex-col border-r border-slate-200 bg-white">
       {/* 섹션 전환 탭 */}
       <div role="tablist" aria-label="좌측 섹션" className="flex border-b border-slate-200">
         {/* 섹션이 바뀌면 트리가 통째로 바뀌므로 선택을 버린다. */}
@@ -359,7 +370,10 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
 
       {selectedIds.size > 1 ? (
         <div className="flex items-center justify-between gap-2 border-b border-blue-200 bg-blue-50 px-3 py-1.5 text-[11px] text-blue-800">
-          <span>{selectedIds.size}개 선택됨 · 폴더로 끌어다 놓으면 함께 이동합니다</span>
+          <span>
+            {selectedIds.size}개 선택됨 · 폴더로 끌어다 놓으면 함께 이동, 아래 삭제 영역에 놓으면
+            함께 삭제됩니다
+          </span>
           <button
             type="button"
             onClick={clearSelection}
@@ -575,11 +589,44 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
         onCancel={() => setDialog({ kind: 'none' })}
         onConfirm={() => {
           if (dialog.kind !== 'delete') return;
-          const id = dialog.id;
+          const ids = dialog.ids;
           setDialog({ kind: 'none' });
-          void deleteNode(id);
+          clearSelection();
+          if (ids.length === 1 && ids[0] != null) void deleteNode(ids[0]);
+          else void deleteNodes(ids);
         }}
         message={
+          multiDelete ? (
+            <div className="space-y-2">
+              <p>
+                고른 <span className="font-semibold">{deleteIds.length}개</span> 항목을 삭제할까요?
+              </p>
+              <ul className="max-h-32 overflow-auto rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[12px] text-slate-600">
+                {multiDelete.names.map((name, index) => (
+                  <li key={`${name}-${index}`} className="truncate">
+                    · {name}
+                  </li>
+                ))}
+              </ul>
+              {multiDelete.total > deleteIds.length ? (
+                <p className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[12px] text-amber-800">
+                  폴더 안의 하위 폴더 {multiDelete.descendantFolders}개와{' '}
+                  {isNote ? '노트' : '파일'} {multiDelete.descendantFiles}개까지{' '}
+                  <span className="font-semibold">모두 {multiDelete.total}개가 함께 삭제</span>
+                  됩니다.
+                  {isNote ? '' : ' 문제 크롭과 저장된 풀이도 같이 지워집니다.'}
+                </p>
+              ) : null}
+              {multiDelete.files > 0 ? (
+                <p className="text-[12px] text-slate-500">
+                  {isNote
+                    ? '고른 오답노트의 항목이 모두 지워집니다. (원본 시험지는 지워지지 않습니다.)'
+                    : '고른 시험지의 문제 크롭과 저장된 풀이·대화 기록도 함께 지워집니다.'}
+                </p>
+              ) : null}
+              <p className="text-[12px] text-slate-500">이 작업은 되돌릴 수 없습니다.</p>
+            </div>
+          ) : (
           <div className="space-y-2">
             <p>
               <span className="font-semibold">{deleteTarget?.name ?? '항목'}</span>
@@ -608,8 +655,55 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
             )}
             <p className="text-[12px] text-slate-500">이 작업은 되돌릴 수 없습니다.</p>
           </div>
+          )
         }
       />
+
+      {/* 드래그 삭제: 끌고 있는 동안에만 나타난다. 평소에 상시 노출하면 오조작 위험이 크다. */}
+      {drag ? (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 p-2">
+          <div
+            aria-hidden
+            onDragOver={(event) => {
+              if (!event.dataTransfer.types.includes(NODE_MIME)) return;
+              event.preventDefault();
+              event.stopPropagation();
+              event.dataTransfer.dropEffect = 'move';
+              setTrashOver(true);
+            }}
+            onDragLeave={(event) => {
+              event.stopPropagation();
+              setTrashOver(false);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              // getData 가 비는 브라우저가 있어 끌고 있던 목록을 예비로 쓴다.
+              const dropped = parseDragIds(event.dataTransfer.getData(NODE_MIME));
+              const doomed = dropped.length > 0 ? dropped : drag.ids;
+              setTrashOver(false);
+              setDragOverId(null);
+              setDrag(null);
+              // 삭제는 되돌릴 수 없다. 반드시 확인 창을 거친다.
+              if (doomed.length > 0) setDialog({ kind: 'delete', ids: doomed });
+            }}
+            className={clsx(
+              'pointer-events-auto flex h-14 items-center justify-center gap-2 rounded-md border-2 border-dashed text-[12px] font-medium shadow-sm transition-colors',
+              trashOver
+                ? 'border-rose-500 bg-rose-100 text-rose-800'
+                : 'border-rose-300 bg-white/95 text-rose-600',
+            )}
+          >
+            <span aria-hidden className="text-[16px]">
+              🗑
+            </span>
+            <span>
+              여기에 놓으면 삭제
+              {drag.ids.length > 1 ? ` (${drag.ids.length}개)` : ''}
+            </span>
+          </div>
+        </div>
+      ) : null}
     </aside>
   );
 }

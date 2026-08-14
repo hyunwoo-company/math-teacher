@@ -3,6 +3,7 @@ import { buildTree } from '@/lib/tree';
 import type { TreeNode } from '@/types/api';
 import {
   MARQUEE_THRESHOLD_PX,
+  deleteSummary,
   dragPayloadIds,
   exceedsMarqueeThreshold,
   marqueeSelection,
@@ -175,6 +176,55 @@ describe('parseDragIds', () => {
 
   it('배열 안의 문자열이 아닌 값은 버린다', () => {
     expect(parseDragIds('[1,"a",null]')).toEqual(['a']);
+  });
+});
+
+/* ── 드래그 삭제 확인 문구 근거 ─────────────────────────────────── */
+
+describe('deleteSummary', () => {
+  it('폴더 하나면 하위로 딸려 사라지는 개수를 센다', () => {
+    expect(deleteSummary(NODES, ['a'])).toEqual({
+      names: ['1학기'],
+      folders: 1,
+      files: 0,
+      descendantFolders: 0,
+      descendantFiles: 2,
+      total: 3,
+    });
+  });
+
+  it('파일 여러 개면 하위가 없다', () => {
+    expect(deleteSummary(NODES, ['a1', 'c'])).toEqual({
+      names: ['1차 지필.pdf', '단독.pdf'],
+      folders: 0,
+      files: 2,
+      descendantFolders: 0,
+      descendantFiles: 0,
+      total: 2,
+    });
+  });
+
+  it('상위와 하위를 함께 골라도 두 번 세지 않는다', () => {
+    expect(deleteSummary(NODES, ['a', 'a1'])).toEqual({
+      names: ['1학기', '1차 지필.pdf'],
+      folders: 1,
+      files: 1,
+      // a1 은 고른 항목이라 "딸려 사라지는 것"에서 빠지고, a2 만 남는다.
+      descendantFolders: 0,
+      descendantFiles: 1,
+      total: 3,
+    });
+  });
+
+  it('이미 사라진 id 는 무시한다', () => {
+    expect(deleteSummary(NODES, ['c', 'ghost'])).toEqual({
+      names: ['단독.pdf'],
+      folders: 0,
+      files: 1,
+      descendantFolders: 0,
+      descendantFiles: 0,
+      total: 1,
+    });
   });
 });
 
