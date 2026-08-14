@@ -178,6 +178,17 @@ describe('판독 실행', () => {
     );
   }, 90_000);
 
+  it('재추출하면 판독본 캐시도 버린다(서버에서 함께 지워진다)', async () => {
+    await useWorkspace.getState().startTranscribe([1]);
+    await until(() => (entryOf(1)?.text ?? '') !== '');
+    await until(idle);
+
+    // 재추출은 문항 번호가 바뀔 수 있어 서버가 판독본을 지운다. 화면 캐시가 남으면
+    // 서버에 없는 판독본으로 배지·카운트·내보내기 활성화가 거짓을 말한다.
+    await useWorkspace.getState().reextractFile(MOCK_FILE_ID);
+    expect(entryOf(1)?.text ?? '').toBe('');
+  }, 45_000);
+
   it('시험지를 열면 저장된 판독본을 채운다', async () => {
     await api.saveTranscript(MOCK_FILE_ID, 4, '저장돼 있던 전문');
     // 다른 창에서 저장된 판독본을 이 창이 열 때 받아 오는지. 같은 파일을 다시

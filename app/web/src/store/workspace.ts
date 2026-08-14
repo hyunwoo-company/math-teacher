@@ -1784,6 +1784,11 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       for (const problem of result.problems) solutions[problem.no] = emptyEntry(problem.no);
       set((state) => ({
         nodes: state.nodes.map((node) => (node.id === id ? result.node : node)),
+        // 판독본도 서버에서 지워졌다(문항 번호가 바뀔 수 있어 `reextract` 가 함께
+        // 버린다). 캐시를 남기면 서버에 없는 판독본으로 배지·카운트·텍스트
+        // 내보내기 활성화가 거짓을 말한다. 이 파일이 열려 있는지와 무관하다 —
+        // 캐시 키가 file_id 라 나중에 다시 열어도 그대로 남는다.
+        transcripts: dropFileTranscripts(state.transcripts, id),
         ...(stillOpen
           ? {
               fileDetail: { node: result.node, problems: result.problems },
@@ -3275,6 +3280,24 @@ function settleVariant(
     ? { ...current, status: 'done', text: current.streamingText, streamingText: '' }
     : { ...current, status: 'error', error: current.error ?? '중단했습니다.' };
   return { ...variants, [key]: { ...variants[key], [mode]: next } };
+}
+
+/** 그 시험지의 판독본 캐시를 통째로 버린다(재추출로 서버에서 지워졌을 때). */
+function dropFileTranscripts(
+  transcripts: Record<string, TranscriptEntry>,
+  fileId: string,
+): Record<string, TranscriptEntry> {
+  const prefix = `${fileId}::`;
+  const next: Record<string, TranscriptEntry> = {};
+  let changed = false;
+  for (const [key, entry] of Object.entries(transcripts)) {
+    if (key.startsWith(prefix)) {
+      changed = true;
+      continue;
+    }
+    next[key] = entry;
+  }
+  return changed ? next : transcripts;
 }
 
 /**
