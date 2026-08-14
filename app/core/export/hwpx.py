@@ -4,8 +4,10 @@
 컨테이너이고 이미지는 `BinData/BIN0001.png` 로 들어간다.
 
 서식(글꼴·여백·머리말)은 지정하지 않는다 — 기본 서식으로 낸다. 제목/소제목도
-별도 스타일 없이 문단으로 넣는다. **수식 객체(`add_equation`)는 v1 범위 밖이다**
-(한글 수식 문법이 LaTeX 와 호환되지 않는다). 평문 유니코드(`x²`)로 넣는다.
+별도 스타일 없이 문단으로 넣는다.
+
+수식은 한글 수식 개체(`<hp:equation>`)로 넣는다(`export/hwpeq.py`). 변환에
+실패한 수식은 기존 평문 유니코드(`x²`)로 폴백하고 로그를 남긴다.
 
 이 모듈은 **블로킹**(파일 IO / 이미지 인코딩)이다.
 `async def` 라우트에서 부를 때는 `run_in_threadpool` 로 감싼다.
@@ -13,14 +15,20 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Final
 
 from hwpx.document import HwpxDocument
+from hwpx.errors import HwpxError
+from hwpx.oxml.paragraph import HwpxOxmlParagraph
 from PIL import Image as PilImage
 
 from export import layout
-from export.model import ExportDoc, Heading, Image, Text
+from export.hwpeq import HwpEquationError, latex_to_hwp_equation
+from export.model import ExportDoc, Heading, Image, MathRun, Text, TextRun
+
+_LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
 # 크롭 렌더 해상도(extractor.DEFAULT_DPI 와 동일). 픽셀→mm 환산 기준.
 _CROP_RENDER_DPI: Final[int] = 150
@@ -51,6 +59,59 @@ def _fit_width_mm(path: Path) -> float:
     return min(native_mm, _MAX_IMAGE_WIDTH_MM)
 
 
+def _add_math(
+    document: HwpxDocument, paragraph: HwpxOxmlParagraph, run: MathRun
+) -> None:
+    """문단 끝에 한글 수식 개체를 붙인다. 변환 실패 시 평문으로 폴백한다.
+
+    `doc.shapes.add_equation` 은 넣은 뒤 표준 섹션 스캔으로 스크립트가 그대로
+    저장됐는지 확인해 주는 경로다(실패하면 예외). 확인 비용은 수식 200개에
+    0.04초 수준이라 검증을 포기할 이유가 없다.
+
+    Args:
+        document: 대상 문서.
+        paragraph: 붙일 문단.
+        run: 수식 런.
+    """
+    try:
+        script = latex_to_hwp_equation(run.latex)
+    except HwpEquationError as error:
+        _LOGGER.info("한글 수식 변환 실패, 평문으로 폴백: %r (%s)", run.latex, error)
+        paragraph.add_run(run.plain)
+        return
+    try:
+        document.shapes.add_equation(script, paragraph=paragraph)
+    except HwpxError as error:
+        _LOGGER.info(
+            "한글 수식 삽입 실패, 평문으로 폴백: %r -> %r (%s)",
+            run.latex,
+            script,
+            error,
+        )
+        paragraph.add_run(run.plain)
+
+
+def _add_text(document: HwpxDocument, block: Text) -> None:
+    """본문 블록을 문단들로 넣는다(docx 렌더러와 같은 줄 나누기).
+
+    Args:
+        document: 대상 문서.
+        block: 본문 블록.
+    """
+    if block.lines is None:
+        # 수식이 없는 블록. 예전 경로 그대로다.
+        for line in block.text.split("\n"):
+            document.add_paragraph(line)
+        return
+    for runs in block.lines:
+        paragraph = document.add_paragraph("", include_run=False)
+        for run in runs:
+            if isinstance(run, TextRun):
+                paragraph.add_run(run.text)
+            else:
+                _add_math(document, paragraph, run)
+
+
 def build_hwpx(doc: ExportDoc) -> bytes:
     """`ExportDoc` 을 `.hwpx` 바이트로 렌더한다.
 
@@ -72,8 +133,7 @@ def build_hwpx(doc: ExportDoc) -> bytes:
                 block.path.read_bytes(), "png", width_mm=_fit_width_mm(block.path)
             )
         elif isinstance(block, Text):
-            for line in block.text.split("\n"):
-                document.add_paragraph(line)
+            _add_text(document, block)
     if doc.footer:
         # 출처 한 줄. 서식을 지정하지 않는 이 모듈의 방침대로 기본 문단으로 넣는다.
         document.add_paragraph(doc.footer)

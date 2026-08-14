@@ -6,6 +6,7 @@
 - `.docx`: `word/document.xml` 에 `m:oMath` 가 들어가고 분수는 `m:f`
   (`m:num`/`m:den`), 근호는 `m:rad`(`m:deg`/`m:e`), 극한은 `m:limLow`,
   큰 연산자는 `m:nary` 구조여야 한다(ECMA-376 Part 1 §22.1.2).
+- `.hwpx`: `Contents/section0.xml` 에 `hp:equation` + `hp:script`(EqEdit).
 - 변환할 수 없는 문법은 **평문으로 폴백**한다. 무엇이 폴백되는지 여기서 못박는다.
 - 수식이 없는 문서는 예전과 똑같아야 한다.
 """
@@ -13,6 +14,7 @@
 from __future__ import annotations
 
 import io
+import re
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -20,7 +22,9 @@ import pytest
 
 from export import build as export_build
 from export import docx as export_docx
+from export import hwpx as export_hwpx
 from export import model as export_model
+from export.hwpeq import HwpEquationError, latex_to_hwp_equation
 from export.omml import UnsupportedLatexError, latex_to_omml
 
 MATH_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
@@ -72,6 +76,18 @@ def _docx_texts(body: ET.Element) -> list[str]:
     ]
 
 
+def _hwpx_section(payload: bytes) -> str:
+    """`.hwpx` 바이트에서 `Contents/section0.xml` 을 읽는다."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        return archive.read("Contents/section0.xml").decode("utf-8")
+
+
+def _hwpx_scripts(payload: bytes) -> list[str]:
+    """`.hwpx` 에 들어간 EqEdit 스크립트들(XML 이스케이프를 되돌린 값)."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        root = ET.fromstring(archive.read("Contents/section0.xml"))
+    tag = "{http://www.hancom.co.kr/hwpml/2011/paragraph}script"
+    return [node.text or "" for node in root.iter(tag)]
 
 
 def _doc(*blocks: export_model.Block) -> export_model.ExportDoc:
@@ -451,3 +467,141 @@ def test_docx_without_math_is_unchanged() -> None:
         )
     ]
     assert texts == ["수식", "가", "나", "다"]
+
+
+# ── 한글 수식(EqEdit) ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("latex", "expected"),
+    [
+        # 분수: `over` 가 위/아래로 나눈다.
+        (r"\frac{x+1}{2}", "{x + 1} over {2}"),
+        (r"\dfrac{x+1}{2}", "{x + 1} over {2}"),
+        # `\cfrac` 은 변환기가 모르는 이름이라 `\frac` 으로 정규화해 넘긴다.
+        (r"\cfrac{1}{2}", "{1} over {2}"),
+        # 제곱근: 근호가 피근수를 덮는다.
+        (r"\sqrt{x^2+1}", "sqrt {x ^{2} + 1}"),
+        (r"\sqrt[3]{8}", "root {3} of {8}"),
+        # 극한.
+        (r"\lim_{x \to 0}", "lim _{x -> 0}"),
+        # 큰 연산자의 위아래 한계.
+        (r"\sum_{k=1}^{n} k^2", "sum _{k = 1} ^{n} k ^{2}"),
+        (r"\prod_{i=1}^{n} a_i", "prod _{i = 1} ^{n} a _{i}"),
+        # 크기 조절 괄호.
+        (r"\left( \frac{a}{b} \right)", "LEFT ( {a} over {b} RIGHT )"),
+        # 기호.
+        (r"\alpha \le \beta \ne \gamma \to \angle", "alpha leq beta neq gamma -> angle"),
+        # 선 덮개·악센트.
+        (r"\overline{AB}", "overline {AB}"),
+        (r"\vec{v}", "vec {v}"),
+        # 도(°) 는 `circ` 위첨자로 나간다.
+        (r"90^\circ", "90 ^{circ}"),
+        # 간격 명령은 공백으로 눌러 통과시킨다(변환기가 거절하던 문법).
+        (r"\int_0^1 x\,dx", "int _{0} ^{1} x dx"),
+        # 서체 명령은 벗기고 내용만 통과시킨다.
+        (r"\mathbb{R}", "{R}"),
+        # 근의 공식(사용자가 지목한 조합).
+        (
+            r"\frac{-b \pm \sqrt{b^2-4ac}}{2a}",
+            "{- b +- sqrt {b ^{2} - 4 ac}} over {2 a}",
+        ),
+    ],
+)
+def test_hwp_equation_script(latex: str, expected: str) -> None:
+    """한글 수식 스크립트는 python-hwpx 의 검증된 변환기 결과와 같다."""
+    assert latex_to_hwp_equation(latex) == expected
+
+
+@pytest.mark.parametrize(
+    "latex",
+    [
+        # python-hwpx 가 실한컴 렌더로 검증하지 못한 문법들.
+        r"\triangle ABC",
+        r"\therefore x = 1",
+        r"\widehat{AB}",
+        r"\begin{Bmatrix} a & b \\ c & d \end{Bmatrix}",
+        r"\left( x",
+        "",
+        "   ",
+    ],
+)
+def test_hwp_equation_refuses_unverified_syntax(latex: str) -> None:
+    """검증된 토큰 집합 밖은 거절한다(호출부가 평문으로 폴백)."""
+    with pytest.raises(HwpEquationError):
+        latex_to_hwp_equation(latex)
+
+
+# ── hwpx 렌더러 통합 ─────────────────────────────────────────────────
+
+
+def test_hwpx_embeds_equation_objects() -> None:
+    """`.hwpx` 의 `Contents/section0.xml` 에 `hp:equation` + EqEdit 스크립트."""
+    payload = export_hwpx.build_hwpx(_doc(_math_block(r"\frac{x+1}{2}")))
+    assert "<hp:equation" in _hwpx_section(payload)
+    assert _hwpx_scripts(payload) == ["{x + 1} over {2}"]
+    assert "폴백" not in _hwpx_section(payload)
+
+
+@pytest.mark.parametrize(
+    ("latex", "script"),
+    [
+        (r"\frac{a}{b}", "{a} over {b}"),
+        (r"\sqrt{x}", "sqrt {x}"),
+        (r"\sqrt[3]{8}", "root {3} of {8}"),
+        (r"\lim_{n \to \infty} a_n", "lim _{n -> infty} a _{n}"),
+        (r"\sum_{k=1}^{n} k", "sum _{k = 1} ^{n} k"),
+        (r"\left( x \right)", "LEFT ( x RIGHT )"),
+    ],
+)
+def test_hwpx_carries_each_required_structure(latex: str, script: str) -> None:
+    """반드시 지원할 문법이 모두 실제 문서까지 살아서 간다."""
+    payload = export_hwpx.build_hwpx(_doc(_math_block(latex)))
+    assert _hwpx_scripts(payload) == [script]
+
+
+def test_hwpx_math_sits_in_the_same_paragraph_as_its_text() -> None:
+    """수식 앞뒤 글자는 같은 문단에 남는다."""
+    block = export_model.Text(
+        "앞 (a)/(b) 뒤",
+        [
+            [
+                export_model.TextRun("앞 "),
+                export_model.MathRun(latex=r"\frac{a}{b}", plain="(a)/(b)"),
+                export_model.TextRun(" 뒤"),
+            ]
+        ],
+    )
+    section = _hwpx_section(export_hwpx.build_hwpx(_doc(block)))
+    paragraph = re.findall(r"<hp:p [^>]*>.*?</hp:p>", section, re.DOTALL)[-1]
+    assert "앞 " in paragraph
+    assert " 뒤" in paragraph
+    assert "<hp:equation" in paragraph
+
+
+def test_hwpx_falls_back_to_plain_text_for_unsupported_math() -> None:
+    """변환 실패 시 기존 평문 유니코드가 들어간다."""
+    section = _hwpx_section(
+        export_hwpx.build_hwpx(_doc(_math_block(r"\triangle ABC", plain="triangle ABC")))
+    )
+    assert "<hp:equation" not in section
+    assert "triangle ABC" in section
+
+
+def test_hwpx_logs_the_fallback(caplog: pytest.LogCaptureFixture) -> None:
+    """폴백했다는 사실을 로그로 남긴다."""
+    with caplog.at_level("INFO", logger="export.hwpx"):
+        export_hwpx.build_hwpx(_doc(_math_block(r"\triangle ABC")))
+    assert any("폴백" in record.getMessage() for record in caplog.records)
+
+
+def test_hwpx_without_math_is_unchanged() -> None:
+    """수식이 없는 블록은 예전 경로 그대로다."""
+    section = _hwpx_section(
+        export_hwpx.build_hwpx(_doc(export_model.Text("가\n나\n다")))
+    )
+    assert "<hp:equation" not in section
+    for line in ("가", "나", "다"):
+        assert f"<hp:t>{line}</hp:t>" in section
+
+

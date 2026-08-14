@@ -163,7 +163,11 @@ def test_exam_full_is_larger_than_problems_only(client: TestClient) -> None:
 
 
 def test_exam_full_hwpx_contains_solution_text(client: TestClient) -> None:
-    """풀이가 평문(유니코드)으로 들어간다. `## 문제 확인` 은 빠진다."""
+    """풀이가 들어간다. `## 문제 확인` 은 빠진다.
+
+    수식(`$\\left(1, 4\\right)$`)은 이제 평문이 아니라 한글 수식 개체로 나가므로
+    문장이 `꼭짓점 ` + 수식 + ` 에서 ...` 로 쪼개진다(`test_math_typesetting.py`).
+    """
     node_id = upload_test_pdf(client)["node"]["id"]
     _save_solution(client, node_id, 1)
 
@@ -177,7 +181,9 @@ def test_exam_full_hwpx_contains_solution_text(client: TestClient) -> None:
             for name in archive.namelist()
             if name.startswith("Contents/section")
         ).decode("utf-8")
-    assert "꼭짓점 (1, 4) 에서 최댓값을 갖습니다." in body
+    assert "꼭짓점 " in body
+    assert " 에서 최댓값을 갖습니다." in body
+    assert "<hp:script>LEFT ( 1 , 4 RIGHT )</hp:script>" in body
     assert "문제 확인" not in body
     # LaTeX 구분자가 그대로 남지 않는다.
     assert "\\left" not in body
@@ -193,7 +199,8 @@ def test_exam_full_drops_verification_section(client: TestClient) -> None:
     )
     assert response.status_code == 200
     body = _section_text(response.content)
-    assert "꼭짓점 (1, 4) 에서 최댓값을 갖습니다." in body
+    assert "꼭짓점 " in body
+    assert " 에서 최댓값을 갖습니다." in body
     assert "검산" not in body
     assert "도로 넣으면 성립합니다" not in body
 
