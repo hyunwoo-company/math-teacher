@@ -5,11 +5,18 @@
  * 이 테스트는 "스트리밍 -> 파싱 -> 상태 반영" 경로 전체를 검증한다.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { api } from '@/lib/api';
 import { resetMockState } from '@/lib/mock/client';
 import { MOCK_FILE_ID, MOCK_PROBLEM_COUNT } from '@/lib/mock/data';
 import { buildTree } from '@/lib/tree';
-import { LEFT_MAX, LEFT_MIN, useWorkspace, __internal } from '@/store/workspace';
+import {
+  LEFT_MAX,
+  LEFT_MIN,
+  useWorkspace,
+  __internal,
+  type ToastMessage,
+} from '@/store/workspace';
 
 const initial = useWorkspace.getState();
 
@@ -366,6 +373,77 @@ describe('오답노트 담기 모드', () => {
     // 이 상태에서 담기 모드를 다시 켜면 선택은 비어 있어야 한다.
     useWorkspace.getState().startNotePicking();
     expect(useWorkspace.getState().notePicked).toEqual([]);
+  });
+});
+
+describe('트리 다중 이동 (moveNodes)', () => {
+  beforeEach(() => {
+    reset();
+  });
+
+  /** 토스트는 상태 한 칸을 덮어쓰므로, 구독해서 "몇 건이 떴는지"를 센다. */
+  function collectToasts(): { toasts: ToastMessage[]; stop: () => void } {
+    const toasts: ToastMessage[] = [];
+    const stop = useWorkspace.subscribe((state) => {
+      if (state.toast && !toasts.includes(state.toast)) toasts.push(state.toast);
+    });
+    return { toasts, stop };
+  }
+
+  it('여러 노드를 한 번에 옮기고 트리는 한 번만 새로 고친다', async () => {
+    await useWorkspace.getState().loadTree();
+    const getTree = vi.spyOn(api, 'getTree');
+    const update = vi.spyOn(api, 'updateNode');
+
+    await useWorkspace.getState().moveNodes(
+      [MOCK_FILE_ID, 'folder-calculus', 'folder-common1'],
+      'folder-june',
+    );
+
+    expect(update).toHaveBeenCalledTimes(3);
+    expect(getTree).toHaveBeenCalledTimes(1);
+
+    const { nodes } = useWorkspace.getState();
+    for (const id of [MOCK_FILE_ID, 'folder-calculus', 'folder-common1']) {
+      expect(nodes.find((node) => node.id === id)?.parent_id).toBe('folder-june');
+    }
+    // 받는 폴더는 펼쳐서 옮긴 결과가 바로 보이게 한다.
+    expect(useWorkspace.getState().expanded['folder-june']).toBe(true);
+
+    getTree.mockRestore();
+    update.mockRestore();
+  });
+
+  it('일부가 실패해도 나머지는 옮기고 실패만 알린다', async () => {
+    await useWorkspace.getState().loadTree();
+    const { toasts, stop } = collectToasts();
+
+    // folder-2026-1 은 folder-common1 의 조상이라 실패하고, folder-june 은 성공해야 한다.
+    await useWorkspace.getState().moveNodes(['folder-2026-1', 'folder-june'], 'folder-common1');
+    stop();
+
+    const { nodes } = useWorkspace.getState();
+    expect(nodes.find((node) => node.id === 'folder-2026-1')?.parent_id).toBeNull();
+    expect(nodes.find((node) => node.id === 'folder-june')?.parent_id).toBe('folder-common1');
+
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.kind).toBe('error');
+    expect(toasts[0]?.message).toContain('1개');
+  });
+
+  it('이미 그 폴더에 있는 노드는 서버를 부르지 않는다', async () => {
+    await useWorkspace.getState().loadTree();
+    const update = vi.spyOn(api, 'updateNode');
+    const getTree = vi.spyOn(api, 'getTree');
+
+    // MOCK_FILE_ID 의 부모가 이미 folder-common1 이다.
+    await useWorkspace.getState().moveNodes([MOCK_FILE_ID, MOCK_FILE_ID], 'folder-common1');
+
+    expect(update).not.toHaveBeenCalled();
+    expect(getTree).not.toHaveBeenCalled();
+
+    update.mockRestore();
+    getTree.mockRestore();
   });
 });
 

@@ -7,7 +7,13 @@ import { buildTree, countDescendants, type TreeItem } from '@/lib/tree';
 import { resolveDropTarget, resolveUploadTarget } from '@/lib/upload-target';
 import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { ContextMenu, type ContextMenuItem } from '@/components/tree/ContextMenu';
-import { NODE_MIME, TreeRow } from '@/components/tree/TreeRow';
+import { NODE_MIME, TreeRow, type DragState } from '@/components/tree/TreeRow';
+import {
+  dragPayloadIds,
+  nextSelection,
+  parseDragIds,
+  visibleNodeIds,
+} from '@/components/tree/selection';
 import { ConfirmDialog, PromptDialog } from '@/components/ui/Dialog';
 import { EmptyState, ErrorState, LoadingState, Spinner } from '@/components/ui/Feedback';
 
@@ -37,7 +43,7 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const createFolder = useWorkspace((state) => state.createFolder);
   const createNote = useWorkspace((state) => state.createNote);
   const renameNode = useWorkspace((state) => state.renameNode);
-  const moveNode = useWorkspace((state) => state.moveNode);
+  const moveNodes = useWorkspace((state) => state.moveNodes);
   const deleteNode = useWorkspace((state) => state.deleteNode);
   const uploadFiles = useWorkspace((state) => state.uploadFiles);
   const focusNode = useWorkspace((state) => state.focusNode);
@@ -46,13 +52,65 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const [dialog, setDialog] = useState<DialogState>({ kind: 'none' });
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [rootDragOver, setRootDragOver] = useState(false);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
+  // 다중 선택(이동용). 열려 있는 파일(selectedFileId)과는 다른 개념이다.
+  const [pickedIds, setPickedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [anchorId, setAnchorId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadTargetRef = useRef<string | null>(null);
 
   const isNote = section === 'note';
   const roots = useMemo(() => buildTree(nodes), [nodes]);
   const highlightedId = isNote ? selectedNoteId : selectedFileId;
+  // 범위 선택은 "화면에 보이는 순서" 기준이다(접힌 폴더의 자식은 제외).
+  const visibleIds = useMemo(() => visibleNodeIds(roots, expanded), [roots, expanded]);
+  // 삭제·이동으로 사라진 id 가 선택에 남으면 개수 표시가 어긋난다. 렌더 중 걸러 낸다.
+  const selectedIds = useMemo(() => {
+    const alive = new Set(nodes.map((node) => node.id));
+    const kept = new Set<string>();
+    for (const id of pickedIds) if (alive.has(id)) kept.add(id);
+    return kept;
+  }, [nodes, pickedIds]);
+
+  const clearSelection = () => {
+    setPickedIds(new Set());
+    setAnchorId(null);
+  };
+
+  const handleRowClick = (event: MouseEvent, item: TreeItem) => {
+    const modifiers = { toggle: event.ctrlKey || event.metaKey, range: event.shiftKey };
+    const result = nextSelection({
+      current: selectedIds,
+      anchorId,
+      clickedId: item.node.id,
+      modifiers,
+      visibleIds,
+    });
+    setPickedIds(result.selected);
+    setAnchorId(result.anchorId);
+
+    // 수정키를 쓴 클릭은 "고르는" 동작이다. 파일을 열거나 폴더를 접었다 펴지 않는다.
+    if (modifiers.toggle || modifiers.range) return;
+    focusNode(item.node.id);
+    if (item.node.type === 'folder') toggleExpanded(item.node.id);
+    else void openNode(item.node.id);
+  };
+
+  const beginDrag = (nodeId: string): string[] => {
+    const ids = dragPayloadIds(selectedIds, nodeId, visibleIds);
+    // 선택 밖의 행을 끌면 그 행 하나만 옮긴다. 그러면 화면 표시도 거기에 맞춰야
+    // "파랗게 칠해진 3개" 를 끄는 줄 알았는데 1개만 움직이는 착시가 안 생긴다.
+    if (!selectedIds.has(nodeId)) {
+      setPickedIds(new Set([nodeId]));
+      setAnchorId(nodeId);
+    }
+    return ids;
+  };
+
+  const dropNodes = (draggedIds: string[], targetFolderId: string | null) => {
+    if (draggedIds.length === 0) return;
+    void moveNodes(draggedIds, targetFolderId);
+  };
 
   // 하단 버튼이 어디로 만들지/올리는지. 누르기 전에 라벨로 보여 준다.
   const uploadTarget = useMemo(
@@ -139,10 +197,23 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     <aside className="flex h-full w-full min-w-0 flex-col border-r border-slate-200 bg-white">
       {/* 섹션 전환 탭 */}
       <div role="tablist" aria-label="좌측 섹션" className="flex border-b border-slate-200">
-        <SectionTab active={section === 'exam'} onClick={() => void setSection('exam')}>
+        {/* 섹션이 바뀌면 트리가 통째로 바뀌므로 선택을 버린다. */}
+        <SectionTab
+          active={section === 'exam'}
+          onClick={() => {
+            clearSelection();
+            void setSection('exam');
+          }}
+        >
           시험지
         </SectionTab>
-        <SectionTab active={section === 'note'} onClick={() => void setSection('note')}>
+        <SectionTab
+          active={section === 'note'}
+          onClick={() => {
+            clearSelection();
+            void setSection('note');
+          }}
+        >
           오답노트
         </SectionTab>
       </div>
@@ -182,6 +253,19 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
         </p>
       ) : null}
 
+      {selectedIds.size > 1 ? (
+        <div className="flex items-center justify-between gap-2 border-b border-blue-200 bg-blue-50 px-3 py-1.5 text-[11px] text-blue-800">
+          <span>{selectedIds.size}개 선택됨 · 폴더로 끌어다 놓으면 함께 이동합니다</span>
+          <button
+            type="button"
+            onClick={clearSelection}
+            className="shrink-0 rounded px-1.5 py-0.5 font-medium hover:bg-blue-100"
+          >
+            선택 해제
+          </button>
+        </div>
+      ) : null}
+
       <div
         className={
           'min-h-0 flex-1 overflow-auto px-1 py-1 ' +
@@ -202,10 +286,10 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
           event.preventDefault();
           setRootDragOver(false);
           setDragOverId(null);
-          setDraggingId(null);
-          const draggedId = event.dataTransfer.getData(NODE_MIME);
-          if (draggedId) {
-            void moveNode(draggedId, null);
+          setDrag(null);
+          const draggedIds = parseDragIds(event.dataTransfer.getData(NODE_MIME));
+          if (draggedIds.length > 0) {
+            dropNodes(draggedIds, null);
             return;
           }
           if (isNote) return;
@@ -242,15 +326,18 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
                 item={item}
                 expanded={expanded}
                 selectedFileId={highlightedId}
+                selectedIds={selectedIds}
                 dragOverId={dragOverId}
                 setDragOverId={setDragOverId}
-                draggingId={draggingId}
-                setDraggingId={setDraggingId}
+                drag={drag}
+                setDrag={setDrag}
                 onToggle={toggleExpanded}
                 onSelectFile={(id) => void openNode(id)}
                 onFocusNode={focusNode}
+                onRowClick={handleRowClick}
                 onContextMenu={openRowMenu}
-                onDropNode={(draggedId, targetId) => void moveNode(draggedId, targetId)}
+                getDragIds={beginDrag}
+                onDropNode={dropNodes}
                 onDropFiles={dropFilesOnNode}
               />
             ))}

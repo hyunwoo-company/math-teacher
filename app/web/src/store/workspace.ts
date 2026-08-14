@@ -315,6 +315,13 @@ interface WorkspaceState {
   createNote: (name: string, parentId: string | null) => Promise<boolean>;
   renameNode: (id: string, name: string) => Promise<boolean>;
   moveNode: (id: string, parentId: string | null) => Promise<boolean>;
+  /**
+   * 여러 노드를 한 폴더로 옮긴다(트리 다중 선택 드래그).
+   *
+   * 서버 이동을 순차로 부른다. 실패한 것만 모아 토스트 한 건으로 알리고 성공분은
+   * 그대로 둔다. 트리는 하나라도 옮겼을 때 마지막에 한 번만 다시 읽는다.
+   */
+  moveNodes: (ids: string[], parentId: string | null) => Promise<void>;
   deleteNode: (id: string) => Promise<boolean>;
   uploadFiles: (files: File[], parentId: string | null) => Promise<void>;
 
@@ -1252,6 +1259,63 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       return false;
     } finally {
       set({ pendingOp: null });
+    }
+  },
+
+  async moveNodes(ids: string[], parentId: string | null) {
+    const unique = Array.from(new Set(ids));
+    if (unique.length === 0) return;
+
+    const failures: string[] = [];
+    let moved = 0;
+    set({ pendingOp: '옮기고 있습니다…' });
+    try {
+      for (const id of unique) {
+        const { nodes } = get();
+        const node = nodes.find((candidate) => candidate.id === id);
+        // 사라졌거나 이미 그 폴더에 있는 노드는 조용히 건너뛴다(빈 요청 방지).
+        if (!node || node.parent_id === parentId) continue;
+        if (parentId === id) {
+          failures.push(`${node.name}: 자기 자신 안으로는 옮길 수 없습니다.`);
+          continue;
+        }
+        // 순환은 서버도 막지만(cycle_detected), 왕복 없이 먼저 걸러 이유를 정확히 알린다.
+        if (parentId != null && isDescendantOf(nodes, id, parentId)) {
+          failures.push(`${node.name}: 하위 폴더 안으로는 옮길 수 없습니다.`);
+          continue;
+        }
+        try {
+          const updated = await api.updateNode(id, { parent_id: parentId });
+          set((state) => ({
+            nodes: state.nodes.map((candidate) => (candidate.id === id ? updated : candidate)),
+          }));
+          moved += 1;
+        } catch (error) {
+          failures.push(`${node.name}: ${toUserMessage(error)}`);
+        }
+      }
+    } finally {
+      set({ pendingOp: null });
+    }
+
+    if (moved > 0) {
+      if (parentId != null) {
+        set((state) => ({ expanded: { ...state.expanded, [parentId]: true } }));
+      }
+      // 옮긴 뒤 정렬·부모 관계를 서버 기준으로 맞춘다. 여기서 딱 한 번만 읽는다.
+      await get().loadTree();
+    }
+
+    if (failures.length > 0) {
+      get().showToast({
+        kind: 'error',
+        message: `${failures.length}개를 옮기지 못했습니다.`,
+        hint: failures.join(' / '),
+      });
+      return;
+    }
+    if (moved > 1) {
+      get().showToast({ kind: 'success', message: `${moved}개를 옮겼습니다.` });
     }
   },
 
