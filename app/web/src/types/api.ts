@@ -137,6 +137,20 @@ export interface Problem {
   image_w: number;
   image_h: number;
   has_solution: boolean;
+  /**
+   * 판독본(문항 텍스트화)이 저장돼 있는지. 전문은 싣지 않는다(풀이와 같은 규칙) —
+   * 전문은 `GET /api/files/{id}/transcripts` 로 받는다.
+   * 판독본 도입 전 백엔드는 주지 않으므로 optional 이다.
+   */
+  has_transcript?: boolean;
+  /**
+   * 판독본 출처. `pua`(디코딩) / `ai`(AI 판독) / `manual`(직접 수정).
+   * 백엔드가 값을 늘려도 조회가 깨지지 않도록 union 으로 좁히지 않는다
+   * (좁히기는 `lib/transcript.ts` 가 한다).
+   */
+  transcript_source?: string | null;
+  /** 판독 실패·불가 이유(예: "불가 - 좌표평면 그래프"). */
+  transcript_note?: string | null;
 }
 
 /** `GET /api/files/{id}` */
@@ -189,6 +203,26 @@ export interface Solution {
 
 export interface SolutionsResponse {
   solutions: Solution[];
+}
+
+/* ── 문항 텍스트화(판독본) ───────────────────────────────────────── */
+
+/**
+ * `GET /api/files/{id}/transcripts` 의 원소.
+ *
+ * `transcript` 가 null 이고 `transcript_note` 만 있으면 판독하지 못한 문항이다
+ * (화면은 이유를 배지로 보여주고, 내보낼 때는 이미지로 폴백한다).
+ */
+export interface Transcript {
+  no: number;
+  transcript: string | null;
+  /** `pua` / `ai` / `manual`. 계약대로 좁히지 않는다. */
+  transcript_source: string | null;
+  transcript_note: string | null;
+}
+
+export interface TranscriptsResponse {
+  transcripts: Transcript[];
 }
 
 /* ── 오답노트 (계약 6-A) ─────────────────────────────────────────── */
@@ -371,6 +405,12 @@ export type ExportTarget = 'exam' | 'variants' | 'note';
 export type ExportFormat = 'docx' | 'hwpx';
 /** 문서 구성: 문제만 / 문제+해설. */
 export type ExportInclude = 'problems' | 'full';
+/**
+ * 문항 본문을 무엇으로 낼지.
+ *  - `image` (기본): 지금까지와 완전히 같은 문서(크롭 이미지).
+ *  - `text`        : 판독본이 있는 문항은 텍스트로 조판하고 없으면 이미지로 폴백한다.
+ */
+export type ExportBody = 'image' | 'text';
 
 /** 저장된 변형 1건. */
 export interface Variant {
@@ -388,7 +428,8 @@ export interface VariantsResponse {
 
 /* ── 작업 큐 ─────────────────────────────────────────────────────── */
 
-export type JobKind = 'solve' | 'variant';
+/** `transcribe` = 문항 텍스트화(1차 PDF 디코딩 → 실패분만 AI 비전). */
+export type JobKind = 'solve' | 'variant' | 'transcribe';
 export type JobStatus =
   | 'queued'
   | 'running'
@@ -450,6 +491,11 @@ export interface SolveProblemEvent {
   type: 'problem';
   no: number;
   status: string;
+  /**
+   * 판독 작업에서 이 문항이 어느 경로로 가는지(`pua` = 디코딩, `ai` = AI 비전).
+   * 판독 작업의 이벤트에만 실린다.
+   */
+  route?: string;
 }
 export interface SolveDeltaEvent {
   type: 'delta';
@@ -470,6 +516,17 @@ export interface SolveDoneEvent {
   truncated_before?: number;
   /** 변형 작업일 때 어떤 변형 종류인지. */
   mode?: VariantMode;
+  /**
+   * 판독 작업이 이번에 확정한 전문. **판독 불가면 null** 이다.
+   *
+   * 이 키가 아예 없으면 판독 작업의 이벤트가 아니다 — null 과 부재를 구분해야
+   * 한다. 부재를 null 로 채우면 풀이 done 이 멀쩡한 판독본을 지운다.
+   */
+  transcript?: string | null;
+  /** 이번 실행이 저장한 출처(`pua` / `ai`). 저장하지 않았으면 null. */
+  transcript_source?: string | null;
+  /** 판독 실패·불가 이유. */
+  transcript_note?: string | null;
 }
 export interface SolveErrorEvent {
   type: 'error';

@@ -29,12 +29,15 @@ import type {
   SolutionsResponse,
   StreamEvent,
   ThreadsResponse,
+  Transcript,
+  TranscriptsResponse,
   TreeNode,
   TreeResponse,
   Usage,
   UsageSummaryResponse,
   JobCreateRequest,
   JobCreated,
+  ExportBody,
   ExportFormat,
   ExportInclude,
   ExportTarget,
@@ -328,6 +331,7 @@ export const httpClient: ApiClient = {
     format: ExportFormat,
     include: ExportInclude,
     source?: string,
+    body: ExportBody = 'image',
   ): Promise<{ blob: Blob; filename: string | null }> {
     // 바이너리 다운로드. fetch 로 받으므로 헤더 인증(authHeaders)과 ?access= 를 함께 건다
     // (백엔드는 이 경로들에 두 방식 모두 허용). 파일명은 서버 Content-Disposition 우선.
@@ -341,9 +345,12 @@ export const httpClient: ApiClient = {
     // 출처는 값이 있을 때만 붙인다. 빈 문자열을 보내면 서버가 문서 끝에 빈 줄을
     // 넣지는 않지만(공백은 걸러진다), 굳이 의미 없는 쿼리를 남기지 않는다.
     const trimmedSource = source?.trim() ?? '';
+    // body 도 기본값(image)일 때는 붙이지 않는다. 지금까지의 URL 이 그대로 남아
+    // 프록시·브라우저 캐시와 서버 로그가 달라지지 않는다.
     const path =
       `${base}/export.${format}?include=${include}` +
-      (trimmedSource === '' ? '' : `&source=${encodeURIComponent(trimmedSource)}`);
+      (trimmedSource === '' ? '' : `&source=${encodeURIComponent(trimmedSource)}`) +
+      (body === 'image' ? '' : `&body=${body}`);
     let response: Response;
     try {
       response = await fetch(withAccess(url(path)), {
@@ -364,6 +371,21 @@ export const httpClient: ApiClient = {
 
   getVariants(id: string) {
     return requestJson<VariantsResponse>(`/api/files/${encodeURIComponent(id)}/variants`);
+  },
+
+  getTranscripts(id: string) {
+    return requestJson<TranscriptsResponse>(`/api/files/${encodeURIComponent(id)}/transcripts`);
+  },
+
+  saveTranscript(id: string, no: number, text: string) {
+    return requestJson<Transcript>(
+      `/api/files/${encodeURIComponent(id)}/problems/${no}/transcript`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      },
+    );
   },
 
   getSolutions(id: string) {

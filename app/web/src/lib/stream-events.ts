@@ -73,6 +73,32 @@ function variantMode(source: Record<string, unknown>): { mode?: VariantMode } {
     : {};
 }
 
+/**
+ * 판독(transcribe) 작업의 `done` 에만 실리는 필드. 없으면 빈 객체.
+ *
+ * **키의 부재와 null 을 구분한다.** `transcript: null` 은 "판독 불가" 라는 확정
+ * 사실이고, 키가 없는 것은 판독 작업이 아니라는 뜻이다. 없는데 null 로 채우면
+ * 풀이·채팅의 done 이 저장된 판독본을 지운다.
+ */
+function transcriptFields(source: Record<string, unknown>): {
+  transcript?: string | null;
+  transcript_source?: string | null;
+  transcript_note?: string | null;
+} {
+  if (!('transcript' in source) && !('note' in source)) return {};
+  return {
+    transcript: readString(source, 'transcript'),
+    transcript_source: readString(source, 'source'),
+    transcript_note: readString(source, 'note'),
+  };
+}
+
+/** 판독 작업의 `problem` 에 실리는 경로(`pua` / `ai`). 없으면 빈 객체. */
+function routeField(source: Record<string, unknown>): { route?: string } {
+  const route = readString(source, 'route');
+  return route == null ? {} : { route };
+}
+
 /** SSE 메시지 -> StreamEvent. */
 export function toStreamEvent(message: SSEMessage): StreamEvent {
   const unknown: StreamEvent = { type: 'unknown', event: message.event, raw: message.data };
@@ -103,6 +129,7 @@ export function toStreamEvent(message: SSEMessage): StreamEvent {
         type: 'problem',
         no: readNumber(data, 'no') ?? 0,
         status: readString(data, 'status') ?? 'running',
+        ...routeField(data),
       };
     case 'delta':
       return {
@@ -124,6 +151,7 @@ export function toStreamEvent(message: SSEMessage): StreamEvent {
         history_truncated: data['history_truncated'] === true,
         truncated_before: truncatedBefore ?? 0,
         ...variantMode(data),
+        ...transcriptFields(data),
       };
     }
     case 'error':

@@ -74,6 +74,65 @@ describe('toStreamEvent', () => {
     ).toMatchObject({ type: 'end', total_usage: { input_tokens: 10 }, total_cost: null });
   });
 
+  it('판독 작업의 problem 이벤트는 경로(route)를 함께 넘긴다', () => {
+    expect(toStreamEvent(message('problem', { no: 3, status: 'running', route: 'pua' }))).toEqual({
+      type: 'problem',
+      no: 3,
+      status: 'running',
+      route: 'pua',
+    });
+  });
+
+  it('판독 작업의 done 이벤트는 전문·출처·이유를 넘긴다', () => {
+    expect(
+      toStreamEvent(
+        message('done', {
+          no: 3,
+          source: 'pua',
+          transcript: '\\(A = 3x^2\\)',
+          note: null,
+          usage: null,
+          cost: null,
+          truncated: false,
+        }),
+      ),
+    ).toMatchObject({
+      type: 'done',
+      no: 3,
+      transcript: '\\(A = 3x^2\\)',
+      transcript_source: 'pua',
+      transcript_note: null,
+    });
+  });
+
+  it('판독 불가는 전문이 null 이고 이유만 온다', () => {
+    expect(
+      toStreamEvent(
+        message('done', {
+          no: 5,
+          source: null,
+          transcript: null,
+          note: '불가 - 좌표평면 그래프',
+          usage: null,
+          cost: null,
+          truncated: false,
+        }),
+      ),
+    ).toMatchObject({
+      transcript: null,
+      transcript_source: null,
+      transcript_note: '불가 - 좌표평면 그래프',
+    });
+  });
+
+  it('판독 필드가 없는 풀이 done 에는 그 키를 만들지 않는다', () => {
+    // 있어야만 판독 작업의 이벤트다. 없는데 null 로 채우면 "전문이 지워졌다" 와
+    // 구분할 수 없어 스토어가 멀쩡한 판독본을 비운다.
+    const event = toStreamEvent(message('done', { no: 1, solution: '풀이', truncated: false }));
+    expect(event).not.toHaveProperty('transcript');
+    expect(event).not.toHaveProperty('transcript_note');
+  });
+
   it('JSON 이 깨져도 던지지 않고 unknown 으로 넘긴다', () => {
     expect(toStreamEvent(message('delta', '{"no": '))).toEqual({
       type: 'unknown',

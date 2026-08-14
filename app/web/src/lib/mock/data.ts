@@ -34,6 +34,10 @@ export function makeMockProblems(count = MOCK_PROBLEM_COUNT): Problem[] {
       image_w: Math.round((x1 - x0) * 2),
       image_h: Math.round((y1 - y0) * 2),
       has_solution: false,
+      // 판독본은 업로드 시 자동으로 만들지 않는다(사용자가 명시적으로 실행한다).
+      has_transcript: false,
+      transcript_source: null,
+      transcript_note: null,
     });
   }
   return problems;
@@ -342,6 +346,40 @@ export function mockVariantText(no: number, mode: VariantMode): string {
     `\\(D < 0\\) 이므로 실근이 없다.`,
     ``,
     `**2단계.** 따라서 \\(f(x) > 0\\) 이 항상 성립하고, 답은 **${answer}번** 이다.`,
+  ].join('\n');
+}
+
+/* ── 문항 텍스트화(판독본) ───────────────────────────────────────── */
+
+/**
+ * 1차 디코딩(PDF 텍스트 레이어)이 성공하는 문항인지.
+ *
+ * 실측(풍문고 22문항 중 18개 디코딩)과 같은 비율이 되도록 5의 배수만 실패시킨다
+ * (22문항 중 5·10·15·20 네 개 → 18개 성공).
+ */
+export function mockDecodable(no: number): boolean {
+  return no % 5 !== 0;
+}
+
+/** 2차 AI 판독이 `가능` 으로 판정하는 문항인지. 10의 배수는 `불가`(그림 포함). */
+export function mockAiReadable(no: number): boolean {
+  return no % 10 !== 0;
+}
+
+/** 판독 불가 이유(실서버의 `## 판정` 한 줄을 접은 모양). */
+export const MOCK_TRANSCRIPT_NOTE = '불가 - 좌표평면 그래프 포함';
+
+/**
+ * 목 판독본 전문. 크롭 이미지와 나란히 두고 눈으로 대조하는 화면에 쓰이므로
+ * 발문·수식·선택지를 모두 담고 inline `\(...\)` 과 display `\[...\]` 를 섞는다.
+ */
+export function mockTranscriptText(no: number): string {
+  return [
+    `${no}. 이차함수 \\(f(x) = x^2 - ${no}x + ${no + 1}\\) 에 대하여 다음 물음에 답하시오. [4점]`,
+    '',
+    '\\[ f(x) = \\left(x - \\frac{' + no + '}{2}\\right)^2 + ' + (no + 1) + ' - \\frac{' + no * no + '}{4} \\]',
+    '',
+    `① ${no} ② ${no + 1} ③ ${no + 2} ④ ${no + 3} ⑤ ${no + 4}`,
   ].join('\n');
 }
 

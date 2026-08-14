@@ -16,14 +16,18 @@ import {
   MOCK_NOTE_ID,
   MOCK_PDF_PATH,
   MOCK_PROBLEM_COUNT,
+  MOCK_TRANSCRIPT_NOTE,
   makeMockEnv,
   makeMockNodes,
   makeMockNoteNodes,
   makeMockProblems,
+  mockAiReadable,
   mockChatReply,
   mockCropUrl,
+  mockDecodable,
   mockProblemText,
   mockSolutionText,
+  mockTranscriptText,
   mockVariantText,
 } from '@/lib/mock/data';
 import type { ApiClient } from '@/lib/api-client';
@@ -58,12 +62,15 @@ import type {
   SolutionsResponse,
   StreamEvent,
   ThreadsResponse,
+  Transcript,
+  TranscriptsResponse,
   TreeNode,
   TreeResponse,
   Usage,
   UsageSummaryResponse,
   Variant,
   VariantMode,
+  ExportBody,
 } from '@/types/api';
 
 /** DOCX(Word) MIME. '문제만' 내보내기 목 blob 에 쓴다. */
@@ -72,6 +79,9 @@ const DOCX_MEDIA_TYPE =
 
 /** HWPX(한글) MIME. */
 const HWPX_MEDIA_TYPE = 'application/hwp+zip';
+
+/** 판독본 길이 상한(백엔드 `config.MAX_TRANSCRIPT_LENGTH` 와 같은 값). */
+const MOCK_TRANSCRIPT_MAX_LENGTH = 20_000;
 
 /** 문항별 스레드 키. null = 시험지 전역. */
 function threadKey(fileId: string, problemNo: number | null): string {
@@ -96,6 +106,8 @@ interface MockState {
   solutions: Map<string, Map<number, Solution>>;
   /** nodeId -> `${no}::${mode}` -> 변형. 실서버처럼 완료된 변형을 남긴다. */
   variants: Map<string, Map<string, Variant>>;
+  /** nodeId -> no -> 판독본. 실서버처럼 문항마다 저장하고 재실행이 건너뛴다. */
+  transcripts: Map<string, Map<number, Transcript>>;
   /** key = threadKey(fileId, problemNo). */
   chats: Map<string, ChatMessage[]>;
   /** 전역(파일 무관) 자유 대화. 삽입 순서 배열, 조회 시 updated_at 내림차순 정렬. */
@@ -119,11 +131,41 @@ function variantSlot(no: number, mode: VariantMode): string {
   return `${no}::${mode}`;
 }
 
+/** 그 문항의 저장된 판독본(없으면 undefined). */
+function savedTranscript(nodeId: string, no: number): Transcript | undefined {
+  return state.transcripts.get(nodeId)?.get(no);
+}
+
+/**
+ * 판독본 3열을 한 번에 쓴다(실서버 `storage.set_transcript` 와 같은 모양).
+ *
+ * 배지 메타(`has_transcript` 등)는 문항 목록에도 실려 나가므로 함께 갱신한다.
+ * 전문도 이유도 없으면 항목을 지운다 — `GET /transcripts` 가 빈 항목을 빼는 것과
+ * 같은 상태가 된다.
+ */
+function writeMockTranscript(nodeId: string, next: Transcript): void {
+  const byNo = state.transcripts.get(nodeId) ?? new Map<number, Transcript>();
+  if (next.transcript == null && next.transcript_note == null) byNo.delete(next.no);
+  else byNo.set(next.no, next);
+  state.transcripts.set(nodeId, byNo);
+
+  const problem = (state.problems.get(nodeId) ?? []).find(
+    (candidate) => candidate.no === next.no,
+  );
+  if (problem) {
+    problem.has_transcript = next.transcript != null;
+    problem.transcript_source = next.transcript_source;
+    problem.transcript_note = next.transcript_note;
+  }
+}
+
 /** 목 작업. `script` 는 미리 만들어 둔 대본이고 워커가 하나씩 소비한다. */
 interface MockJob {
   record: Job;
   /** 중복 판정을 위해 무엇을 대상으로 하는지 기억한다(변형도 문항 목록이다). */
   targets: { numbers?: number[]; modes?: VariantMode[] };
+  /** 이미 있는 결과도 덮어쓰는 실행인지(판독은 `manual` 보호가 여기에 걸린다). */
+  force: boolean;
   script: MockSseEvent[];
   cursor: number;
   partialText: string;
@@ -146,6 +188,7 @@ function initialState(): MockState {
     problems,
     solutions: new Map(),
     variants: new Map(),
+    transcripts: new Map(),
     chats: new Map(),
     conversations: [],
     noteItems: new Map([[MOCK_NOTE_ID, []]]),
@@ -501,6 +544,94 @@ async function* variantScript(
   };
 }
 
+/**
+ * 판독(transcribe) 대본. **순서가 이 기능의 전부다** — 1차 디코딩(AI 호출 0회)을
+ * 먼저 하고, 실패한 문항만 2차 AI 비전으로 보낸다.
+ *
+ * 그래서 디코딩으로 끝난 문항에는 delta 가 없고(즉시 `done`) usage/cost 도 없다.
+ * AI 로 간 문항만 델타가 흐르고 사용량이 붙는다. 화면이 이 차이를 보여줘야 하므로
+ * 목도 같은 모양으로 흘린다.
+ */
+async function* transcribeScript(
+  targets: readonly number[],
+  opts: { provider?: ProviderChoice; model?: string },
+): AsyncGenerator<MockSseEvent, void, void> {
+  const subscription = isSubscriptionCall(opts.provider ?? 'subscription');
+  const model = opts.model ?? 'claude-opus-5';
+
+  yield { event: 'start', data: { total: targets.length }, delayMs: 40 };
+
+  let decodedCount = 0;
+  let aiCount = 0;
+  let unavailableCount = 0;
+
+  for (const no of targets) {
+    const decodable = mockDecodable(no);
+    yield {
+      event: 'problem',
+      data: { no, status: 'running', route: decodable ? 'pua' : 'ai' },
+      delayMs: 20,
+    };
+
+    if (decodable) {
+      decodedCount += 1;
+      yield {
+        event: 'done',
+        data: {
+          no,
+          source: 'pua',
+          transcript: mockTranscriptText(no),
+          note: null,
+          decoded_count: decodedCount,
+          ai_count: aiCount,
+          usage: null,
+          cost: null,
+          truncated: false,
+        },
+        delayMs: 20,
+      };
+      continue;
+    }
+
+    // 2차: 디코딩이 못 한 문항만 AI 비전으로. 응답이 델타로 흐른다.
+    aiCount += 1;
+    const readable = mockAiReadable(no);
+    const transcript = readable ? mockTranscriptText(no) : null;
+    for (const piece of chunkText(transcript ?? MOCK_TRANSCRIPT_NOTE, 24)) {
+      yield { event: 'delta', data: { no, text: piece }, delayMs: 12 };
+    }
+    if (!readable) unavailableCount += 1;
+    const usage = usageFor(no);
+    yield {
+      event: 'done',
+      data: {
+        no,
+        source: readable ? 'ai' : null,
+        transcript,
+        note: readable ? null : MOCK_TRANSCRIPT_NOTE,
+        decoded_count: decodedCount,
+        ai_count: aiCount,
+        usage,
+        cost: subscription ? null : costFor(model, usage),
+        truncated: false,
+      },
+      delayMs: 20,
+    };
+  }
+
+  yield {
+    event: 'end',
+    data: {
+      total_usage: null,
+      total_cost: null,
+      decoded_count: decodedCount,
+      ai_count: aiCount,
+      unavailable_count: unavailableCount,
+    },
+    delayMs: 20,
+  };
+}
+
 async function* streamFrom(
   script: AsyncGenerator<MockSseEvent, void, void>,
   signal?: AbortSignal,
@@ -646,6 +777,8 @@ export const mockClient: ApiClient = {
     for (const doomedId of doomed) {
       state.problems.delete(doomedId);
       state.solutions.delete(doomedId);
+      state.variants.delete(doomedId);
+      state.transcripts.delete(doomedId);
       state.noteItems.delete(doomedId);
       // 이 노드로 시작하는 스레드 전부 삭제.
       for (const key of [...state.chats.keys()]) {
@@ -713,7 +846,14 @@ export const mockClient: ApiClient = {
     // 목은 같은 원본을 다시 읽는 셈이므로 문항은 그대로다. 풀이만 지운다.
     const deleted = state.solutions.get(id)?.size ?? 0;
     state.solutions.delete(id);
+    // 재추출은 문항 번호가 바뀔 수 있으므로 판독본도 함께 버린다(실서버와 같다).
+    state.transcripts.delete(id);
     const problems = state.problems.get(id) ?? [];
+    for (const problem of problems) {
+      problem.has_transcript = false;
+      problem.transcript_source = null;
+      problem.transcript_note = null;
+    }
     return {
       node: { ...node },
       problems: problems.map((problem) => ({ ...problem })),
@@ -739,6 +879,7 @@ export const mockClient: ApiClient = {
     format: ExportFormat,
     include: ExportInclude,
     source?: string,
+    body: ExportBody = 'image',
   ): Promise<{ blob: Blob; filename: string | null }> {
     await sleep(LATENCY_MS);
     requireAuth();
@@ -747,9 +888,10 @@ export const mockClient: ApiClient = {
     // 출처는 서버가 문서 끝에 넣는 값이라 목에서도 내용에만 반영한다.
     const type = format === 'hwpx' ? HWPX_MEDIA_TYPE : DOCX_MEDIA_TYPE;
     const footer = source == null || source.trim() === '' ? '' : `/${source.trim()}`;
-    const blob = new Blob([`mock ${format}: ${target}/${node.name}/${include}${footer}`], {
-      type,
-    });
+    const blob = new Blob(
+      [`mock ${format}: ${target}/${node.name}/${include}${footer}/body=${body}`],
+      { type },
+    );
     return { blob, filename: null };
   },
 
@@ -763,6 +905,46 @@ export const mockClient: ApiClient = {
     const saved = [...(state.variants.get(id)?.values() ?? [])];
     saved.sort((a, b) => a.no - b.no || VARIANT_ORDER[a.mode] - VARIANT_ORDER[b.mode]);
     return { variants: saved };
+  },
+
+  async getTranscripts(id: string): Promise<TranscriptsResponse> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    findNode(id);
+    // 실서버처럼 판독본도 이유도 없는 문항(= 아직 판독하지 않음)은 빼고 준다.
+    const saved = [...(state.transcripts.get(id)?.values() ?? [])]
+      .filter((item) => item.transcript != null || item.transcript_note != null)
+      .map((item) => ({ ...item }))
+      .sort((a, b) => a.no - b.no);
+    return { transcripts: saved };
+  },
+
+  async saveTranscript(id: string, no: number, text: string): Promise<Transcript> {
+    await sleep(LATENCY_MS);
+    requireAuth();
+    findNode(id);
+    // 실서버(`service.save_transcript`)와 같은 규칙: 앞뒤 공백을 떼고,
+    // 남는 게 없으면 판독본을 **지운다**(출처·이유도 함께 비운다).
+    const cleaned = text.trim();
+    if (cleaned.length > MOCK_TRANSCRIPT_MAX_LENGTH) {
+      throw new ApiError(
+        'transcript_too_long',
+        `판독본이 너무 깁니다. ${MOCK_TRANSCRIPT_MAX_LENGTH.toLocaleString()}자 이내로 줄여 주세요.`,
+        `현재 ${cleaned.length.toLocaleString()}자입니다.`,
+        400,
+      );
+    }
+    if ((state.problems.get(id) ?? []).every((problem) => problem.no !== no)) {
+      throw new ApiError('not_found', `${no}번 문항이 없습니다.`, null, 404);
+    }
+    const next: Transcript = {
+      no,
+      transcript: cleaned === '' ? null : cleaned,
+      transcript_source: cleaned === '' ? null : 'manual',
+      transcript_note: null,
+    };
+    writeMockTranscript(id, next);
+    return { ...next };
   },
 
   async getSolutions(id: string): Promise<SolutionsResponse> {
@@ -1036,7 +1218,36 @@ export const mockClient: ApiClient = {
     let total = 0;
     let solveTargets: number[] = [];
     let variantNumbers: number[] = [];
-    if (body.kind === 'solve') {
+    let transcribeTargets: number[] = [];
+    if (body.kind === 'transcribe') {
+      const problems = state.problems.get(body.node_id) ?? [];
+      const requested =
+        body.problem_numbers == null || body.problem_numbers.length === 0
+          ? problems.map((problem) => problem.no)
+          : body.problem_numbers;
+      // 실서버(`plan_transcribe_job`)와 같은 스킵 규칙: force 가 아니면 이미
+      // 판독본이 있는 문항을 뺀다. **빈 판독본은 세지 않는다**(이유만 남은 문항은
+      // 다시 판독 대상이다) — `storage.transcribed_numbers` 와 같은 규칙이다.
+      const targets = body.force
+        ? requested
+        : requested.filter((no) => savedTranscript(body.node_id, no)?.transcript == null);
+      if (targets.length === 0) {
+        throw new ApiError(
+          'already_transcribed',
+          '요청한 문항은 이미 모두 텍스트로 옮겨져 있습니다.',
+          '다시 판독하려면 "다시 판독" 을 눌러 주세요.',
+          400,
+        );
+      }
+      transcribeTargets = targets;
+      total = targets.length;
+      for await (const event of transcribeScript(targets, {
+        provider: body.provider,
+        model: body.model,
+      })) {
+        script.push(event);
+      }
+    } else if (body.kind === 'solve') {
       const problems = state.problems.get(body.node_id) ?? [];
       const solved = state.solutions.get(body.node_id) ?? new Map<number, Solution>();
       const requested =
@@ -1124,7 +1335,10 @@ export const mockClient: ApiClient = {
       targets:
         body.kind === 'solve'
           ? { numbers: solveTargets }
-          : { numbers: variantNumbers, modes: body.modes ?? ['number'] },
+          : body.kind === 'transcribe'
+            ? { numbers: transcribeTargets }
+            : { numbers: variantNumbers, modes: body.modes ?? ['number'] },
+      force: body.force === true,
       script,
       cursor: 0,
       partialText: '',
@@ -1163,7 +1377,7 @@ export const mockClient: ApiClient = {
 
 /** 진행 중 작업과 새 요청의 대상이 겹치는지(백엔드 `_find_overlapping_job` 과 같은 규칙). */
 function overlapsTarget(existing: MockJob, body: JobCreateRequest): boolean {
-  if (body.kind === 'solve') {
+  if (body.kind === 'solve' || body.kind === 'transcribe') {
     if (body.problem_numbers == null) return true;
     const wanted = new Set(body.problem_numbers);
     return existing.targets.numbers?.some((no) => wanted.has(no)) ?? false;
@@ -1224,6 +1438,32 @@ function applyMockEvent(job: MockJob, event: MockSseEvent): void {
           created_at: nowIso(),
         });
         state.variants.set(job.record.node_id, variants);
+      }
+    }
+    // 판독본도 문항마다 저장한다. 실서버와 같은 두 규칙을 지킨다.
+    //   1. `불가` 판정은 **이유만** 남기고 이미 확보한 전문을 지우지 않는다.
+    //      AI 판정은 비결정적이라 그 변동으로 데이터를 잃으면 안 된다.
+    //   2. 사용자가 고친 판독본(`manual`)은 force 없는 재실행이 덮지 않는다.
+    if (job.record.kind === 'transcribe' && event.event === 'done') {
+      const no = typeof data.no === 'number' ? data.no : null;
+      const nodeId = job.record.node_id;
+      const current = no == null ? undefined : savedTranscript(nodeId, no);
+      const protectedManual = !job.force && current?.transcript_source === 'manual';
+      if (no != null && !protectedManual) {
+        const transcript = typeof data.transcript === 'string' ? data.transcript : null;
+        const note = typeof data.note === 'string' ? data.note : null;
+        const source = typeof data.source === 'string' ? data.source : null;
+        writeMockTranscript(
+          nodeId,
+          transcript == null
+            ? {
+                no,
+                transcript: current?.transcript ?? null,
+                transcript_source: current?.transcript_source ?? null,
+                transcript_note: note,
+              }
+            : { no, transcript, transcript_source: source, transcript_note: note },
+        );
       }
     }
     // 풀이는 목 저장소에도 남긴다(실서버가 문항마다 저장하는 것과 같다).

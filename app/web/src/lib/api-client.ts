@@ -20,12 +20,15 @@ import type {
   SolutionsResponse,
   StreamEvent,
   ThreadsResponse,
+  Transcript,
+  TranscriptsResponse,
   TreeNode,
   TreeResponse,
   Usage,
   UsageSummaryResponse,
   JobCreateRequest,
   JobCreated,
+  ExportBody,
   ExportFormat,
   ExportInclude,
   ExportTarget,
@@ -82,6 +85,9 @@ export interface ApiClient {
    *
    * `source` 는 문서 맨 끝에 한 줄로 들어갈 출처(예: 학원 이름)다. 선택이며
    * 생략하면 출처 없는 기존 문서가 그대로 나온다.
+   *
+   * `body` 는 문항 본문을 크롭 이미지로 낼지 판독본 텍스트로 낼지다. 기본
+   * `image` 라 생략하면 지금까지와 완전히 같은 문서가 나온다.
    */
   exportDocument(
     target: ExportTarget,
@@ -89,10 +95,30 @@ export interface ApiClient {
     format: ExportFormat,
     include: ExportInclude,
     source?: string,
+    body?: ExportBody,
   ): Promise<{ blob: Blob; filename: string | null }>;
 
   /** 저장된 변형 목록(시험지를 열 때 스토어를 채운다). */
   getVariants(id: string): Promise<VariantsResponse>;
+
+  /* ── 문항 텍스트화(판독본) ── */
+
+  /**
+   * 저장된 판독본 전문(계약: `GET /api/files/{id}/transcripts`).
+   *
+   * 파일 상세(`getFile`)에는 배지용 메타(`has_transcript` 등)만 오고 전문은
+   * 여기로 온다 — 문항당 최대 2만 자라 목록에 실으면 수백 KB 가 된다.
+   * 아직 판독하지 않은 문항은 목록에서 빠진다.
+   */
+  getTranscripts(id: string): Promise<TranscriptsResponse>;
+  /**
+   * 대조 화면에서 고친 판독본을 저장한다(계약:
+   * `PATCH /api/files/{id}/problems/{no}/transcript`).
+   *
+   * 저장되면 `transcript_source='manual'` 이 되고, `force` 없는 재실행이 덮지
+   * 않는다. **빈 문자열이면 판독본을 지운다**(되돌리는 경로). 상한은 20,000자다.
+   */
+  saveTranscript(id: string, no: number, text: string): Promise<Transcript>;
 
   getSolutions(id: string): Promise<SolutionsResponse>;
   /**
