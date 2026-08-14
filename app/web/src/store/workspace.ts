@@ -818,6 +818,9 @@ async function watchJob(job: Job): Promise<void> {
                   ? accumulate(state.totals, event.usage, event.cost)
                   : state.totals,
             }));
+            // 필드명이 REST 조회(`transcript_source`/`transcript_note`)와 다르다.
+            // SSE 는 짧은 이름(`source`/`note`)을 쓴다 — 백엔드
+            // `ai_service.transcribe_events` 가 계약의 소스다.
             touchTranscript(no, (entry) => ({
               ...entry,
               status: 'done',
@@ -826,10 +829,9 @@ async function watchJob(job: Job): Promise<void> {
               // (서버 `_save_transcript_note` 와 같은 규칙).
               text: event.transcript ?? entry.text,
               streamingText: '',
-              source: event.transcript == null
-                ? entry.source
-                : transcriptSourceOf(event.transcript_source),
-              note: event.transcript_note ?? null,
+              source:
+                event.transcript == null ? entry.source : transcriptSourceOf(event.source),
+              note: event.note ?? null,
               route: null,
               usage: event.usage,
               cost: event.cost,

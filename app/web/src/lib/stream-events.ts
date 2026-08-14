@@ -76,26 +76,42 @@ function variantMode(source: Record<string, unknown>): { mode?: VariantMode } {
 /**
  * 판독(transcribe) 작업의 `done` 에만 실리는 필드. 없으면 빈 객체.
  *
+ * ## SSE 와 REST 의 필드명이 다르다 (헷갈리기 쉬운 지점)
+ *
+ * ```
+ * SSE  done  : { no, transcript, source,            note            }  ← 짧은 이름
+ * REST 응답   : { no, transcript, transcript_source, transcript_note }  ← 긴 이름
+ * ```
+ *
+ * 백엔드가 계약의 소스다(`ai_service.transcribe_events` 는 짧은 이름, `service.transcripts`
+ * 는 긴 이름). 여기서는 **와이어 이름을 그대로 쓴다** — 이 타입은 SSE 를 옮긴 것이므로
+ * REST 이름을 쓰면 어느 쪽 이름인지 읽는 사람이 알 수 없다. REST 응답 타입은
+ * `types/api.ts` 의 `Transcript` 가 긴 이름으로 따로 갖고 있다.
+ *
  * **키의 부재와 null 을 구분한다.** `transcript: null` 은 "판독 불가" 라는 확정
  * 사실이고, 키가 없는 것은 판독 작업이 아니라는 뜻이다. 없는데 null 로 채우면
  * 풀이·채팅의 done 이 저장된 판독본을 지운다.
  */
-function transcriptFields(source: Record<string, unknown>): {
+function transcriptFields(data: Record<string, unknown>): {
   transcript?: string | null;
-  transcript_source?: string | null;
-  transcript_note?: string | null;
+  source?: string | null;
+  note?: string | null;
 } {
-  if (!('transcript' in source) && !('note' in source)) return {};
+  if (!('transcript' in data) && !('note' in data)) return {};
   return {
-    transcript: readString(source, 'transcript'),
-    transcript_source: readString(source, 'source'),
-    transcript_note: readString(source, 'note'),
+    transcript: readString(data, 'transcript'),
+    source: readString(data, 'source'),
+    note: readString(data, 'note'),
   };
 }
 
-/** 판독 작업의 `problem` 에 실리는 경로(`pua` / `ai`). 없으면 빈 객체. */
-function routeField(source: Record<string, unknown>): { route?: string } {
-  const route = readString(source, 'route');
+/**
+ * 판독 작업의 `problem` 에 실리는 경로. 없으면 빈 객체.
+ *
+ * 값은 `storage.TRANSCRIPT_PUA`(=`'pua'`) 또는 `storage.TRANSCRIPT_AI`(=`'ai'`) 다.
+ */
+function routeField(data: Record<string, unknown>): { route?: string } {
+  const route = readString(data, 'route');
   return route == null ? {} : { route };
 }
 

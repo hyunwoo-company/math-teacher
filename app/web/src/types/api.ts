@@ -212,6 +212,9 @@ export interface SolutionsResponse {
  *
  * `transcript` 가 null 이고 `transcript_note` 만 있으면 판독하지 못한 문항이다
  * (화면은 이유를 배지로 보여주고, 내보낼 때는 이미지로 폴백한다).
+ *
+ * **여기는 긴 이름이 맞다.** 같은 값을 실어 오는 SSE `done` 이벤트는 짧은
+ * 이름(`source`/`note`)을 쓴다 — `SolveDoneEvent` 참고.
  */
 export interface Transcript {
   no: number;
@@ -516,6 +519,14 @@ export interface SolveDoneEvent {
   truncated_before?: number;
   /** 변형 작업일 때 어떤 변형 종류인지. */
   mode?: VariantMode;
+  /*
+   * 아래 세 필드는 판독(transcribe) 작업의 `done` 에만 실린다.
+   *
+   * **이름이 REST 응답(`Transcript`)과 다르다.** SSE 는 짧은 이름(`source`/`note`),
+   * REST 는 긴 이름(`transcript_source`/`transcript_note`)을 쓴다. 백엔드가 계약의
+   * 소스이며(`ai_service.transcribe_events` vs `service.transcripts`) 여기서는 SSE
+   * 이름을 그대로 옮긴다.
+   */
   /**
    * 판독 작업이 이번에 확정한 전문. **판독 불가면 null** 이다.
    *
@@ -524,9 +535,9 @@ export interface SolveDoneEvent {
    */
   transcript?: string | null;
   /** 이번 실행이 저장한 출처(`pua` / `ai`). 저장하지 않았으면 null. */
-  transcript_source?: string | null;
+  source?: string | null;
   /** 판독 실패·불가 이유. */
-  transcript_note?: string | null;
+  note?: string | null;
 }
 export interface SolveErrorEvent {
   type: 'error';

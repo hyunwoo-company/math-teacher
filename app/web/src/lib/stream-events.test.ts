@@ -99,9 +99,11 @@ describe('toStreamEvent', () => {
     ).toMatchObject({
       type: 'done',
       no: 3,
+      // SSE 는 짧은 이름(`source`/`note`)을 쓴다 — REST 응답의
+      // `transcript_source`/`transcript_note` 와 다르다.
       transcript: '\\(A = 3x^2\\)',
-      transcript_source: 'pua',
-      transcript_note: null,
+      source: 'pua',
+      note: null,
     });
   });
 
@@ -120,8 +122,8 @@ describe('toStreamEvent', () => {
       ),
     ).toMatchObject({
       transcript: null,
-      transcript_source: null,
-      transcript_note: '불가 - 좌표평면 그래프',
+      source: null,
+      note: '불가 - 좌표평면 그래프',
     });
   });
 
@@ -130,7 +132,7 @@ describe('toStreamEvent', () => {
     // 구분할 수 없어 스토어가 멀쩡한 판독본을 비운다.
     const event = toStreamEvent(message('done', { no: 1, solution: '풀이', truncated: false }));
     expect(event).not.toHaveProperty('transcript');
-    expect(event).not.toHaveProperty('transcript_note');
+    expect(event).not.toHaveProperty('note');
   });
 
   it('JSON 이 깨져도 던지지 않고 unknown 으로 넘긴다', () => {

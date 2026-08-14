@@ -55,6 +55,10 @@ async function openFile(): Promise<void> {
   await useWorkspace.getState().loadTree();
   await useWorkspace.getState().selectFile(MOCK_FILE_ID);
   await until(() => (useWorkspace.getState().fileDetail?.problems.length ?? 0) > 0);
+  // selectFile 이 저장 판독본·변형을 뒤이어 비동기로 채운다. 그게 끝난 뒤 시작한다
+  // (조회가 남아 있으면 아래 SSE 전용 테스트가 깔아 둔 대역이 무시된다 —
+  // `loadTranscripts` 는 같은 파일의 진행 중 조회를 그대로 돌려주기 때문).
+  await new Promise((resolve) => setTimeout(resolve, 300));
 }
 
 beforeEach(async () => {
@@ -185,6 +189,95 @@ describe('판독 실행', () => {
     expect(entryOf(4)?.source).toBe('manual');
     expect(entryOf(4)?.status).toBe('done');
   }, 30_000);
+});
+
+/**
+ * **SSE 만으로** 채워지는 값.
+ *
+ * 작업이 끝나면 `watchJob` 의 finally 가 `GET /transcripts` 로 한 번 맞추므로,
+ * 앞선 테스트들은 SSE 가 필드명을 틀리게 읽어도 REST 조회가 값을 메워 통과할 수
+ * 있다. 여기서는 REST 조회를 막아 **스트림이 채운 값만** 남게 한다.
+ *
+ * SSE 와 REST 의 필드명이 다르다는 것이 이 구분의 이유다:
+ *   SSE  `done`  : `{ no, source, transcript, note, ... }`      ← 짧은 이름
+ *   REST 응답     : `{ no, transcript, transcript_source, transcript_note }`
+ */
+describe('SSE 경로만으로 채워지는 값 (REST 조회 없이)', () => {
+  /** REST 조회를 막는다. 실패는 조용히 무시되므로 남는 값은 전부 SSE 가 채운 것이다. */
+  function blockRest() {
+    return vi
+      .spyOn(api, 'getTranscripts')
+      .mockRejectedValue(new Error('이 테스트에서는 REST 조회를 쓰지 않는다'));
+  }
+
+  /**
+   * 시험지 전체를 한 작업으로 돌린다.
+   *
+   * **문항 하나짜리 작업으로는 SSE 를 검증할 수 없다.** 작업은 서버 큐에서 즉시
+   * 돌기 시작하는데 구독은 `createJob` → `loadJobs` 뒤에 붙으므로, 짧은 작업은
+   * 붙기 전에 끝나 버린다(실서버도 같은 성질이라 `snapshot` 이 있다). 그래서 뒤쪽
+   * 문항으로 확인한다 — 앞쪽 문항은 구독 전에 지나가 이 시나리오에서는 비어 있다.
+   *
+   * 목의 판정: 5의 배수는 디코딩 실패 → AI, 10의 배수는 AI 가 `불가`.
+   * 따라서 뒤쪽에서 15=ai, 20=불가, 22=pua 를 볼 수 있다.
+   */
+  async function runWholeExam(opts?: { force?: boolean }) {
+    await useWorkspace.getState().startTranscribe(null, opts);
+    await until(idle, 60_000);
+  }
+
+  it('디코딩 출처(pua)가 SSE done 이벤트만으로 채워진다', async () => {
+    const spy = blockRest();
+    await runWholeExam();
+
+    expect(entryOf(22)?.source).toBe('pua');
+    expect(entryOf(22)?.text).not.toBe('');
+    expect(entryOf(22)?.note).toBeNull();
+    // REST 조회를 실제로 막았는지 확인(안 막혔으면 SSE 를 검증한 게 아니다).
+    expect(spy).toHaveBeenCalled();
+  }, 90_000);
+
+  it('AI 판독 출처(ai)도 SSE done 이벤트만으로 채워진다', async () => {
+    blockRest();
+    await runWholeExam();
+
+    expect(entryOf(15)?.source).toBe('ai');
+    expect(entryOf(15)?.text).not.toBe('');
+  }, 90_000);
+
+  it('판독 불가 이유가 SSE done 이벤트만으로 채워진다', async () => {
+    blockRest();
+    await runWholeExam();
+
+    // 이유가 없으면 화면이 "왜 이미지로 나가는지" 를 말할 수 없다.
+    expect(entryOf(20)?.note).toBeTruthy();
+    expect(entryOf(20)?.text).toBe('');
+    expect(entryOf(20)?.source).toBeNull();
+  }, 90_000);
+
+  it('불가 판정은 이미 확보한 전문을 지우지 않고 이유만 더한다', async () => {
+    blockRest();
+    // 사용자가 고쳐 둔 판독본이 있는 문항(20번)을 force 로 다시 판독한다.
+    useWorkspace.setState((state) => ({
+      transcripts: {
+        ...state.transcripts,
+        [transcriptCacheKey(MOCK_FILE_ID, 20)]: {
+          ...__internal.emptyTranscript(20),
+          text: '사람이 고쳐 둔 전문',
+          status: 'done',
+          source: 'manual',
+        },
+      },
+    }));
+
+    await runWholeExam({ force: true });
+
+    // 서버 `_save_transcript_note` 와 같은 규칙 — AI 판정은 비결정적이라
+    // 그 변동으로 확보한 데이터를 잃으면 안 된다.
+    expect(entryOf(20)?.text).toBe('사람이 고쳐 둔 전문');
+    expect(entryOf(20)?.source).toBe('manual');
+    expect(entryOf(20)?.note).toBeTruthy();
+  }, 90_000);
 });
 
 describe('판독본 편집', () => {
