@@ -89,3 +89,14 @@ export function toUserMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return '알 수 없는 오류가 발생했습니다.';
 }
+
+/**
+ * 백엔드가 보낸 힌트(빠져나올 방법). 없으면 null.
+ *
+ * `message` 만 보여주면 "이미 모두 만들어져 있습니다" 처럼 **다음에 뭘 해야
+ * 하는지**가 힌트에만 있는 에러에서 사용자가 막힌다. 토스트는 `hint` 를 받으므로
+ * 함께 실어 준다.
+ */
+export function toUserHint(error: unknown): string | null {
+  return error instanceof ApiError ? error.hint : null;
+}

@@ -17,7 +17,7 @@ import {
   setUnauthorizedHandler,
   writeStoredPassword,
 } from '@/lib/access-gate';
-import { isAbortError, toUserMessage } from '@/lib/api-error';
+import { ApiError, isAbortError, toUserHint, toUserMessage } from '@/lib/api-error';
 import { UI_PREFS_STORAGE } from '@/lib/config';
 import { mergeUsage } from '@/lib/format';
 import { detectProblemNo } from '@/lib/mention';
@@ -436,8 +436,12 @@ interface WorkspaceState {
   setVariantPicked: (numbers: number[]) => void;
   /** 만들 변형 유형을 고른다(단일 선택). */
   setVariantKind: (kind: VariantPickKind) => void;
-  /** 고른 문항 × 고른 유형을 한 작업으로 걸고 변형 모드를 닫는다. */
-  startVariantBatch: () => Promise<void>;
+  /**
+   * 고른 문항 × 고른 유형을 한 작업으로 걸고 변형 모드를 닫는다.
+   * `opts.force` 면 이미 만들어 둔 조합도 다시 만든다(그게 아니면 서버가
+   * 건너뛰고, 남는 게 없으면 400 으로 거절한다).
+   */
+  startVariantBatch: (opts?: { force?: boolean }) => Promise<void>;
   /**
    * 취소를 요청했지만 아직 서버가 멈추지 않은 작업 id.
    *
@@ -459,6 +463,14 @@ interface WorkspaceState {
    * 시험지가 열려 있지 않은 오답노트 인라인 "풀이 만들기" 에서 쓴다.
    */
   solveProblem: (fileId: string, no: number, opts?: { force?: boolean }) => Promise<void>;
+
+  /**
+   * 그 시험지에 저장된 변형을 조회해 `variants` 캐시를 채운다.
+   *
+   * 시험지를 열 때(`selectFile`)와, 변형 패널이 캐시 없이 열릴 때(오답노트가
+   * 그렇다 — `selectNote` 는 시험지를 열지 않는다) 쓴다. 실패는 조용히 넘긴다.
+   */
+  loadVariants: (fileId: string) => Promise<void>;
 
   /**
    * 그 문항의 동일 유형 변형 문제를 스트리밍으로 생성한다.
@@ -504,6 +516,32 @@ let chatSeq = 0;
  * 큐에서 돌고 있어 구독을 끊어도 계속된다. 멈추려면 `cancelJob` 을 쓴다.
  */
 const jobSubscriptions = new Map<string, AbortController>();
+
+/** 진행 중인 저장 변형 조회(file_id → 약속). 같은 파일을 겹쳐 조회하지 않는다. */
+const variantLoads = new Map<string, Promise<void>>();
+
+/** 생성 요청을 보내는 중인 (문항, 유형). 조회 대기 사이의 재진입을 막는다. */
+const variantStarting = new Set<string>();
+
+/**
+ * 작업이 만들기로 한 (문항, 유형)들(job_id → 대상).
+ *
+ * 구독이 끝났는데 결과가 안 온 자리를 정리할 때 쓴다. 이 목록 없이 "그 시험지의
+ * streaming 전부" 를 정리하면, 같은 시험지의 **다른** 변형 작업이 큐에서 기다리며
+ * 잡아 둔 자리까지 같이 지워진다.
+ */
+const variantJobTargets = new Map<string, VariantTargetRef[]>();
+
+interface VariantTargetRef {
+  no: number;
+  mode: VariantMode;
+}
+
+/** 이 작업이 채울 자리를 기억한다(이미 있으면 이어 붙인다). */
+function rememberVariantTargets(jobId: string, targets: VariantTargetRef[]): void {
+  const current = variantJobTargets.get(jobId) ?? [];
+  variantJobTargets.set(jobId, [...current, ...targets]);
+}
 
 /**
  * 작업 이벤트를 구독해 화면 상태에 반영한다.
@@ -739,14 +777,24 @@ async function watchJob(job: Job): Promise<void> {
     }
   } finally {
     jobSubscriptions.delete(job.id);
-    setState((state) =>
-      state.selectedFileId === fileId
+    // 이 작업이 채우기로 한 변형 자리 중 결과가 안 온 것을 정리한다. 안 하면
+    // 취소·중단 시 남은 문항이 영원히 "생성 중…" 으로 돈다. 시험지가 열려
+    // 있는지와 무관하다 — 오답노트도 같은 캐시를 본다.
+    const pending = variantJobTargets.get(job.id) ?? [];
+    variantJobTargets.delete(job.id);
+    setState((state) => ({
+      variants: pending.reduce(
+        (variants, target) =>
+          settleVariant(variants, variantKey(fileId, target.no), target.mode),
+        state.variants,
+      ),
+      ...(state.selectedFileId === fileId
         ? {
             solutions: settleRunning(state.solutions),
             solve: { ...state.solve, running: false, currentNo: null },
           }
-        : {},
-    );
+        : {}),
+    }));
     void getState().loadJobs();
     void getState().loadUsageSummary();
   }
@@ -1578,31 +1626,9 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     })();
 
     // 저장된 변형을 스토어에 채운다. 새로고침해도 남고, 이미 만든 변형을 다시
-    // 생성해 쿼터를 낭비하지 않는다(실패는 조용히 무시).
-    void (async () => {
-      try {
-        const { variants } = await api.getVariants(id);
-        if (get().selectedFileId !== id || dataEpoch !== epoch) return;
-        if (variants.length === 0) return;
-        set((state) => {
-          let next = state.variants;
-          for (const variant of variants) {
-            next = setVariant(next, variantKey(id, variant.no), variant.mode, {
-              mode: variant.mode,
-              text: variant.text,
-              streamingText: '',
-              status: 'done',
-              usage: variant.usage,
-              cost: variant.cost,
-              error: null,
-            });
-          }
-          return { variants: next };
-        });
-      } catch {
-        // 저장 변형 조회 실패는 화면을 막지 않는다(생성은 여전히 가능).
-      }
-    })();
+    // 생성해 쿼터를 낭비하지 않는다(캐시는 file_id 로 키를 잡으므로 뒤늦게
+    // 도착해도 다른 시험지를 오염시키지 않는다 — epoch 검사가 필요 없다).
+    void get().loadVariants(id);
   },
 
   async selectNote(id: string) {
@@ -2044,7 +2070,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     set({ variantKind: kind });
   },
 
-  async startVariantBatch() {
+  async startVariantBatch(opts = {}) {
+    const { force = false } = opts;
     const { selectedFileId, variantPicked, variantKind, model, effort, provider } = get();
     if (!selectedFileId) {
       get().showToast({ kind: 'info', message: '먼저 왼쪽에서 시험지 파일을 선택하세요.' });
@@ -2064,25 +2091,47 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         node_id: selectedFileId,
         problem_numbers: variantPicked,
         modes,
+        force,
         provider,
         model,
         effort,
       });
     } catch (error) {
-      // "이미 모두 만들어져 있습니다" 같은 거절도 여기로 온다. 선택은 남겨 둔다.
-      get().showToast({ kind: 'info', message: toUserMessage(error) });
+      // "이미 모두 만들어져 있습니다" 같은 거절도 여기로 온다. 선택과 모드를
+      // 남겨 둬야 사용자가 "이미 만든 것도 다시 생성" 으로 바로 다시 걸 수 있다.
+      // hint 가 빠져나올 방법을 알려주므로 함께 보여준다.
+      get().showToast({
+        kind: 'info',
+        message: toUserMessage(error),
+        hint: toUserHint(error),
+      });
+      return;
+    }
+
+    if (created.existing) {
+      // 서버가 겹치는 작업을 돌려줬다 = 이번에 고른 문항은 큐에 들어가지 않았다.
+      // 자리를 만들면 아무도 채우지 않아 유령 진행 표시가 된다. 사실대로 알린다.
+      get().showToast({
+        kind: 'info',
+        message: '이 시험지의 변형 작업이 이미 진행 중이라 새로 걸지 않았습니다.',
+        hint: '진행 중인 작업이 끝난 뒤 다시 눌러 주세요. 진행 상황은 상단 배너에 있습니다.',
+      });
+      await get().loadJobs();
+      void watchJob(created.job);
       return;
     }
 
     // 진행 이벤트는 (문항, 종류)별 항목을 **갱신**하므로 자리를 먼저 만들어 둔다.
     // 이미 done 인 조합은 서버도 건너뛰므로 그대로 둔다(스트리밍으로 되돌리면
     // 오지 않을 이벤트를 기다리며 영원히 "생성 중" 으로 남는다).
+    const seeded: VariantTargetRef[] = [];
     set((state) => {
       let variants = state.variants;
       for (const no of variantPicked) {
         const key = variantKey(selectedFileId, no);
         for (const mode of modes) {
-          if (variants[key]?.[mode]?.status === 'done') continue;
+          if (!force && variants[key]?.[mode]?.status === 'done') continue;
+          seeded.push({ no, mode });
           variants = setVariant(variants, key, mode, {
             mode,
             text: '',
@@ -2096,6 +2145,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       }
       return { variants, activeTab: 'solutions' };
     });
+    // 중간에 멈추면 이 자리들을 정리해야 한다(watchJob 의 finally).
+    rememberVariantTargets(created.job.id, seeded);
 
     get().stopVariantPicking();
     get().showToast({
@@ -2243,51 +2294,113 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
     }
   },
 
+  async loadVariants(fileId: string) {
+    const inFlight = variantLoads.get(fileId);
+    if (inFlight) return inFlight;
+
+    const load = (async () => {
+      try {
+        const { variants } = await api.getVariants(fileId);
+        if (variants.length === 0) return;
+        set((state) => {
+          let next = state.variants;
+          for (const variant of variants) {
+            const key = variantKey(fileId, variant.no);
+            // 지금 생성 중인 항목은 건드리지 않는다. 서버 저장본은 이전 판이라
+            // 덮어쓰면 흐르고 있는 새 결과가 옛 글로 되돌아간다.
+            if (next[key]?.[variant.mode]?.status === 'streaming') continue;
+            next = setVariant(next, key, variant.mode, {
+              mode: variant.mode,
+              text: variant.text,
+              streamingText: '',
+              status: 'done',
+              usage: variant.usage,
+              cost: variant.cost,
+              error: null,
+            });
+          }
+          return { variants: next };
+        });
+      } catch {
+        // 저장 변형 조회 실패는 화면을 막지 않는다(생성은 여전히 가능).
+      } finally {
+        variantLoads.delete(fileId);
+      }
+    })();
+    variantLoads.set(fileId, load);
+    return load;
+  },
+
   async generateVariant(fileId: string, no: number, mode: VariantMode, opts = {}) {
     const { force = false } = opts;
     const key = variantKey(fileId, no);
-    const existing = get().variants[key]?.[mode];
+    const guard = `${key}::${mode}`;
+    // 같은 (문항, 유형)을 두 번 겹쳐 걸지 않는다. 아래에 await 가 있어
+    // 스토어 상태만으로는 재진입을 막을 수 없다(StrictMode 이중 호출 포함).
+    if (variantStarting.has(guard)) return;
 
     // 캐시 규칙: 생성 중이면 no-op, 이미 done 이면 force 일 때만 재생성.
-    if (existing?.status === 'streaming') return;
-    if (existing?.status === 'done' && !force) return;
+    if (get().variants[key]?.[mode]?.status === 'streaming') return;
+    if (get().variants[key]?.[mode]?.status === 'done' && !force) return;
 
-    const { model, effort, provider } = get();
-    set((state) => ({
-      variants: setVariant(state.variants, key, mode, {
-        mode,
-        text: '',
-        streamingText: '',
-        status: 'streaming',
-        usage: null,
-        cost: null,
-        error: null,
-      }),
-    }));
-
+    variantStarting.add(guard);
     try {
-      const created = await api.createJob({
-        kind: 'variant',
-        node_id: fileId,
-        no,
-        modes: [mode],
-        // 서버도 이미 만든 (문항, 종류)를 건너뛴다. "다시 생성" 은 그 규칙을
-        // 넘어야 하므로 force 를 실어야 한다(안 실으면 400 으로 거절된다).
-        force,
-        provider,
-        model,
-        effort,
-      });
-      await get().loadJobs();
-      void watchJob(created.job);
-    } catch (error) {
+      // **생성 전에 저장본을 먼저 확인한다.** 오답노트처럼 시험지를 열지 않고
+      // 패널만 뜨는 화면은 캐시가 비어 있어, 이미 만들어 둔 변형이 있어도
+      // 생성을 걸게 된다. 서버는 그것을 400 `already_generated` 로 거절하므로
+      // 사용자는 에러만 보고 저장본은 영영 못 본다.
+      if (!force) {
+        await get().loadVariants(fileId);
+        const cached = get().variants[key]?.[mode];
+        if (cached?.status === 'done' || cached?.status === 'streaming') return;
+      }
+
+      const { model, effort, provider } = get();
       set((state) => ({
-        variants: patchVariant(state.variants, key, mode, (entry) => ({
-          ...entry,
-          status: 'error',
-          error: toUserMessage(error),
-        })),
+        variants: setVariant(state.variants, key, mode, {
+          mode,
+          text: '',
+          streamingText: '',
+          status: 'streaming',
+          usage: null,
+          cost: null,
+          error: null,
+        }),
       }));
+
+      try {
+        const created = await api.createJob({
+          kind: 'variant',
+          node_id: fileId,
+          no,
+          modes: [mode],
+          // 서버도 이미 만든 (문항, 종류)를 건너뛴다. "다시 생성" 은 그 규칙을
+          // 넘어야 하므로 force 를 실어야 한다(안 실으면 400 으로 거절된다).
+          force,
+          provider,
+          model,
+          effort,
+        });
+        rememberVariantTargets(created.job.id, [{ no, mode }]);
+        await get().loadJobs();
+        void watchJob(created.job);
+      } catch (error) {
+        // 자리를 먼저 비운다(streaming 인 항목은 조회가 덮어쓰지 않는다).
+        set((state) => ({
+          variants: patchVariant(state.variants, key, mode, (entry) => ({
+            ...entry,
+            status: 'error',
+            error: toUserMessage(error),
+          })),
+        }));
+        // 조회와 생성 사이에 다른 창이 만들어 둔 경우. 서버가 "이미 있다" 고
+        // 알려 준 것이므로 그 저장본을 받아 에러 대신 결과를 보여준다.
+        if (error instanceof ApiError && error.code === 'already_generated') {
+          await get().loadVariants(fileId);
+        }
+      }
+    } finally {
+      variantStarting.delete(guard);
     }
   },
 
@@ -2763,6 +2876,11 @@ function accumulate(totals: SessionTotals, usage: Usage | null, cost: Cost | nul
 function resetJobSubscriptions(): void {
   for (const controller of jobSubscriptions.values()) controller.abort();
   jobSubscriptions.clear();
+  // 구독에 딸린 모듈 상태도 함께 버린다(테스트가 스토어를 통째로 되돌릴 때
+  // 이것들만 남으면 다음 케이스가 "이미 요청 중" 으로 오인한다).
+  variantJobTargets.clear();
+  variantStarting.clear();
+  variantLoads.clear();
 }
 
 export const __internal = {

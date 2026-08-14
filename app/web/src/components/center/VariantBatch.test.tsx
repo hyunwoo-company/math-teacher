@@ -74,6 +74,30 @@ describe('변형 일괄 생성 UI', () => {
     );
   });
 
+  it('"이미 만든 것도 다시 생성" 을 켜면 force 로 건다', async () => {
+    const user = await openFile();
+    const spy = vi.spyOn(api, 'createJob');
+    render(<SolutionsTab />);
+
+    await user.click(screen.getByRole('button', { name: '변형 만들기' }));
+    await user.click(screen.getByLabelText('1번 변형 선택'));
+    // 기본은 꺼져 있다(이미 만든 것을 쓸데없이 다시 만들지 않는다).
+    await user.click(screen.getByRole('button', { name: '1개 문항 변형 생성' }));
+    expect(spy.mock.calls[0]?.[0]).toMatchObject({ force: false });
+
+    // 생성 요청이 끝나면 모드가 닫힌다. 닫히기 전에 버튼을 다시 누르면 토글이
+    // 반대로 먹으므로 기다렸다가 다시 연다.
+    await waitFor(() =>
+      expect(screen.queryByLabelText('1번 변형 선택')).not.toBeInTheDocument(),
+    );
+    spy.mockClear();
+    await user.click(screen.getByRole('button', { name: '변형 만들기' }));
+    await user.click(screen.getByLabelText('1번 변형 선택'));
+    await user.click(screen.getByLabelText('이미 만든 것도 다시 생성'));
+    await user.click(screen.getByRole('button', { name: '1개 문항 변형 생성' }));
+    expect(spy.mock.calls[0]?.[0]).toMatchObject({ force: true });
+  }, 30_000);
+
   it('담기 모드를 켜면 변형 모드는 꺼진다(체크박스 뜻이 하나여야 한다)', async () => {
     const user = await openFile();
     render(<SolutionsTab />);

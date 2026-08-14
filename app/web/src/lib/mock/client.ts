@@ -62,6 +62,7 @@ import type {
   TreeResponse,
   Usage,
   UsageSummaryResponse,
+  Variant,
   VariantMode,
 } from '@/types/api';
 
@@ -93,6 +94,8 @@ interface MockState {
   nodes: TreeNode[];
   problems: Map<string, Problem[]>;
   solutions: Map<string, Map<number, Solution>>;
+  /** nodeId -> `${no}::${mode}` -> 변형. 실서버처럼 완료된 변형을 남긴다. */
+  variants: Map<string, Map<string, Variant>>;
   /** key = threadKey(fileId, problemNo). */
   chats: Map<string, ChatMessage[]>;
   /** 전역(파일 무관) 자유 대화. 삽입 순서 배열, 조회 시 updated_at 내림차순 정렬. */
@@ -102,6 +105,18 @@ interface MockState {
   /** 작업 큐. 실제 서버처럼 구독과 무관하게 진행한다. */
   jobs: Map<string, MockJob>;
   counter: number;
+}
+
+/** 변형 조회 정렬 순서(백엔드 `list_variants` 와 같은 탭 순서). */
+const VARIANT_ORDER: Record<VariantMode, number> = {
+  number: 0,
+  condition: 1,
+  number_condition: 2,
+};
+
+/** 저장된 변형의 키. */
+function variantSlot(no: number, mode: VariantMode): string {
+  return `${no}::${mode}`;
 }
 
 /** 목 작업. `script` 는 미리 만들어 둔 대본이고 워커가 하나씩 소비한다. */
@@ -130,6 +145,7 @@ function initialState(): MockState {
     nodes,
     problems,
     solutions: new Map(),
+    variants: new Map(),
     chats: new Map(),
     conversations: [],
     noteItems: new Map([[MOCK_NOTE_ID, []]]),
@@ -741,8 +757,12 @@ export const mockClient: ApiClient = {
     await sleep(LATENCY_MS);
     requireAuth();
     findNode(id);
-    // 목은 생성된 변형을 서버에 쌓지 않는다(스토어 캐시로 충분).
-    return { variants: [] };
+    // 실서버와 같이 완료된 변형을 돌려준다. 이게 비어 있으면 프론트가 저장본을
+    // 못 찾아 재생성을 걸게 되므로(그리고 실서버는 그걸 400 으로 막으므로)
+    // 목도 같은 사실을 말해야 한다.
+    const saved = [...(state.variants.get(id)?.values() ?? [])];
+    saved.sort((a, b) => a.no - b.no || VARIANT_ORDER[a.mode] - VARIANT_ORDER[b.mode]);
+    return { variants: saved };
   },
 
   async getSolutions(id: string): Promise<SolutionsResponse> {
@@ -1044,22 +1064,38 @@ export const mockClient: ApiClient = {
       }
     } else {
       // 다중 선택은 problem_numbers 로 온다. 없으면 기존 단일 경로(no).
-      variantNumbers =
+      const requested =
         body.problem_numbers && body.problem_numbers.length > 0
           ? [...new Set(body.problem_numbers)]
           : [body.no ?? 1];
       const modes = body.modes ?? ['number'];
-      total = variantNumbers.length * modes.length;
-      script.push({ event: 'start', data: { total }, delayMs: 40 });
-      for (const no of variantNumbers) {
+      // 실서버와 같은 스킵 규칙: force 가 아니면 이미 만든 (문항, 유형)은 뺀다.
+      const made = state.variants.get(body.node_id);
+      const pairs: Array<{ no: number; mode: VariantMode }> = [];
+      for (const no of requested) {
         for (const mode of modes) {
-          for await (const event of variantScript(no, mode, {
-            provider: body.provider,
-            model: body.model,
-          })) {
-            const data = (event.data ?? {}) as Record<string, unknown>;
-            script.push({ ...event, data: { ...data, mode } });
-          }
+          if (!body.force && made?.has(variantSlot(no, mode))) continue;
+          pairs.push({ no, mode });
+        }
+      }
+      if (pairs.length === 0) {
+        throw new ApiError(
+          'already_generated',
+          '요청한 변형은 이미 모두 만들어져 있습니다.',
+          '다시 만들려면 "다시 생성" 을 눌러 주세요.',
+          400,
+        );
+      }
+      variantNumbers = [...new Set(pairs.map((pair) => pair.no))];
+      total = pairs.length;
+      script.push({ event: 'start', data: { total }, delayMs: 40 });
+      for (const { no, mode } of pairs) {
+        for await (const event of variantScript(no, mode, {
+          provider: body.provider,
+          model: body.model,
+        })) {
+          const data = (event.data ?? {}) as Record<string, unknown>;
+          script.push({ ...event, data: { ...data, mode } });
         }
       }
       script.push({
@@ -1173,6 +1209,23 @@ function applyMockEvent(job: MockJob, event: MockSseEvent): void {
   } else if (event.event === 'done' || event.event === 'error') {
     job.record.done_count += 1;
     job.partialText = '';
+    // 변형도 완료 시점에 목 저장소에 남긴다(실서버가 문항마다 저장하는 것과 같다).
+    if (job.record.kind === 'variant' && event.event === 'done') {
+      const no = typeof data.no === 'number' ? data.no : null;
+      const mode = data.mode as VariantMode | undefined;
+      if (no != null && mode) {
+        const variants = state.variants.get(job.record.node_id) ?? new Map<string, Variant>();
+        variants.set(variantSlot(no, mode), {
+          no,
+          mode,
+          text: typeof data.solution === 'string' ? data.solution : '',
+          usage: (data.usage as Usage | null) ?? null,
+          cost: (data.cost as Cost | null) ?? null,
+          created_at: nowIso(),
+        });
+        state.variants.set(job.record.node_id, variants);
+      }
+    }
     // 풀이는 목 저장소에도 남긴다(실서버가 문항마다 저장하는 것과 같다).
     if (job.record.kind === 'solve' && event.event === 'done') {
       const no = typeof data.no === 'number' ? data.no : null;

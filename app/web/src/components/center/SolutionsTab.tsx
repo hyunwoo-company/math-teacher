@@ -49,6 +49,8 @@ export function SolutionsTab() {
 
   const [openSet, setOpenSet] = useState<Set<number>>(new Set());
   const [unsolvedOnly, setUnsolvedOnly] = useState(false);
+  /** 일괄 생성에서 이미 만든 조합도 다시 만들지(기본은 건너뛰기). */
+  const [variantForce, setVariantForce] = useState(false);
 
   // fileDetail 이 없을 때 매 렌더마다 새 배열이 생기지 않도록 메모한다.
   const problems = useMemo(() => fileDetail?.problems ?? EMPTY_PROBLEMS, [fileDetail]);
@@ -182,9 +184,25 @@ export function SolutionsTab() {
             선택 해제
           </button>
           <div className="ml-auto flex items-center gap-2">
+            {/*
+              이미 만든 조합은 서버가 건너뛰고, 전부 건너뛰면 400 으로 거절한다.
+              그때 여기서 빠져나갈 수단이 없으면 사용자가 막힌다.
+            */}
+            <label
+              className="flex items-center gap-1.5 text-[11px] text-violet-900"
+              title="이미 만들어 둔 변형도 새로 만듭니다(그만큼 사용량을 씁니다)"
+            >
+              <input
+                type="checkbox"
+                checked={variantForce}
+                onChange={(event) => setVariantForce(event.target.checked)}
+                className="h-3.5 w-3.5 accent-violet-600"
+              />
+              이미 만든 것도 다시 생성
+            </label>
             <button
               type="button"
-              onClick={() => void startVariantBatch()}
+              onClick={() => void startVariantBatch({ force: variantForce })}
               disabled={variantPicked.length === 0}
               className="rounded border border-violet-600 bg-violet-600 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-violet-700 disabled:opacity-50"
             >

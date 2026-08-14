@@ -24,6 +24,13 @@ function reset() {
 
 const KEY = __internal.variantKey(MOCK_FILE_ID, 1);
 
+/** 아직 'streaming' 인 변형 자리 수(취소 후 남으면 영원한 스피너다). */
+function streamingCount(): number {
+  return Object.values(useWorkspace.getState().variants)
+    .flatMap((byMode) => Object.values(byMode))
+    .filter((entry) => entry?.status === 'streaming').length;
+}
+
 /**
  * 작업이 끝날 때까지 기다린다.
  *
@@ -229,6 +236,89 @@ describe('변형 문제 생성 (목 API)', () => {
     // 고르라고 알려 주고 모드는 계속 열어 둔다.
     expect(useWorkspace.getState().variantPicking).toBe(true);
   });
+
+  it('작업을 취소하면 아직 시작 못 한 문항이 "생성 중" 으로 남지 않는다', async () => {
+    useWorkspace.setState({ selectedFileId: MOCK_FILE_ID });
+    const store = useWorkspace.getState();
+    store.startVariantPicking();
+    store.setVariantKind('all');
+    store.setVariantPicked([1, 2, 3]);
+    await useWorkspace.getState().startVariantBatch();
+
+    const jobId = useWorkspace.getState().jobs[0]?.id;
+    expect(jobId).toBeTruthy();
+    // 자리는 9개(3문항 x 3유형) 다 잡혀 있다.
+    expect(streamingCount()).toBeGreaterThan(0);
+
+    await useWorkspace.getState().cancelJob(jobId as string);
+    await until(() =>
+      ['canceled', 'done'].includes(
+        useWorkspace.getState().jobs.find((job) => job.id === jobId)?.status ?? '',
+      ),
+    );
+    // 구독이 끝나면 남은 자리가 정리된다(영원한 스피너 금지).
+    await until(() => streamingCount() === 0);
+    expect(streamingCount()).toBe(0);
+  }, 45_000);
+
+  it('겹치는 작업이 이미 돌고 있으면 성공했다고 하지 않는다', async () => {
+    useWorkspace.setState({ selectedFileId: MOCK_FILE_ID });
+    const store = useWorkspace.getState();
+    store.startVariantPicking();
+    store.setVariantKind('number');
+    store.setVariantPicked([1, 2]);
+    await useWorkspace.getState().startVariantBatch();
+
+    // 2번이 겹치므로 서버는 기존 작업을 그대로 돌려준다(existing=true).
+    const second = useWorkspace.getState();
+    second.startVariantPicking();
+    second.setVariantKind('number');
+    second.setVariantPicked([2, 3]);
+    await useWorkspace.getState().startVariantBatch();
+
+    const toast = useWorkspace.getState().toast;
+    expect(toast?.kind).not.toBe('success');
+    expect(toast?.message).toContain('이미');
+    // 아무도 만들지 않을 3번에 유령 진행 표시를 만들지 않는다.
+    const key3 = __internal.variantKey(MOCK_FILE_ID, 3);
+    expect(useWorkspace.getState().variants[key3]?.number).toBeUndefined();
+    // 선택은 남겨 두어 사용자가 그대로 다시 걸 수 있다.
+    expect(useWorkspace.getState().variantPicked).toEqual([2, 3]);
+  }, 45_000);
+
+  it('전부 이미 만들어진 선택은 힌트와 함께 거절하고, force 로 다시 걸 수 있다', async () => {
+    useWorkspace.setState({ selectedFileId: MOCK_FILE_ID });
+    const store = useWorkspace.getState();
+    store.startVariantPicking();
+    store.setVariantKind('number');
+    store.setVariantPicked([1]);
+    await useWorkspace.getState().startVariantBatch();
+    await until(() => useWorkspace.getState().variants[KEY]?.number?.status === 'done');
+    await until(
+      () =>
+        useWorkspace.getState().jobs.find((job) => job.status === 'running') === undefined,
+    );
+
+    // 같은 선택을 다시 걸면 서버가 400 으로 거절한다.
+    useWorkspace.getState().startVariantPicking();
+    useWorkspace.getState().setVariantKind('number');
+    useWorkspace.getState().setVariantPicked([1]);
+    await useWorkspace.getState().startVariantBatch();
+
+    const toast = useWorkspace.getState().toast;
+    expect(toast?.message).toContain('이미 모두 만들어져 있습니다');
+    // 힌트를 버리지 않는다 — 빠져나올 방법을 알려줘야 한다.
+    expect(toast?.hint).toBeTruthy();
+    // 모드와 선택이 살아 있어야 force 로 다시 걸 수 있다.
+    expect(useWorkspace.getState().variantPicking).toBe(true);
+    expect(useWorkspace.getState().variantPicked).toEqual([1]);
+
+    const spy = vi.spyOn(api, 'createJob');
+    await useWorkspace.getState().startVariantBatch({ force: true });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[0]).toMatchObject({ force: true });
+    expect(useWorkspace.getState().variantPicking).toBe(false);
+  }, 45_000);
 
   it('API 키 모드에서는 토큰과 비용이 누적된다', async () => {
     useWorkspace.setState({ provider: 'apikey' });
