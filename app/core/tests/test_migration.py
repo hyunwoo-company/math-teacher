@@ -154,6 +154,13 @@ def test_migration_preserves_data_and_adds_schema(tmp_path: Path) -> None:
                 )
             }
             assert {"idx_nodes_section", "idx_chat_thread"} <= indexes
+            # 문항 텍스트화 3열이 생기고, 기존 행은 NULL(아직 판독 안 함)이다.
+            assert {
+                "transcript",
+                "transcript_source",
+                "transcript_note",
+            } <= storage.table_columns(conn, "problems")
+            assert storage.transcribed_numbers(conn, "file1") == set()
             assert storage.table_columns(conn, "variants") == {
                 "node_id",
                 "no",
@@ -242,7 +249,7 @@ def test_v2_db_gains_variants_table(tmp_path: Path) -> None:
 
         conn = storage.connect()
         try:
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 5
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 6
             assert "variants" in {
                 str(row["name"])
                 for row in conn.execute(
@@ -394,3 +401,52 @@ def test_v4_db_gains_problem_label(tmp_path: Path) -> None:
             "SELECT label FROM problems WHERE node_id = 'n1' AND no = 7"
         ).fetchone()
     assert row["label"] == "7"
+
+
+def test_v5_db_gains_transcript_columns(tmp_path: Path) -> None:
+    """v5 DB(판독본 3열 없음)를 열면 컬럼이 생기고 기존 문항은 그대로 남는다."""
+    data_dir = tmp_path / "v5-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "app.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(LEGACY_SCHEMA)
+        conn.execute("ALTER TABLE problems ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "INSERT INTO problems (node_id, no, page, bbox, crop_path, text, label)"
+            " VALUES ('file1', 4, 1, '[0,0,1,1]', 'crops/file1/q04.png',"
+            " '옛 텍스트', '4')"
+        )
+        conn.execute("PRAGMA user_version = 5")
+        conn.commit()
+    finally:
+        conn.close()
+
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        storage.init_db()
+        with storage.transaction() as conn:
+            assert storage.user_version(conn) == 6
+            problem = storage.get_problem(conn, "file1", 4)
+            assert problem is not None
+            assert problem["text"] == "옛 텍스트"
+            # 기존 행은 '아직 판독하지 않음' = NULL 세 개다(백필하지 않는다).
+            assert problem["transcript"] is None
+            assert problem["transcript_source"] is None
+            assert problem["transcript_note"] is None
+            # 새 컬럼을 바로 쓸 수 있다.
+            assert (
+                storage.set_transcript(
+                    conn,
+                    node_id="file1",
+                    no=4,
+                    transcript=r"\(x^{2}\)",
+                    source=storage.TRANSCRIPT_PUA,
+                    note=None,
+                )
+                is True
+            )
+            assert storage.transcribed_numbers(conn, "file1") == {4}
+    finally:
+        config.use_data_dir(original)

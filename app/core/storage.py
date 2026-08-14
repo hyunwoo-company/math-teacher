@@ -29,8 +29,17 @@ SECTION_EXAM: Final[str] = "exam"
 SECTION_NOTE: Final[str] = "note"
 
 # 스키마 버전. 1 = 최초, 2 = nodes.section / chat_messages.problem_no / note_items,
-# 3 = jobs(작업 큐), 4 = variants(변형 저장).
-SCHEMA_VERSION: Final[int] = 5
+# 3 = jobs(작업 큐), 4 = variants(변형 저장), 5 = problems.label(원문 번호 표기),
+# 6 = problems.transcript / transcript_source / transcript_note (문항 텍스트화).
+SCHEMA_VERSION: Final[int] = 6
+
+# `problems.transcript_source` 값. 출처마다 신뢰도가 다르므로 반드시 남긴다.
+#   pua    = PDF 텍스트 레이어 디코딩(AI 호출 0회, 결정적)
+#   ai     = AI 비전 판독(디코딩이 실패한 문항만)
+#   manual = 사용자가 화면에서 고친 것 -> 재실행이 함부로 덮지 않는다
+TRANSCRIPT_PUA: Final[str] = "pua"
+TRANSCRIPT_AI: Final[str] = "ai"
+TRANSCRIPT_MANUAL: Final[str] = "manual"
 
 SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -64,6 +73,14 @@ CREATE TABLE IF NOT EXISTS problems (
     -- 원문에 찍힌 번호 표기. `no` 는 저장용 통짜 순번이라 구획마다 번호가
     -- 되돌아가는 교재에서는 둘이 다르다(extractor._renumber_duplicates).
     label TEXT NOT NULL DEFAULT '',
+    -- 문항 텍스트화(설계 §3-3). 세 열이 한 벌이다.
+    --   transcript        = 복원한 LaTeX 전문. NULL 이면 아직 없거나 불가다.
+    --   transcript_source = 'pua' | 'ai' | 'manual' (위 상수 참조)
+    --   transcript_note   = 실패·불가 이유(화면 배지·로그용)
+    -- 크롭 이미지는 그대로 남는다. 텍스트는 **추가 표현**이고 대체가 아니다.
+    transcript TEXT NULL,
+    transcript_source TEXT NULL,
+    transcript_note TEXT NULL,
     PRIMARY KEY (node_id, no)
 );
 
@@ -245,6 +262,11 @@ def migrate(conn: sqlite3.Connection) -> None:
             "UPDATE problems SET label = CAST(no AS TEXT)"
             " WHERE label IS NULL OR label = ''"
         )
+        # 문항 텍스트화 3열. 백필하지 않는다 — 기존 행은 '아직 판독하지 않음'(NULL)
+        # 이 맞고, 값을 만들어 넣으면 안 된다.
+        for column in ("transcript", "transcript_source", "transcript_note"):
+            if column not in problem_columns:
+                conn.execute(f"ALTER TABLE problems ADD COLUMN {column} TEXT NULL")
 
     conn.executescript(POST_MIGRATION_SCHEMA)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -550,7 +572,12 @@ def get_file(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None:
 def replace_problems(
     conn: sqlite3.Connection, node_id: str, problems: Sequence[dict[str, Any]]
 ) -> None:
-    """문제 목록을 통째로 다시 쓴다."""
+    """문제 목록을 통째로 다시 쓴다.
+
+    행을 지우고 다시 넣으므로 **판독본 3열(`transcript*`)도 함께 사라진다.**
+    의도한 동작이다 — 재추출로 문항 번호·영역이 달라지면 예전 판독본이 엉뚱한
+    문항에 붙는다(`delete_solutions` / `delete_variants` 와 같은 이유).
+    """
     conn.execute("DELETE FROM problems WHERE node_id = ?", (node_id,))
     conn.executemany(
         """
@@ -575,6 +602,25 @@ def replace_problems(
     )
 
 
+def _optional_text(row: sqlite3.Row, key: str) -> str | None:
+    """행의 nullable 텍스트 컬럼. 컬럼이 없거나 NULL 이면 None.
+
+    `sqlite3.Row` 는 `in` 으로 키를 못 물으므로 `keys()` 목록으로 확인한다
+    (마이그레이션 전에 열린 커넥션이 컬럼 없는 행을 줄 수 있다).
+
+    Args:
+        row: 조회한 행.
+        key: 컬럼 이름.
+
+    Returns:
+        문자열 값, 또는 컬럼이 없거나 NULL 이면 None.
+    """
+    if key not in list(row.keys()):
+        return None
+    value = row[key]
+    return None if value is None else str(value)
+
+
 def _problem_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     bbox = json.loads(row["bbox"])
     return {
@@ -588,6 +634,9 @@ def _problem_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "image_w": int(row["image_w"]),
         "image_h": int(row["image_h"]),
         "text": row["text"],
+        "transcript": _optional_text(row, "transcript"),
+        "transcript_source": _optional_text(row, "transcript_source"),
+        "transcript_note": _optional_text(row, "transcript_note"),
     }
 
 
@@ -605,6 +654,81 @@ def get_problem(conn: sqlite3.Connection, node_id: str, no: int) -> dict[str, An
         "SELECT * FROM problems WHERE node_id = ? AND no = ?", (node_id, no)
     ).fetchone()
     return None if row is None else _problem_row_to_dict(row)
+
+
+# ------------------------------------------------------------- transcripts
+# 문항 텍스트화 결과는 별도 테이블이 아니라 `problems` 의 3열이다. 문항 하나에
+# 판독본은 최대 하나이고, 문항이 사라지면 판독본도 사라져야 하기 때문이다
+# (`replace_problems` 가 행을 갈아 끼우면 자동으로 그렇게 된다).
+
+
+def set_transcript(
+    conn: sqlite3.Connection,
+    *,
+    node_id: str,
+    no: int,
+    transcript: str | None,
+    source: str | None,
+    note: str | None,
+    overwrite_manual: bool = False,
+) -> bool:
+    """문항의 판독본 3열을 한 번에 쓴다.
+
+    `overwrite_manual=False` 면 **사용자가 직접 고친 판독본
+    (`transcript_source='manual'`)은 건드리지 않는다.** 작업 대상은 큐에 넣는
+    시점에 정해지는데 실제 실행은 나중이라, 그 사이 사용자가 고친 내용을 조용히
+    덮어쓸 수 있기 때문이다.
+
+    Args:
+        conn: 열린 커넥션.
+        node_id: 시험지 노드 id.
+        no: 문항 번호.
+        transcript: 복원한 LaTeX 전문. 불가 판정이면 None.
+        source: `TRANSCRIPT_PUA` / `TRANSCRIPT_AI` / `TRANSCRIPT_MANUAL`.
+            `transcript=None` 이면 보통 None 이다.
+        note: 실패·불가 이유(없으면 None).
+        overwrite_manual: True 면 `manual` 판독본도 덮어쓴다(사용자가 명시적으로
+            다시 실행한 경우).
+
+    Returns:
+        실제로 쓴 행이 있으면 True. 문항이 없거나 `manual` 이라 보호된 경우 False.
+    """
+    guard = (
+        ""
+        if overwrite_manual
+        else " AND (transcript_source IS NULL OR transcript_source != ?)"
+    )
+    params: list[Any] = [transcript, source, note, node_id, no]
+    if not overwrite_manual:
+        params.append(TRANSCRIPT_MANUAL)
+    cursor = conn.execute(
+        "UPDATE problems"
+        " SET transcript = ?, transcript_source = ?, transcript_note = ?"
+        f" WHERE node_id = ? AND no = ?{guard}",
+        tuple(params),
+    )
+    return int(cursor.rowcount or 0) > 0
+
+
+def transcribed_numbers(conn: sqlite3.Connection, node_id: str) -> set[int]:
+    """판독본이 있는 문항 번호 집합 (`solved_numbers` 와 같은 역할).
+
+    빈 문자열은 없는 것으로 본다. 불가 판정(`transcript IS NULL` + 이유만 있는
+    행)도 없는 것으로 보므로, 재실행하면 다시 시도한다.
+
+    Args:
+        conn: 열린 커넥션.
+        node_id: 시험지 노드 id.
+
+    Returns:
+        판독본이 있는 문항 번호들.
+    """
+    rows = conn.execute(
+        "SELECT no FROM problems"
+        " WHERE node_id = ? AND transcript IS NOT NULL AND transcript != ''",
+        (node_id,),
+    )
+    return {int(row["no"]) for row in rows}
 
 
 # ---------------------------------------------------------------- solutions
