@@ -8,10 +8,19 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import fitz
 import pytest
 
 import extractor as ex
+
+#: 저장소에 커밋된 22문항 시험지. 회귀 기준선이다.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+EXAM_PDF = REPO_ROOT / "[2026-1-1-M][공수1][풍문고].pdf"
+#: 사용자 자료(gitignore). 없으면 해당 테스트를 건너뛴다.
+TYPE_WORKBOOK_PDF = REPO_ROOT / "tmp" / "test" / "집합1 (1).pdf"
 
 
 def _build_two_column_pdf(pages: int = 2) -> bytes:
@@ -378,3 +387,168 @@ def test_section_reset_pdf_keeps_every_problem() -> None:
     assert [problem.no for problem in result.problems] == [1, 2, 3, 4, 5]
     # 원문 표기는 되돌아간 그대로 남는다.
     assert [problem.label for problem in result.problems] == ["1", "2", "3", "1", "2"]
+
+
+# ── 세 자리 문제 번호 (100번 이상) ──────────────────────────────────────
+# 실측 회귀: `ANCHOR_RE` 가 `\d{1,2}` 였던 탓에 100번부터가 통째로 앵커에서
+# 빠졌다. 유형 문제집 12종이 전부 정확히 99번에서 잘렸다(150문항 중 99개만
+# 추출, 약 34% 손실). `\d{1,3}` 으로 넓히되, 아래 오탐 방어 테스트로 기존
+# 보호 장치(_dominant_delimiter / _pick_anchor_chain / indent_tol)가 여전히
+# 작동함을 고정한다.
+
+
+@pytest.mark.parametrize(
+    ("line", "expected_no", "expected_delimiter"),
+    [
+        ("1. 한 자리", "1", "."),
+        ("22. 두 자리", "22", "."),
+        ("100. 세 자리 시작", "100", "."),
+        ("137) 세 자리 괄호", "137", ")"),
+        ("145. 세 자리 마침표", "145", "."),
+        ("999. 세 자리 상한", "999", "."),
+        ("  100.들여쓴 줄", "100", "."),
+        ("100 . 공백 낀 구분자", "100", "."),
+    ],
+)
+def test_anchor_re_matches_up_to_three_digits(
+    line: str, expected_no: str, expected_delimiter: str
+) -> None:
+    """세 자리 문제 번호가 앵커로 잡히고 그룹1/그룹2 가 올바르다."""
+    match = ex.ANCHOR_RE.match(line)
+    assert match is not None, f"매치되어야 한다: {line!r}"
+    assert match.group(1) == expected_no
+    assert match.group(2) == expected_delimiter
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "2025. 연도로 시작하는 지문",  # 네 자리 + 마침표
+        "2025) 연도 괄호",
+        "1000. 네 자리 상한 초과",
+        "12345. 다섯 자리",
+    ],
+)
+def test_anchor_re_rejects_four_or_more_digits(line: str) -> None:
+    """네 자리 이상은 앵커가 아니다 (연도 "2025." 오탐 방지).
+
+    `\\d{1,3}` 는 "2025." 에서 "202" 를 잡은 뒤 구분자 자리에 "5" 가 와서
+    실패하고, 백트래킹("20"/"2")해도 전부 실패해 최종적으로 매치되지 않는다.
+    """
+    assert ex.ANCHOR_RE.match(line) is None
+
+
+def test_anchor_re_three_digit_widening_is_the_only_change() -> None:
+    """두 자리 시절 동작은 그대로다 — 넓히기만 했지 좁히지 않았다."""
+    narrow = re.compile(r"^\s*(\d{1,2})\s*([.)])")
+    for line in ("1.", "9)", "22.", "99)", " 7. 본문", "abc 1.", "", "."):
+        narrow_match = narrow.match(line)
+        wide_match = ex.ANCHOR_RE.match(line)
+        if narrow_match is None:
+            continue  # 넓힌 쪽이 더 많이 잡는 것은 의도된 변경이다
+        assert wide_match is not None
+        assert wide_match.group(1) == narrow_match.group(1)
+        assert wide_match.group(2) == narrow_match.group(2)
+
+
+def _build_crossing_hundred_pdf() -> bytes:
+    """98~103 번을 담은 1단 조판 PDF (99→100 경계를 넘는다)."""
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        for offset, no in enumerate(range(98, 104)):
+            page.insert_text((40, 60 + offset * 120), f"{no}. 문제 본문", fontsize=11)
+        data: bytes = doc.tobytes()
+        return data
+    finally:
+        doc.close()
+
+
+def test_problems_past_ninety_nine_are_not_dropped() -> None:
+    """99번에서 잘리지 않고 100~103 번까지 이어서 잡힌다."""
+    result = ex.extract_problems(
+        pdf_bytes=_build_crossing_hundred_pdf(), render_images=False
+    )
+    assert [problem.no for problem in result.problems] == [98, 99, 100, 101, 102, 103]
+
+
+def test_three_digit_choices_still_do_not_shadow_problem_numbers() -> None:
+    """세 자리 허용 후에도 선택지 `1)`~`5)` 가 문제 번호를 밀어내지 않는다.
+
+    `_dominant_delimiter` 가 개수가 아니라 단조증가 사슬로 구분자를 고르는지
+    100번대에서도 확인한다. 문제 번호를 98~103 으로 두어 3자리 경로를 태운다.
+    """
+    doc = fitz.open()
+    try:
+        for page_index in range(2):
+            page = doc.new_page(width=595, height=841)
+            for slot in range(3):
+                no = 98 + page_index * 3 + slot
+                top = 52 + slot * 260
+                page.insert_text((40, top), f"{no}. 좌측 문제", fontsize=11)
+                # 선택지는 문제보다 5배 많다. 들여쓰기 없이 최악을 가정한다.
+                for choice in range(1, 6):
+                    page.insert_text(
+                        (40, top + 20 + choice * 25), f"{choice}) 선택지", fontsize=11
+                    )
+        pdf_bytes = doc.tobytes()
+    finally:
+        doc.close()
+
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+    assert [problem.no for problem in result.problems] == [98, 99, 100, 101, 102, 103]
+
+
+def test_year_like_text_does_not_become_an_anchor() -> None:
+    """지문 첫머리의 "2025." 같은 연도가 문제로 승격되지 않는다."""
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        page.insert_text((40, 60), "1. 첫 번째 문제", fontsize=11)
+        # 칼럼 왼쪽 끝에 붙인 연도 — indent 필터로도 못 걸러지는 최악의 배치.
+        page.insert_text((40, 120), "2025. 개정 교육과정에 따르면", fontsize=11)
+        page.insert_text((40, 300), "2. 두 번째 문제", fontsize=11)
+        page.insert_text((40, 540), "3. 세 번째 문제", fontsize=11)
+        pdf_bytes = doc.tobytes()
+    finally:
+        doc.close()
+
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+    assert [problem.no for problem in result.problems] == [1, 2, 3]
+
+
+# ── 실물 PDF 회귀 ──────────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(not EXAM_PDF.is_file(), reason=f"시험지 PDF 없음: {EXAM_PDF}")
+def test_committed_exam_pdf_extraction_is_unchanged() -> None:
+    """저장소에 커밋된 22문항 시험지 결과를 고정한다 (제일 중요한 회귀 방어).
+
+    세 자리 확장 **전** 실측값을 그대로 박아둔다: 22문항, 번호 1..22,
+    label 도 번호와 같고, PUA 비율이 높아 image 모드다.
+    """
+    result = ex.extract_problems(EXAM_PDF, render_images=False)
+
+    expected = list(range(1, 23))
+    assert [problem.no for problem in result.problems] == expected
+    assert [problem.label for problem in result.problems] == [str(no) for no in expected]
+    assert result.mode == "image"
+
+
+@pytest.mark.skipif(
+    not TYPE_WORKBOOK_PDF.is_file(),
+    reason=f"사용자 자료라 저장소에 없음: {TYPE_WORKBOOK_PDF}",
+)
+def test_type_workbook_pdf_goes_past_ninety_nine() -> None:
+    """유형 문제집 실물에서 99번 천장이 사라졌는지 확인한다.
+
+    수정 전 실측: 99문항, 최대 번호 99. 수정 후 실측: 150문항, 1..150 연속.
+    렌더링은 시간이 오래 걸리므로 `render_images=False` 로 분할만 확인한다.
+    """
+    result = ex.extract_problems(TYPE_WORKBOOK_PDF, render_images=False)
+    numbers = [problem.no for problem in result.problems]
+
+    assert len(numbers) > 99, f"99번 천장이 남아 있다: {len(numbers)}문항"
+    assert max(numbers) >= 100, f"최대 번호가 100 미만이다: {max(numbers)}"
+    # 실측 고정: 빠짐 없이 1..150 이 연속으로 나온다.
+    assert numbers == list(range(1, 151))
