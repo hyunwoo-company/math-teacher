@@ -1,0 +1,325 @@
+<title>온톨로지 파일럿 결과</title>
+
+<style>
+:root{
+  --paper:#FAFBFC; --surface:#FFF; --surface-2:#F1F4F8;
+  --ink:#161D26; --ink-2:#46566B; --ink-3:#7A8899;
+  --rule:#DCE3EB; --rule-soft:#EAEFF4;
+  --indigo:#2D4A8A; --indigo-bg:#E8EEF9;
+  --verm:#B8303F; --verm-bg:#FBE9EA;
+  --teal:#0C6E62; --teal-bg:#E2F1EE;
+  --amber:#8A6206; --amber-bg:#FBF2DE;
+  --grid:rgba(45,74,138,.07);
+  --serif:"Nanum Myeongjo","Noto Serif KR",Batang,"Apple SD Gothic Neo",Georgia,serif;
+  --sans:"Pretendard Variable",Pretendard,"Malgun Gothic",-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono","Cascadia Mono",Consolas,D2Coding,"Courier New",monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:#10151C; --surface:#161C25; --surface-2:#1D2530;
+  --ink:#E6ECF3; --ink-2:#A4B2C2; --ink-3:#74828F;
+  --rule:#2A3440; --rule-soft:#212A35;
+  --indigo:#8FAEEA; --indigo-bg:#1A2438;
+  --verm:#E88A94; --verm-bg:#2E1A1D;
+  --teal:#5FC7B6; --teal-bg:#122B27;
+  --amber:#E0B85C; --amber-bg:#2B2313;
+  --grid:rgba(143,174,234,.07);
+}}
+:root[data-theme="dark"]{
+  --paper:#10151C; --surface:#161C25; --surface-2:#1D2530;
+  --ink:#E6ECF3; --ink-2:#A4B2C2; --ink-3:#74828F;
+  --rule:#2A3440; --rule-soft:#212A35;
+  --indigo:#8FAEEA; --indigo-bg:#1A2438;
+  --verm:#E88A94; --verm-bg:#2E1A1D;
+  --teal:#5FC7B6; --teal-bg:#122B27;
+  --amber:#E0B85C; --amber-bg:#2B2313;
+  --grid:rgba(143,174,234,.07);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+  font-size:16px;line-height:1.72;-webkit-font-smoothing:antialiased;word-break:keep-all;overflow-wrap:break-word}
+.wrap{max-width:880px;margin:0 auto;padding:0 24px 110px}
+.cover{position:relative;padding:80px 0 48px;border-bottom:1px solid var(--rule);margin-bottom:52px}
+.cover::before{content:"";position:absolute;inset:0 -100vw;
+  background-image:repeating-linear-gradient(to right,var(--grid) 0 1px,transparent 1px 28px),
+                   repeating-linear-gradient(to bottom,var(--grid) 0 1px,transparent 1px 28px);
+  mask-image:linear-gradient(to bottom,#000,transparent 78%);
+  -webkit-mask-image:linear-gradient(to bottom,#000,transparent 78%);pointer-events:none}
+.cover>*{position:relative}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:var(--indigo);margin:0 0 18px}
+h1{font-family:var(--serif);font-size:clamp(32px,5.6vw,50px);line-height:1.24;font-weight:700;
+  letter-spacing:-.01em;margin:0 0 18px;text-wrap:balance}
+.thesis{font-family:var(--serif);font-size:clamp(17px,2.3vw,20px);line-height:1.66;color:var(--ink-2);max-width:48ch;margin:0 0 26px}
+.meta{font-family:var(--mono);font-size:12.5px;color:var(--ink-3);display:flex;flex-wrap:wrap;gap:6px 20px}
+section{margin-bottom:60px}
+h2{font-family:var(--serif);font-size:26px;line-height:1.35;font-weight:700;margin:0 0 10px;text-wrap:balance}
+h2 .num{font-family:var(--mono);font-size:12.5px;font-weight:400;color:var(--indigo);letter-spacing:.08em;display:block;margin-bottom:9px}
+h3{font-size:16.5px;font-weight:700;margin:32px 0 9px}
+p{margin:0 0 15px;max-width:68ch}
+ul,ol{margin:0 0 15px;padding-left:22px;max-width:68ch}li{margin-bottom:6px}
+li::marker{color:var(--ink-3)}
+strong{font-weight:700}
+code{font-family:var(--mono);font-size:.875em;background:var(--surface-2);border:1px solid var(--rule-soft);
+  padding:.08em .36em;border-radius:3px;word-break:break-all}
+a{color:var(--indigo);text-underline-offset:3px}
+a:focus-visible{outline:2px solid var(--indigo);outline-offset:3px;border-radius:2px}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:0 0 24px}
+.metric{border:1px solid var(--rule);border-radius:5px;background:var(--surface);padding:15px 16px}
+.metric .v{font-family:var(--mono);font-size:27px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}
+.metric .l{font-size:12.5px;color:var(--ink-3);margin-top:5px;line-height:1.45}
+.metric.good .v{color:var(--teal)} .metric.warn .v{color:var(--verm)} .metric.key .v{color:var(--indigo)}
+.tablewrap{overflow-x:auto;margin:0 0 22px;border:1px solid var(--rule);border-radius:5px}
+table{border-collapse:collapse;width:100%;font-size:14.5px;min-width:480px}
+th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--rule-soft);vertical-align:top;line-height:1.58}
+thead th{background:var(--surface-2);font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;
+  text-transform:uppercase;font-weight:500;color:var(--ink-3);border-bottom:1px solid var(--rule)}
+tbody tr:last-child td{border-bottom:none}
+td.n{font-variant-numeric:tabular-nums;white-space:nowrap}
+.callout{border-left:3px solid var(--indigo);background:var(--indigo-bg);padding:15px 19px;border-radius:0 5px 5px 0;margin:0 0 20px}
+.callout.warn{border-left-color:var(--verm);background:var(--verm-bg)}
+.callout.good{border-left-color:var(--teal);background:var(--teal-bg)}
+.callout.note{border-left-color:var(--amber);background:var(--amber-bg)}
+.callout p:last-child{margin-bottom:0}
+.callout .tag{font-family:var(--mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;display:block;margin-bottom:6px;color:var(--indigo)}
+.callout.warn .tag{color:var(--verm)} .callout.good .tag{color:var(--teal)} .callout.note .tag{color:var(--amber)}
+.code{background:var(--surface-2);border:1px solid var(--rule);border-radius:5px;overflow-x:auto;margin:0 0 20px}
+.code pre{margin:0;padding:15px 18px;font-family:var(--mono);font-size:13px;line-height:1.65;color:var(--ink-2);white-space:pre}
+.bar{display:flex;height:26px;border-radius:4px;overflow:hidden;border:1px solid var(--rule);margin:0 0 8px;font-family:var(--mono);font-size:11px}
+.bar span{display:flex;align-items:center;justify-content:center;color:#fff;white-space:nowrap}
+.legend{font-size:13px;color:var(--ink-3);margin:0 0 22px;line-height:1.7}
+.swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:baseline}
+.ship{display:grid;grid-template-columns:96px 1fr;gap:16px;padding:14px 0;border-top:1px solid var(--rule-soft)}
+.ship:first-of-type{border-top:1px solid var(--rule)}
+.ship code{background:none;border:none;padding:0;color:var(--indigo);font-size:12.5px}
+.ship p{margin:0;font-size:14.5px;color:var(--ink-2)}
+.ship b{display:block;color:var(--ink);font-size:15px;margin-bottom:3px}
+hr.rule{border:none;border-top:1px solid var(--rule);margin:0 0 40px}
+@media (max-width:620px){.wrap{padding:0 18px 80px}.cover{padding-top:52px}.ship{grid-template-columns:1fr;gap:5px}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="cover">
+  <p class="eyebrow">세션 정리 · math-teacher · 2026-08-15</p>
+  <h1>온톨로지 파일럿 결과</h1>
+  <p class="thesis">
+    유사 문항 추천의 토대를 세우고, 태거가 실제로 몇 %를 맞히는지 측정했다.
+    그리고 그 숫자를 어떻게 읽어야 하는지가 이번의 진짜 수확이다.
+  </p>
+  <p class="meta">
+    <span>커밋 9건 · 프로덕션 배포 완료</span>
+    <span>테스트 백엔드 643 · 프론트 688</span>
+    <span>AI 호출 0회 (적재·태깅 파일럿)</span>
+  </p>
+</header>
+
+<!-- ───────────────────────────────────────── -->
+<section>
+  <h2><span class="num">측정</span>블라인드 태깅 210문항</h2>
+
+  <div class="metrics">
+    <div class="metric key"><div class="v">70.5%</div><div class="l">Top-1 정확도</div></div>
+    <div class="metric key"><div class="v">81.9%</div><div class="l">Top-2 (2순위 포함)</div></div>
+    <div class="metric good"><div class="v">96%</div><div class="l">대단원 수준 정확도</div></div>
+    <div class="metric"><div class="v">45</div><div class="l">유형 · 1,699문항 적재</div></div>
+  </div>
+
+  <p>
+    단순 정확도만 보면 70.5%다. 그런데 <strong>오답 62건이 어디서 났는지</strong>를 보면
+    그림이 완전히 달라진다.
+  </p>
+
+  <div class="bar" role="img" aria-label="오답 62건의 분포: 같은 중단원 안 51.6퍼센트, 다른 중단원 33.9퍼센트, 대단원까지 다름 14.5퍼센트">
+    <span style="width:51.6%;background:var(--indigo)">같은 중단원 51.6%</span>
+    <span style="width:33.9%;background:var(--amber)">다른 중단원 33.9%</span>
+    <span style="width:14.5%;background:var(--verm)">대단원 14.5%</span>
+  </div>
+  <p class="legend">
+    <span class="swatch" style="background:var(--indigo)"></span><strong>같은 중단원 안에서 틀림</strong> — 인접 유형 경계 문제. 태거는 맥락을 맞혔다<br>
+    <span class="swatch" style="background:var(--amber)"></span>같은 대단원, 다른 중단원<br>
+    <span class="swatch" style="background:var(--verm)"></span><strong>대단원까지 다름 — 9건뿐.</strong> 진짜로 엉뚱한 답
+  </p>
+
+  <p>
+    210문항 중 <strong>완전히 빗나간 것은 9건</strong>이다. 나머지 오답은 "이 문항이 어느 동네
+    문제인지"는 맞히고 <strong>이웃한 유형 사이에서만 흔들린</strong> 것이다.
+  </p>
+
+  <h3>가장 실용적인 수확 — confidence가 잘 보정돼 있다</h3>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>confidence</th><th class="n">건수</th><th class="n">정확도</th><th>쓸 방법</th></tr></thead>
+      <tbody>
+        <tr><td><code>high</code></td><td class="n">100</td><td class="n"><strong>89.0%</strong></td><td>자동 채택</td></tr>
+        <tr><td><code>medium</code></td><td class="n">94</td><td class="n">54.3%</td><td>사람 검수 큐</td></tr>
+        <tr><td><code>low</code></td><td class="n">16</td><td class="n">50.0%</td><td>사람 검수 큐</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout good">
+    <span class="tag">그래서</span>
+    <p>
+      태거가 <strong>자기가 언제 틀리는지를 안다.</strong> high만 자동으로 받으면
+      코퍼스의 절반을 89% 정확도로 태깅하고, 나머지는 검수로 돌릴 수 있다.
+      전체 정확도 70.5%라는 숫자 하나만 봤다면 "아직 못 쓴다"고 결론 냈을 것이다.
+    </p>
+  </div>
+</section>
+
+<!-- ───────────────────────────────────────── -->
+<section>
+  <h2><span class="num">발견</span>인쇄된 라벨이 정답이 아니다</h2>
+
+  <p>
+    이 실험은 문제집에 <strong>인쇄된 유형 라벨</strong>을 정답지로 삼았다. 그런데
+    정의문을 쓰던 세 작업자가 <strong>서로 독립적으로</strong> 같은 결론에 도달했다 —
+    라벨 자체에 오류가 있다.
+  </p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>문항</th><th>라벨</th><th>실제</th></tr></thead>
+      <tbody>
+        <tr><td><code>685f25205283</code></td><td>08.05.01.08</td><td><strong>집합이 전혀 안 쓰임</strong> (순수 이차함수)</td></tr>
+        <tr><td><code>8deacb338f90</code></td><td>08.05.01.02</td><td>벤다이어그램 문항 → 03 유형</td></tr>
+        <tr><td><code>3e60591ba98e</code></td><td>08.06.02.07</td><td>색칠 영역 → 02.03</td></tr>
+        <tr><td><code>20d9edda98d7</code></td><td>08.06.01.01</td><td>∈/⊂ 구별 → 05.01 계열</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>약 200장 확인 중 4건, <strong>대략 2%</strong>. 표본이 작아 확정 수치는 아니다.</p>
+
+  <div class="callout warn">
+    <span class="tag">이게 왜 중요한가</span>
+    <p>
+      정확도를 태거 성능으로만 읽으면 안 된다. 불일치 62건은 <strong>①태거 오류
+      ②라벨 오류 ③둘 다 말이 됨</strong> 셋으로 분해해야 한다.
+      이걸 건너뛰면 <strong>라벨 노이즈를 태거 부족으로 오독해, 멀쩡한 태거를 붙잡고
+      정의문만 무한히 고치게 된다.</strong>
+    </p>
+  </div>
+
+  <h3>구조적으로 갈리지 않는 유형쌍</h3>
+  <p>정확도의 상한을 만드는 실체다. 태거를 아무리 고쳐도 여기는 못 넘는다.</p>
+
+  <div class="code"><pre>08.05.01.04 ↔ 08.05.03.01   조건식도 물음도 동일
+    X={x+y | x∈A, y∈B},  n(X)=k 되는 a의 합
+
+08.06.03.02 ↔ 08.06.03.07   혼동 4회 (최다)
+    "조합을 곱하는가" 축이 실제 문항에서 안 갈림
+
+08.05.03.03 ↔ 08.06.03.10   소재 동일
+    "집합 연산자가 표면에 있는가" 만 다름
+
+08.05.02.01                  전수 7문항 중 3개만 라벨에 맞음 — 잡동사니 칸</pre></div>
+
+  <div class="callout note">
+    <span class="tag">덤으로 나온 것</span>
+    <p>
+      45개 어디에도 안 맞는 문항 유형이 실재한다 — <strong>부분집합들의 원소 총합</strong>,
+      <strong>k번째 원소 찾기</strong>, <strong>도형 개형 고르기</strong>.
+      스키마에 이미 있는 <code>status='proposed'</code>로 신규 유형 후보에 올릴 자리다.
+    </p>
+  </div>
+</section>
+
+<!-- ───────────────────────────────────────── -->
+<section>
+  <h2><span class="num">배포</span>같이 나간 버그 수정</h2>
+
+  <div class="ship">
+    <div><code>66206f8</code></div>
+    <div><b>추출기가 100번 이상 문항을 통째로 놓치고 있었다</b>
+    <p>정규식이 <code>\d{1,2}</code>라 두 자리까지만 인식. 150문항 교재에서 <strong>34%가 사라졌다.</strong>
+    시험지(20~30문항)에서는 드러나지 않던 버그다.</p></div>
+  </div>
+
+  <div class="ship">
+    <div><code>2d229cb</code></div>
+    <div><b>내보내기 조판 3종</b>
+    <p>집합 조건제시법에 <code>middle</code>이라는 <strong>영어 단어가 그대로 찍히던 것</strong>,
+    hwpx 수식이 <code>y = 2 x + 3</code>처럼 벌어지던 것, 텍스트 모드에서 그래프가 사라지던 것.</p></div>
+  </div>
+
+  <div class="ship">
+    <div><code>45ebe01</code></div>
+    <div><b>프롬프트 과목 하드코딩 제거</b>
+    <p>고1 공통수학1로 고정돼 단원 목록까지 박혀 있었다. 중립화하면서 <strong>가변 정보를
+    user 메시지로 내려</strong> 프롬프트 캐시 접두사도 함께 보호했다.</p></div>
+  </div>
+
+  <div class="ship">
+    <div><code>a2a389d</code><br><code>2098cb6</code></div>
+    <div><b>트리 검색·드래그·이동</b>
+    <p>이름 검색, 드래그 자동 스크롤, 하단 여백, 우클릭 이동. 그리고 아래의 데이터 손상 버그.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <span class="tag">실제 브라우저로만 잡힌 것</span>
+    <p>
+      드래그 문제를 실제 Chromium(+ Win32 마우스 API)으로 재현했더니 <strong>제 진단이 틀렸다.</strong>
+      끌기 뒤 <code>click</code>은 뜨지 않는다. 진짜 원인은 브라우저의 <strong>5px 끌기 임계값</strong>이고
+      앱에서 바꿀 수 없다.
+    </p>
+    <p>
+      대신 <strong>데이터가 망가지는 버그</strong>가 잡혔다 — 살짝 헛끌어 <strong>파일 행 위에 놓으면
+      그 파일이 최상위로 튀어나갔다</strong>(<code>aria-level</code> 3→1). 드롭 하이라이트도 안 뜨는
+      자리인데 데이터가 움직였다. 이미 수정·배포됐다.
+    </p>
+    <p>
+      jsdom 테스트는 이걸 원리적으로 재현하지 못한다. <strong>통과한 테스트가 실제 동작을 보장하지 않는다.</strong>
+    </p>
+  </div>
+</section>
+
+<!-- ───────────────────────────────────────── -->
+<section>
+  <h2><span class="num">다음</span>이어서 할 일</h2>
+
+  <ol>
+    <li><strong>오답 62건 재판정</strong> — ①태거 오류 ②라벨 오류 ③구조적 상한으로 분해.
+      이게 되어야 "정의문을 고칠지, 데이터를 고칠지, 포기할지"가 갈린다.</li>
+    <li><strong>갈리지 않는 유형쌍을 묶어서 재측정</strong> — 묶었을 때 오르는 정확도가
+      곧 구조적 상한의 크기다.</li>
+    <li><strong>신규 유형 후보 등록</strong> — 45개 어디에도 안 맞는 문항들.</li>
+    <li><strong>그 다음에야 다른 단원 확장.</strong> 지금 넓히면 흐린 정의문이 그대로 복제된다.</li>
+  </ol>
+
+  <h3>아직 안 한 것</h3>
+  <ul>
+    <li><code>scope=</code>에 값을 채워 줄 쪽이 없다 — 시험지별 학년·과목을 어디서 얻을지 미정</li>
+    <li><code>bank_links</code>(내 시험지 ↔ 코퍼스) 미구현 — 태깅 정확도 확정 후</li>
+    <li>우클릭 삭제는 항상 단일, 이동·드래그는 다중 — 통일 여부 미정</li>
+    <li>검색은 이름만 — 문항 내용 검색은 코퍼스와 함께 FTS를 한 번에 설계</li>
+  </ul>
+
+  <div class="callout">
+    <span class="tag">실데이터 분리</span>
+    <p>
+      온톨로지 작업은 전부 <code>data/bank.db</code>에서만 했다.
+      운영 <code>app.db</code>는 손대지 않았고, 앱은 아직 이 테이블을 쓰지 않는다.
+      스키마는 추가 전용이라 배포돼도 기존 동작에 영향이 없다.
+    </p>
+  </div>
+</section>
+
+<hr class="rule">
+
+<section>
+  <h3>이번에 얻은 작업 방식</h3>
+  <ul>
+    <li><strong>서브에이전트에게 "모호하면 지어내지 말고 그대로 보고하라"</strong>를 명시하면
+      값진 정보가 나온다. 라벨 노이즈와 구조적 상한이 전부 그렇게 드러났다.</li>
+    <li><strong>표본을 늘리면 가설이 양방향으로 교정된다.</strong> 한 축은 뒤집혔고(포함관계↔방정식),
+      다른 축은 20장에서 예외 없이 재현돼 확정됐다(이차식 여부).</li>
+    <li><code>hw-team:planner</code>·<code>researcher</code>에는 <strong>Bash가 없다.</strong>
+      자료는 절대경로 매니페스트로 미리 만들어 넘기고, 이미지는 에이전트당 60장 안쪽으로 쪼갠다.</li>
+    <li>블라인드 실험은 <strong>정답 유출 차단이 설계의 절반</strong>이다.
+      인용된 문항 제외 · 정답지 물리적 격리 · Bash 없는 에이전트 선택으로 3중 차단했다.</li>
+  </ul>
+</section>
+
+</div>
