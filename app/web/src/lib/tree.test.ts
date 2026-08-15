@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { buildTree, countDescendants, isDescendantOf, nodePath } from '@/lib/tree';
+import {
+  buildTree,
+  countDescendants,
+  filterTreeItems,
+  isDescendantOf,
+  matchNodeIds,
+  nodePath,
+  splitHighlight,
+} from '@/lib/tree';
 import type { TreeNode } from '@/types/api';
 
 function folder(id: string, name: string, parent: string | null = null): TreeNode {
@@ -85,5 +93,128 @@ describe('isDescendantOf / countDescendants / nodePath', () => {
 
   it('경로를 만든다', () => {
     expect(nodePath(nodes, 'leaf')).toEqual(['2026-1학기', '공통수학1', '풍문고.pdf']);
+  });
+});
+
+describe('matchNodeIds', () => {
+  const nodes = [
+    folder('root', '2026-1학기'),
+    folder('sub', '공통수학1', 'root'),
+    file('leaf', '풍문고.pdf', 'sub'),
+    file('leaf2', 'Midterm.PDF', 'sub'),
+    folder('other', '모의고사'),
+    file('other-leaf', '6월.pdf', 'other'),
+  ];
+
+  it('검색어가 비었거나 공백뿐이면 필터 없음(null)이다', () => {
+    expect(matchNodeIds(nodes, '')).toBeNull();
+    expect(matchNodeIds(nodes, '   ')).toBeNull();
+  });
+
+  it('파일 이름이 일치하면 그 파일과 조상 폴더를 모두 넣는다', () => {
+    const matched = matchNodeIds(nodes, '풍문');
+    expect(matched).not.toBeNull();
+    expect([...(matched ?? [])].sort()).toEqual(['leaf', 'root', 'sub']);
+  });
+
+  it('폴더 이름이 일치하면 그 폴더의 자손을 모두 넣는다', () => {
+    const matched = matchNodeIds(nodes, '공통수학');
+    expect([...(matched ?? [])].sort()).toEqual(['leaf', 'leaf2', 'root', 'sub']);
+  });
+
+  it('대소문자를 무시한다', () => {
+    expect(matchNodeIds(nodes, 'midterm')?.has('leaf2')).toBe(true);
+    expect(matchNodeIds(nodes, 'MIDTERM')?.has('leaf2')).toBe(true);
+  });
+
+  it('일치가 없으면 빈 집합이다 (필터 없음과 구분된다)', () => {
+    const matched = matchNodeIds(nodes, '없는이름');
+    expect(matched).not.toBeNull();
+    expect(matched?.size).toBe(0);
+  });
+
+  it('정규식 특수문자를 글자 그대로 찾는다', () => {
+    const tricky = [file('dot', 'a.pdf'), file('nodot', 'axpdf'), folder('paren', '기출(1)')];
+    const dot = matchNodeIds(tricky, 'a.pdf');
+    expect(dot?.has('dot')).toBe(true);
+    // `.` 를 아무 글자로 해석하면 axpdf 까지 걸린다. 걸리면 안 된다.
+    expect(dot?.has('nodot')).toBe(false);
+
+    // 괄호가 정규식으로 해석되면 여기서 터진다.
+    expect(() => matchNodeIds(tricky, '(1)')).not.toThrow();
+    expect(matchNodeIds(tricky, '(1)')?.has('paren')).toBe(true);
+    expect(matchNodeIds(tricky, '*')?.size).toBe(0);
+  });
+
+  it('앞뒤 공백은 무시하고 찾는다', () => {
+    expect(matchNodeIds(nodes, '  풍문  ')?.has('leaf')).toBe(true);
+  });
+});
+
+describe('filterTreeItems', () => {
+  const nodes = [
+    folder('root', '2026-1학기'),
+    folder('sub', '공통수학1', 'root'),
+    file('leaf', '풍문고.pdf', 'sub'),
+    folder('other', '모의고사'),
+  ];
+
+  it('필터가 null 이면 트리를 그대로 돌려준다', () => {
+    const roots = buildTree(nodes);
+    expect(filterTreeItems(roots, null)).toBe(roots);
+  });
+
+  it('일치 경로만 남기고 깊이는 유지한다', () => {
+    const roots = buildTree(nodes);
+    const kept = filterTreeItems(roots, matchNodeIds(nodes, '풍문'));
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.node.id).toBe('root');
+    expect(kept[0]?.children[0]?.node.id).toBe('sub');
+    expect(kept[0]?.children[0]?.children[0]?.node.id).toBe('leaf');
+    expect(kept[0]?.children[0]?.children[0]?.depth).toBe(2);
+  });
+});
+
+describe('splitHighlight', () => {
+  it('검색어가 없으면 원문 한 조각이다', () => {
+    expect(splitHighlight('풍문고.pdf', '')).toEqual([{ text: '풍문고.pdf', hit: false }]);
+    expect(splitHighlight('풍문고.pdf', '  ')).toEqual([{ text: '풍문고.pdf', hit: false }]);
+  });
+
+  it('일치가 없으면 원문 한 조각이다', () => {
+    expect(splitHighlight('풍문고.pdf', '없음')).toEqual([{ text: '풍문고.pdf', hit: false }]);
+  });
+
+  it('앞/일치/뒤 순서로 쪼갠다', () => {
+    expect(splitHighlight('풍문고.pdf', '문고')).toEqual([
+      { text: '풍', hit: false },
+      { text: '문고', hit: true },
+      { text: '.pdf', hit: false },
+    ]);
+  });
+
+  it('맨 앞에서 일치하면 앞 조각이 없다', () => {
+    expect(splitHighlight('Midterm', 'mid')).toEqual([
+      { text: 'Mid', hit: true },
+      { text: 'term', hit: false },
+    ]);
+  });
+
+  it('여러 번 일치하면 모두 표시한다', () => {
+    expect(splitHighlight('a.b.c', '.')).toEqual([
+      { text: 'a', hit: false },
+      { text: '.', hit: true },
+      { text: 'b', hit: false },
+      { text: '.', hit: true },
+      { text: 'c', hit: false },
+    ]);
+  });
+
+  it('조각을 이으면 원문 그대로다', () => {
+    const name = '2026 기출(1).pdf';
+    const joined = splitHighlight(name, '(1)')
+      .map((part) => part.text)
+      .join('');
+    expect(joined).toBe(name);
   });
 });

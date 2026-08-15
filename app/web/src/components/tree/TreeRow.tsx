@@ -2,7 +2,7 @@
 
 import clsx from 'clsx';
 import type { DragEvent, MouseEvent } from 'react';
-import type { TreeItem } from '@/lib/tree';
+import { splitHighlight, type TreeItem } from '@/lib/tree';
 import { parseDragIds } from '@/components/tree/selection';
 
 /** 끌고 있는 노드들. `fromId` 는 끌기를 시작한 행(배지를 그 행에 붙인다). */
@@ -42,6 +42,8 @@ interface TreeRowProps extends TreeRowCallbacks {
   setDragOverId: (id: string | null) => void;
   drag: DragState | null;
   setDrag: (drag: DragState | null) => void;
+  /** 이름 검색어. 일치한 부분만 강조한다. 비면 강조하지 않는다. */
+  query?: string;
 }
 
 const NODE_MIME = 'application/x-math-teacher-node';
@@ -57,6 +59,7 @@ export function TreeRow(props: TreeRowProps) {
     setDragOverId,
     drag,
     setDrag,
+    query = '',
     onToggle,
     onSelectFile,
     onFocusNode,
@@ -190,7 +193,21 @@ export function TreeRow(props: TreeRowProps) {
         <span aria-hidden className="shrink-0 text-[13px]">
           {isFolder ? (isOpen ? '📂' : '📁') : '📄'}
         </span>
-        <span className="truncate">{node.name}</span>
+        <span className="truncate">
+          {splitHighlight(node.name, query).map((part, index) =>
+            part.hit ? (
+              // 조각은 순수 문자열이다. HTML 을 만들지 않으므로 주입 위험이 없다.
+              <mark
+                key={`${index}-${part.text}`}
+                className="rounded-[2px] bg-amber-200 px-0 text-inherit"
+              >
+                {part.text}
+              </mark>
+            ) : (
+              <span key={`${index}-${part.text}`}>{part.text}</span>
+            ),
+          )}
+        </span>
         {dragBadge ? (
           <span className="ml-1 shrink-0 rounded-full bg-blue-600 px-1.5 py-[1px] text-[10px] font-semibold text-white">
             {dragBadge}개 이동

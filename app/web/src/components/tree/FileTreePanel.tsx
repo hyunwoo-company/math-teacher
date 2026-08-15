@@ -3,7 +3,13 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import clsx from 'clsx';
 import { useWorkspace } from '@/store/workspace';
-import { buildTree, countDescendants, type TreeItem } from '@/lib/tree';
+import {
+  buildTree,
+  countDescendants,
+  filterTreeItems,
+  matchNodeIds,
+  type TreeItem,
+} from '@/lib/tree';
 import { resolveDropTarget, resolveUploadTarget } from '@/lib/upload-target';
 import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { ContextMenu, type ContextMenuItem } from '@/components/tree/ContextMenu';
@@ -86,6 +92,8 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   // 다중 선택(이동용). 열려 있는 파일(selectedFileId)과는 다른 개념이다.
   const [pickedIds, setPickedIds] = useState<ReadonlySet<string>>(() => new Set());
   const [anchorId, setAnchorId] = useState<string | null>(null);
+  // 이름 검색어. 이름만 본다(문항 내용 검색이 아니다). 섹션을 바꾸면 비운다.
+  const [query, setQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadTargetRef = useRef<string | null>(null);
   // 고무줄: 스크롤 컨테이너 + 진행 중 세션 + 화면에 그릴 사각형.
@@ -95,10 +103,27 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const [marqueeRect, setMarqueeRect] = useState<Rect | null>(null);
 
   const isNote = section === 'note';
-  const roots = useMemo(() => buildTree(nodes), [nodes]);
+  const allRoots = useMemo(() => buildTree(nodes), [nodes]);
+  // null = 검색어 없음(전체 표시). 빈 Set = 일치 없음.
+  const matchedIds = useMemo(() => matchNodeIds(nodes, query), [nodes, query]);
+  const roots = useMemo(() => filterTreeItems(allRoots, matchedIds), [allRoots, matchedIds]);
+  const searching = matchedIds != null;
+  /**
+   * 검색 중에는 결과가 보이도록 남은 폴더를 전부 펼쳐 그린다.
+   * 스토어의 `expanded` 는 건드리지 않으므로, 검색어를 지우면 이전 펼침 상태가 그대로 돌아온다.
+   */
+  const effectiveExpanded = useMemo(() => {
+    if (matchedIds == null) return expanded;
+    const opened: Record<string, boolean> = { ...expanded };
+    for (const id of matchedIds) opened[id] = true;
+    return opened;
+  }, [expanded, matchedIds]);
   const highlightedId = isNote ? selectedNoteId : selectedFileId;
   // 범위 선택은 "화면에 보이는 순서" 기준이다(접힌 폴더의 자식은 제외).
-  const visibleIds = useMemo(() => visibleNodeIds(roots, expanded), [roots, expanded]);
+  const visibleIds = useMemo(
+    () => visibleNodeIds(roots, effectiveExpanded),
+    [roots, effectiveExpanded],
+  );
   // 삭제·이동으로 사라진 id 가 선택에 남으면 개수 표시가 어긋난다. 렌더 중 걸러 낸다.
   const selectedIds = useMemo(() => {
     const alive = new Set(nodes.map((node) => node.id));
@@ -110,6 +135,13 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const clearSelection = () => {
     setPickedIds(new Set());
     setAnchorId(null);
+  };
+
+  // 섹션이 바뀌면 트리가 통째로 바뀐다. 이전 섹션의 검색어를 끌고 가지 않는다.
+  const switchSection = (next: typeof section) => {
+    clearSelection();
+    setQuery('');
+    void setSection(next);
   };
 
   const handleRowClick = (event: MouseEvent, item: TreeItem) => {
@@ -312,23 +344,11 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     <aside className="relative flex h-full w-full min-w-0 flex-col border-r border-slate-200 bg-white">
       {/* 섹션 전환 탭 */}
       <div role="tablist" aria-label="좌측 섹션" className="flex border-b border-slate-200">
-        {/* 섹션이 바뀌면 트리가 통째로 바뀌므로 선택을 버린다. */}
-        <SectionTab
-          active={section === 'exam'}
-          onClick={() => {
-            clearSelection();
-            void setSection('exam');
-          }}
-        >
+        {/* 섹션이 바뀌면 트리가 통째로 바뀌므로 선택과 검색어를 버린다. */}
+        <SectionTab active={section === 'exam'} onClick={() => switchSection('exam')}>
           시험지
         </SectionTab>
-        <SectionTab
-          active={section === 'note'}
-          onClick={() => {
-            clearSelection();
-            void setSection('note');
-          }}
-        >
+        <SectionTab active={section === 'note'} onClick={() => switchSection('note')}>
           오답노트
         </SectionTab>
       </div>
@@ -361,6 +381,38 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
           ) : null}
         </div>
       </header>
+
+      {/* 이름 검색. 폴더·시험지·오답노트 이름만 본다. */}
+      <div className="border-b border-slate-200 px-3 py-2">
+        <div className="flex items-center gap-1.5">
+          <input
+            type="search"
+            value={query}
+            aria-label={isNote ? '오답노트 이름 검색' : '시험지 이름 검색'}
+            placeholder="이름으로 찾기"
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              // Esc 로 지운다. 브라우저 기본 동작(type=search 초기화)과 겹쳐도 결과는 같다.
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                setQuery('');
+              }
+            }}
+            className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-[12px] text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          />
+          {query === '' ? null : (
+            <button
+              type="button"
+              onClick={() => setQuery('')}
+              aria-label="검색어 지우기"
+              title="검색어 지우기 (Esc)"
+              className="shrink-0 rounded px-1.5 py-0.5 text-[12px] text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
 
       {pendingOp ? (
         <p className="border-b border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500">
@@ -425,6 +477,12 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
             message={treeError ?? '목록을 불러오지 못했습니다.'}
             onRetry={() => void loadTree()}
           />
+        ) : searching && roots.length === 0 ? (
+          <EmptyState
+            title="검색 결과가 없습니다"
+            description="이름의 일부만 입력해도 찾습니다. 문항 내용은 검색하지 않습니다."
+            icon="🔍"
+          />
         ) : roots.length === 0 ? (
           isNote ? (
             <EmptyState
@@ -445,7 +503,8 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
               <TreeRow
                 key={item.node.id}
                 item={item}
-                expanded={expanded}
+                expanded={effectiveExpanded}
+                query={query}
                 selectedFileId={highlightedId}
                 selectedIds={selectedIds}
                 dragOverId={dragOverId}
