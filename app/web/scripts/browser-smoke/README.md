@@ -74,6 +74,30 @@ cp scripts/browser-smoke/smoke.mjs tmp/pw/ && cd tmp/pw && BASE=http://127.0.0.1
    `node_modules` 만 junction 으로 연결한다(`mklink /J node_modules ..\..\node_modules`).
    지울 때는 `rmdir node_modules` 로 junction 을 먼저 끊어야 실제 node_modules 가 안 지워진다.
 
+## 좌측 트리 끌기 (4차)
+
+| 파일 | 확인 내용 | 주의 |
+|---|---|---|
+| `tree-drag.mjs` | 들여쓰기 여백에서 `dragstart` 가 뜨는지 / 끌기 뒤 click 이 따라오는지 / 파일 행 위 드롭이 최상위로 튀는지 / 끌기 상태(삭제 영역·반투명)가 남는지 / 빈 공간 클릭으로 선택이 풀리는지 | **Windows 전용.** 목 모드 dev 서버가 필요하다. AI 호출 없음 |
+
+```bash
+NEXT_PUBLIC_MOCK=1 npx next dev -p 3101      # 다른 터미널
+cp scripts/browser-smoke/tree-drag.mjs tmp/pw/ && cd tmp/pw && BASE=http://127.0.0.1:3101 node tree-drag.mjs
+```
+
+⚠️ 이 스크립트는 Playwright 의 합성 입력이 아니라 **진짜 OS 마우스 입력**(Win32
+`SetCursorPos`/`mouse_event`)으로 창을 조작한다. 실제 커서가 움직이므로 도는 동안
+마우스·키보드를 만지면 안 된다. 창을 띄워야 하므로 `headless: false` 고정이다.
+
+네이티브 HTML5 끌기는 jsdom 에서 아예 일어나지 않는다(`draggable` 은 그려지지만
+`dragstart` 를 브라우저가 만들어 주지 않는다). "들여쓰기 여백에서 끌기가 시작되는가"
+같은 질문은 **여기서만** 답할 수 있다. 알아 둘 것 두 가지:
+
+- Chromium 의 끌기 임계값은 **5px** 이다. 4px 이하로 움직였다 놓으면 `dragstart` 없이
+  click 이 된다(= 파일이 열린다). 이건 브라우저 동작이라 앱에서 바꿀 수 없다.
+- 끌기가 도는 동안 **키 입력은 페이지로 오지 않는다.** Esc 취소는 `keydown` 이 아니라
+  브라우저가 주는 `dragend` 로 감지해야 한다.
+
 ## 오답노트/스레드 스크립트 (3차)
 
 | 파일 | 확인 내용 | 주의 |

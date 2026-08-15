@@ -113,19 +113,26 @@ export function TreeRow(props: TreeRowProps) {
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     const files = Array.from(event.dataTransfer.files ?? []);
     const draggedIds = parseDragIds(event.dataTransfer.getData(NODE_MIME));
-    // 노드 이동은 폴더 위에서만 의미가 있다. 파일 업로드는 어느 행이든 받는다.
-    if (files.length === 0 && !isFolder) return;
+    // 우리가 아는 것이 아무것도 없는 드롭은 그냥 흘려보낸다.
+    if (files.length === 0 && draggedIds.length === 0) return;
 
     event.preventDefault();
     event.stopPropagation();
     setDragOverId(null);
     setDrag(null);
 
+    // 파일 업로드는 어느 행이든 받는다(파일 위에 놓으면 그 파일이 든 폴더로).
     if (files.length > 0) {
       onDropFiles(files, node.id);
       return;
     }
-    if (draggedIds.length > 0 && isFolder) onDropNode(draggedIds, node.id);
+    /*
+     * 노드 이동은 **폴더 행 위에서만** 뜻이 있다. 파일 행이나 끌고 있는 자기
+     * 자신 위에 놓은 것은 "아무 데도 안 놓은 것" 으로 본다 — 여기서 막지 않고
+     * 컨테이너까지 올려보내면 그쪽이 "빈 곳에 놓았다" 로 받아 최상위로 옮겨
+     * 버린다(5px 만 헛끌어도 파일이 최상위로 튀어나갔다).
+     */
+    if (isFolder && !isDragging) onDropNode(draggedIds, node.id);
   };
 
   return (

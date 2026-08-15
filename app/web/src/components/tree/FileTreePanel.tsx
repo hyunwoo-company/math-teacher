@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import clsx from 'clsx';
 import { useWorkspace } from '@/store/workspace';
 import {
@@ -11,6 +11,14 @@ import {
   type TreeItem,
 } from '@/lib/tree';
 import { autoScrollSpeed } from '@/lib/tree-autoscroll';
+import {
+  armClickGuard,
+  isBlankClick,
+  isDragCancelKey,
+  shouldSuppressClick,
+  NO_CLICK_GUARD,
+  type ClickGuard,
+} from '@/lib/tree-drag';
 import { resolveDropTarget, resolveUploadTarget } from '@/lib/upload-target';
 import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { ContextMenu, type ContextMenuItem } from '@/components/tree/ContextMenu';
@@ -90,7 +98,9 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const [dialog, setDialog] = useState<DialogState>({ kind: 'none' });
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [rootDragOver, setRootDragOver] = useState(false);
-  const [drag, setDrag] = useState<DragState | null>(null);
+  const [drag, setDragState] = useState<DragState | null>(null);
+  // 끌기 직후 따라오는 click 을 한 번 무시하기 위한 표식. 렌더에 쓰지 않으므로 ref.
+  const clickGuardRef = useRef<ClickGuard>(NO_CLICK_GUARD);
   // 드래그 삭제 영역 위에 올라와 있는지. 영역 자체는 드래그 중에만 그린다.
   const [trashOver, setTrashOver] = useState(false);
   // 다중 선택(이동용). 열려 있는 파일(selectedFileId)과는 다른 개념이다.
@@ -136,9 +146,29 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     return kept;
   }, [nodes, pickedIds]);
 
-  const clearSelection = () => {
+  // setState 는 항상 같은 함수라 의존성이 없다. 이벤트 리스너에서 그대로 쓸 수 있게 고정한다.
+  const clearSelection = useCallback(() => {
     setPickedIds(new Set());
     setAnchorId(null);
+  }, []);
+
+  /** 끌기 흔적을 전부 지운다(끝났거나 취소됐을 때). 선택은 건드리지 않는다. */
+  const cancelDrag = useCallback(() => {
+    setDragState(null);
+    setDragOverId(null);
+    setRootDragOver(false);
+    setTrashOver(false);
+  }, []);
+
+  /**
+   * 행이 알려 오는 끌기 시작/끝. 그때마다 시각을 찍어 둔다.
+   *
+   * 끌기가 끝난 직후에 click 이 따라오는 브라우저가 있다. 그대로 두면 옮기려고
+   * 끌었을 뿐인데 파일이 열린다. {@link shouldSuppressClick} 이 그 한 번을 막는다.
+   */
+  const setDrag = (next: DragState | null) => {
+    clickGuardRef.current = armClickGuard(Date.now());
+    setDragState(next);
   };
 
   // 섹션이 바뀌면 트리가 통째로 바뀐다. 이전 섹션의 검색어를 끌고 가지 않는다.
@@ -149,6 +179,12 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   };
 
   const handleRowClick = (event: MouseEvent, item: TreeItem) => {
+    // 방금 끝난 끌기의 잔상 click 이면 아무 일도 일어나서는 안 된다
+    // (옮기려고 끌었을 뿐인데 파일이 열리는 것을 막는다).
+    if (shouldSuppressClick(clickGuardRef.current, Date.now())) {
+      clickGuardRef.current = NO_CLICK_GUARD;
+      return;
+    }
     const modifiers = { toggle: event.ctrlKey || event.metaKey, range: event.shiftKey };
     const result = nextSelection({
       current: selectedIds,
@@ -200,9 +236,15 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     if (!marqueeOn) return;
 
     const finish = () => {
+      const session = marqueeRef.current;
       marqueeRef.current = null;
       setMarqueeOn(false);
       setMarqueeRect(null);
+      // 빈 공간을 끌지 않고 그냥 눌렀다 뗀 것 = "선택 해제".
+      // 끌기 흔적이 남아 있다면 그것도 여기서 확실히 지운다.
+      if (!isBlankClick(session)) return;
+      clearSelection();
+      cancelDrag();
     };
 
     const handleMove = (event: globalThis.MouseEvent) => {
@@ -239,7 +281,36 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
       window.removeEventListener('mousemove', handleMove);
       window.removeEventListener('mouseup', finish);
     };
-  }, [marqueeOn]);
+  }, [marqueeOn, cancelDrag, clearSelection]);
+
+  /**
+   * 끌기 상태의 마지막 안전장치.
+   *
+   * `dragend` 는 브라우저가 잘 주지만, 창 밖에서 끝난 끌기나 다른 창으로
+   * 포커스가 넘어간 경우까지 믿을 수는 없다. 상태가 남으면 삭제 영역이 계속
+   * 떠 있고 행이 반투명한 채로 굳는다. 여기서 통째로 지운다.
+   *
+   * Esc 는 선택까지 함께 푼다(끌던 것을 "없던 일로" 하는 동작).
+   */
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // 검색어 지우기·대화상자 닫기가 이미 처리한 Esc 는 건드리지 않는다.
+      if (!isDragCancelKey(event)) return;
+      cancelDrag();
+      clearSelection();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('blur', cancelDrag);
+    // 행·컨테이너의 onDrop 이 먼저 돌고 나서 여기로 올라온다(마지막 청소).
+    window.addEventListener('dragend', cancelDrag);
+    window.addEventListener('drop', cancelDrag);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('blur', cancelDrag);
+      window.removeEventListener('dragend', cancelDrag);
+      window.removeEventListener('drop', cancelDrag);
+    };
+  }, [cancelDrag, clearSelection]);
 
   /**
    * 드래그 중 가장자리 자동 스크롤.

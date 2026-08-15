@@ -188,4 +188,116 @@ describe('좌측 트리 드래그 여백·행 끌기', () => {
     expect(await screen.findByTestId('tree-marquee')).toBeInTheDocument();
     fireEvent.mouseUp(window);
   });
+
+  it('파일 행 위에 놓은 것은 "아무 데도 안 놓은 것" 이다 — 최상위로 튀지 않는다', async () => {
+    const user = await openWorkspace();
+    // 파일이 보이도록 폴더를 편다.
+    await user.click(screen.getByRole('treeitem', { name: /공통수학1/ }));
+    const fileRow = await screen.findByRole('treeitem', { name: /풍문고/ });
+
+    const target = screen.getByRole('treeitem', { name: /미적분/ });
+    expect(target).toHaveAttribute('aria-level', '2');
+
+    const dataTransfer = fakeDataTransfer();
+    fireEvent.dragStart(target, { dataTransfer });
+    fireEvent.drop(fileRow, { dataTransfer });
+
+    // 컨테이너까지 올라가면 "빈 곳에 놓았다" 로 해석되어 최상위로 옮겨진다.
+    // 이동은 시작하자마자 pendingOp 를 세우므로, 그것이 없다 = 아예 부르지 않았다.
+    expect(useWorkspace.getState().pendingOp).toBeNull();
+    await waitFor(() => expect(screen.queryByText(/여기에 놓으면 삭제/)).toBeNull());
+    expect(screen.getByRole('treeitem', { name: /미적분/ })).toHaveAttribute('aria-level', '2');
+    expect(useWorkspace.getState().nodes.find((node) => node.id === 'folder-calculus')?.parent_id)
+      .toBe('folder-2026-1');
+  });
+});
+
+describe('좌측 트리 끌기 뒤처리', () => {
+  it('Esc 를 누르면 끌기 표시도 선택도 사라진다', async () => {
+    const user = await openWorkspace();
+    await user.click(screen.getByRole('treeitem', { name: /2026-1학기/ }));
+    await user.keyboard('{Control>}');
+    await user.click(screen.getByRole('treeitem', { name: /모의고사/ }));
+    await user.keyboard('{/Control}');
+    expect(await screen.findByText(/2개 선택됨/)).toBeInTheDocument();
+
+    fireEvent.dragStart(screen.getByRole('treeitem', { name: /모의고사/ }), {
+      dataTransfer: fakeDataTransfer(),
+    });
+    expect(await screen.findByText(/여기에 놓으면 삭제/)).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/여기에 놓으면 삭제/)).toBeNull();
+      expect(screen.queryByText(/2개 선택됨/)).toBeNull();
+    });
+  });
+
+  it('빈 공간을 그냥 클릭하면 선택과 끌기 상태가 풀린다', async () => {
+    const user = await openWorkspace();
+    await user.click(screen.getByRole('treeitem', { name: /2026-1학기/ }));
+    await user.keyboard('{Control>}');
+    await user.click(screen.getByRole('treeitem', { name: /모의고사/ }));
+    await user.keyboard('{/Control}');
+    expect(await screen.findByText(/2개 선택됨/)).toBeInTheDocument();
+
+    fireEvent.dragStart(screen.getByRole('treeitem', { name: /모의고사/ }), {
+      dataTransfer: fakeDataTransfer(),
+    });
+    expect(await screen.findByText(/여기에 놓으면 삭제/)).toBeInTheDocument();
+
+    // 끌지 않고 빈 공간을 눌렀다 뗀다 = 그냥 클릭.
+    fireEvent.mouseDown(screen.getByTestId('tree-tail-space'), {
+      button: 0,
+      clientX: 4,
+      clientY: 60,
+    });
+    fireEvent.mouseUp(window);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/2개 선택됨/)).toBeNull();
+      expect(screen.queryByText(/여기에 놓으면 삭제/)).toBeNull();
+    });
+  });
+
+  it('창이 포커스를 잃어도 끌기 표시가 남지 않는다', async () => {
+    await openWorkspace();
+    fireEvent.dragStart(screen.getByRole('treeitem', { name: /모의고사/ }), {
+      dataTransfer: fakeDataTransfer(),
+    });
+    expect(await screen.findByText(/여기에 놓으면 삭제/)).toBeInTheDocument();
+
+    fireEvent.blur(window);
+
+    await waitFor(() => expect(screen.queryByText(/여기에 놓으면 삭제/)).toBeNull());
+  });
+
+  it('끌기가 끝난 직후 따라오는 click 은 무시한다(잠시 뒤의 클릭은 통한다)', async () => {
+    await openWorkspace();
+    const row = screen.getByRole('treeitem', { name: /공통수학1/ });
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+
+    const dataTransfer = fakeDataTransfer();
+    fireEvent.dragStart(row, { dataTransfer });
+    fireEvent.dragEnd(row, { dataTransfer });
+    // 브라우저에 따라 끌기 뒤에 click 이 따라온다. 그대로 두면 폴더가 열린다.
+    fireEvent.click(row);
+    expect(screen.getByRole('treeitem', { name: /공통수학1/ })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+
+    // 표식은 시간이 지나면 저절로 풀린다 — 다음 클릭까지 먹어 버리면 안 된다.
+    await new Promise((resolve) => {
+      setTimeout(resolve, 300);
+    });
+    fireEvent.click(screen.getByRole('treeitem', { name: /공통수학1/ }));
+    await waitFor(() =>
+      expect(screen.getByRole('treeitem', { name: /공통수학1/ })).toHaveAttribute(
+        'aria-expanded',
+        'true',
+      ),
+    );
+  });
 });
