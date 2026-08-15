@@ -1,0 +1,935 @@
+<title>문항 온톨로지 설계</title>
+
+<style>
+/* ── 토큰: 라이트가 기본, 다크는 토큰만 재정의 ───────────────────── */
+:root {
+  --paper:      #FAFBFC;
+  --surface:    #FFFFFF;
+  --surface-2:  #F1F4F8;
+  --ink:        #161D26;
+  --ink-2:      #46566B;
+  --ink-3:      #7A8899;
+  --rule:       #DCE3EB;
+  --rule-soft:  #EAEFF4;
+
+  --indigo:     #2D4A8A;
+  --indigo-bg:  #E8EEF9;
+  --vermilion:  #B8303F;
+  --verm-bg:    #FBE9EA;
+  --teal:       #0C6E62;
+  --teal-bg:    #E2F1EE;
+
+  --grid:       rgba(45, 74, 138, .07);
+
+  --serif: "Nanum Myeongjo", "Noto Serif KR", Batang, "Apple SD Gothic Neo", Georgia, serif;
+  --sans:  "Pretendard Variable", Pretendard, "Malgun Gothic", -apple-system, "Segoe UI", sans-serif;
+  --mono:  "JetBrains Mono", "Cascadia Mono", Consolas, D2Coding, "Courier New", monospace;
+
+  --measure: 68ch;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:     #10151C;
+    --surface:   #161C25;
+    --surface-2: #1D2530;
+    --ink:       #E6ECF3;
+    --ink-2:     #A4B2C2;
+    --ink-3:     #74828F;
+    --rule:      #2A3440;
+    --rule-soft: #212A35;
+
+    --indigo:    #8FAEEA;
+    --indigo-bg: #1A2438;
+    --vermilion: #E88A94;
+    --verm-bg:   #2E1A1D;
+    --teal:      #5FC7B6;
+    --teal-bg:   #122B27;
+
+    --grid:      rgba(143, 174, 234, .07);
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper:     #10151C;
+  --surface:   #161C25;
+  --surface-2: #1D2530;
+  --ink:       #E6ECF3;
+  --ink-2:     #A4B2C2;
+  --ink-3:     #74828F;
+  --rule:      #2A3440;
+  --rule-soft: #212A35;
+
+  --indigo:    #8FAEEA;
+  --indigo-bg: #1A2438;
+  --vermilion: #E88A94;
+  --verm-bg:   #2E1A1D;
+  --teal:      #5FC7B6;
+  --teal-bg:   #122B27;
+
+  --grid:      rgba(143, 174, 234, .07);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.72;
+  -webkit-font-smoothing: antialiased;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.wrap {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 24px 120px;
+}
+
+/* ── 표지 ──────────────────────────────────────────────────────── */
+.cover {
+  position: relative;
+  padding: 88px 0 56px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 56px;
+}
+.cover::before {
+  content: "";
+  position: absolute;
+  inset: 0 -100vw;
+  background-image:
+    repeating-linear-gradient(to right, var(--grid) 0 1px, transparent 1px 28px),
+    repeating-linear-gradient(to bottom, var(--grid) 0 1px, transparent 1px 28px);
+  mask-image: linear-gradient(to bottom, #000 0%, transparent 78%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, transparent 78%);
+  pointer-events: none;
+}
+.cover > * { position: relative; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--indigo);
+  margin: 0 0 20px;
+}
+h1 {
+  font-family: var(--serif);
+  font-size: clamp(34px, 6vw, 54px);
+  line-height: 1.24;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  margin: 0 0 20px;
+  text-wrap: balance;
+}
+.thesis {
+  font-family: var(--serif);
+  font-size: clamp(17px, 2.4vw, 21px);
+  line-height: 1.66;
+  color: var(--ink-2);
+  max-width: 46ch;
+  margin: 0 0 28px;
+}
+.meta {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-3);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+}
+
+/* ── 섹션 ──────────────────────────────────────────────────────── */
+section { margin-bottom: 68px; }
+
+h2 {
+  font-family: var(--serif);
+  font-size: 27px;
+  line-height: 1.35;
+  font-weight: 700;
+  margin: 0 0 8px;
+  padding-top: 8px;
+  text-wrap: balance;
+}
+h2 .num {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--indigo);
+  letter-spacing: .08em;
+  display: block;
+  margin-bottom: 10px;
+}
+h3 {
+  font-family: var(--sans);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.5;
+  margin: 36px 0 10px;
+  color: var(--ink);
+}
+h4 {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 28px 0 8px;
+}
+
+p { margin: 0 0 16px; max-width: var(--measure); }
+ul, ol { margin: 0 0 16px; padding-left: 22px; max-width: var(--measure); }
+li { margin-bottom: 7px; }
+li::marker { color: var(--ink-3); }
+
+strong { font-weight: 700; color: var(--ink); }
+a { color: var(--indigo); text-underline-offset: 3px; }
+a:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--indigo);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: .875em;
+  background: var(--surface-2);
+  border: 1px solid var(--rule-soft);
+  padding: .08em .36em;
+  border-radius: 3px;
+  word-break: break-all;
+}
+
+/* ── 코드블록 ──────────────────────────────────────────────────── */
+.code {
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 0 0 20px;
+}
+.code pre {
+  margin: 0;
+  padding: 16px 18px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.68;
+  color: var(--ink-2);
+  white-space: pre;
+}
+.code .cap {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+}
+
+/* ── 인용/경고 블록 ────────────────────────────────────────────── */
+.callout {
+  border-left: 3px solid var(--indigo);
+  background: var(--indigo-bg);
+  padding: 16px 20px;
+  border-radius: 0 4px 4px 0;
+  margin: 0 0 20px;
+}
+.callout.warn { border-left-color: var(--vermilion); background: var(--verm-bg); }
+.callout.good { border-left-color: var(--teal);      background: var(--teal-bg); }
+.callout p:last-child { margin-bottom: 0; }
+.callout .tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  display: block;
+  margin-bottom: 6px;
+  color: var(--indigo);
+}
+.callout.warn .tag { color: var(--vermilion); }
+.callout.good .tag { color: var(--teal); }
+
+/* ── 표 ────────────────────────────────────────────────────────── */
+.tablewrap { overflow-x: auto; margin: 0 0 22px; border: 1px solid var(--rule); border-radius: 4px; }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; min-width: 520px; }
+th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; line-height: 1.6; }
+thead th {
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--rule);
+}
+tbody tr:last-child td { border-bottom: none; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ── 다이어그램 ────────────────────────────────────────────────── */
+figure { margin: 0 0 24px; }
+figure svg { display: block; width: 100%; height: auto; }
+figcaption {
+  font-size: 13px;
+  color: var(--ink-3);
+  margin-top: 10px;
+  line-height: 1.6;
+  max-width: var(--measure);
+}
+.svgbox {
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 22px 18px;
+  overflow-x: auto;
+}
+
+/* ── 층위 카드 ─────────────────────────────────────────────────── */
+.layers { display: flex; flex-direction: column; gap: 12px; margin: 0 0 24px; }
+.layer {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 18px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 16px 18px;
+}
+.layer .lid {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--indigo);
+  padding-top: 2px;
+}
+.layer h3 { margin: 0 0 6px; font-size: 16px; }
+.layer p  { margin: 0 0 6px; font-size: 14.5px; color: var(--ink-2); }
+.layer p:last-child { margin-bottom: 0; }
+.layer.key { border-color: var(--indigo); box-shadow: inset 3px 0 0 var(--indigo); }
+
+/* ── 로드맵 ────────────────────────────────────────────────────── */
+.phase {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 20px;
+  padding: 18px 0;
+  border-top: 1px solid var(--rule-soft);
+}
+.phase:first-of-type { border-top: 1px solid var(--rule); }
+.phase .p-id {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: .06em;
+  color: var(--indigo);
+  padding-top: 3px;
+}
+.phase h3 { margin: 0 0 5px; font-size: 16px; }
+.phase p  { margin: 0; font-size: 14.5px; color: var(--ink-2); }
+.phase .gain {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--teal);
+  border: 1px solid var(--teal);
+  border-radius: 3px;
+  padding: 2px 8px;
+  line-height: 1.5;
+}
+
+/* ── 출처 ──────────────────────────────────────────────────────── */
+.sources { font-size: 14px; }
+.sources li { margin-bottom: 9px; color: var(--ink-2); }
+
+hr.rule { border: none; border-top: 1px solid var(--rule); margin: 0 0 44px; }
+
+@media (max-width: 600px) {
+  .wrap { padding: 0 18px 90px; }
+  .cover { padding-top: 56px; }
+  .layer, .phase { grid-template-columns: 1fr; gap: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+
+<div class="wrap">
+
+<header class="cover">
+  <p class="eyebrow">기술 설계 리서치 · math-teacher</p>
+  <h1>문항 온톨로지 설계</h1>
+  <p class="thesis">
+    시험지 PDF를 올리면 각 문항에 대해 유사 문항을 보여주는 서비스를 만들기 위해,
+    “유형”이라는 개념을 데이터로 존재하게 만드는 방법.
+  </p>
+  <p class="meta">
+    <span>2026-08-15</span>
+    <span>대상 범위 · 중1 ~ 고3 수학 전 과정</span>
+    <span>근거 · 논문 8건 + 코드베이스 실측</span>
+  </p>
+</header>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">진단</span>“조건 변형”이 안 되는 건 프롬프트 문제가 아니다</h2>
+
+  <p>
+    현재 변형 기능은 <code>숫자 / 조건 / 숫자+조건</code> 세 가지 모드를 제공한다.
+    이 중 <strong>조건 변형만 유독 결과가 나쁜 데에는 구조적 이유가 두 개</strong> 있다.
+  </p>
+
+  <div class="code">
+    <div class="cap">app/core/prompts.py:287 — 현재 condition 모드의 실제 지시문</div>
+<pre>"condition": (
+    "변형 방식: 수치의 규모는 원본과 비슷하게 유지하되, **조건·설정·상황(문맥)만** "
+    "바꾸십시오. 예를 들어 소재나 등장 요소, 주어진 조건의 형태를 바꾸되 묻는 "
+    "개념과 난이도는 그대로 두십시오."
+),</pre>
+  </div>
+
+  <h3>㉮ 수학 문항에서 “조건”은 문제 그 자체다</h3>
+  <p>
+    숫자 변형은 잘 된다. 바꿀 대상(상수·계수·좌표)이 문법적으로 특정되기 때문이다.
+    반면 “조건”을 바꾸면 갈림길이 둘뿐이다 — <strong>유형이 바뀌거나</strong>(원치 않음),
+    <strong>소재만 갈아끼운 껍데기 변형</strong>이 되거나(가치 없음).
+    지시문이 애매한 게 아니라 <em>지시 대상</em>이 애매하다.
+  </p>
+
+  <h3>㉯ “유형 유지”를 검증할 수단이 시스템에 없다</h3>
+  <p>
+    프롬프트가 “같은 유형·유사 난이도”라고 스무 번 말해도,
+    <strong>‘유형’이라는 것이 데이터로 존재하지 않는다.</strong>
+    <code>variants</code> 테이블에도 <code>text</code>만 있고 유형 식별자가 없어,
+    생성물이 원본과 같은 유형인지 아무도 확인하지 않는다.
+    LLM이 암묵적으로 잡고 암묵적으로 지키므로 표류한다.
+  </p>
+
+  <div class="callout">
+    <span class="tag">그래서</span>
+    <p>
+      온톨로지 도입은 “유사 문항 추천”이라는 신기능만 만드는 것이 아니다.
+      원본 태그를 생성기에 명시 입력으로 주고, 생성물을 다시 태깅해 태그가 일치하는지
+      자동 검증할 수 있게 되므로 <strong>기존 변형 기능의 결함 자체를 메운다.</strong>
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">근거</span>리서치가 말해주는 것</h2>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th style="width:44%">발견</th><th style="width:23%">출처</th><th>이 프로젝트에 대한 함의</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>문제 텍스트를 그대로 문장 임베딩하면 유사도 판정 <strong>75%</strong>, 개념 추상화를 한 단계 거치면 <strong>96.88%</strong></td>
+          <td>Prob2Vec</td>
+          <td><strong>“문항 텍스트 임베딩 → 코사인 유사도”는 하면 안 되는 접근이다.</strong> 추상화 층이 필수</td>
+        </tr>
+        <tr>
+          <td>GPT-4급 zero-shot 개념 태깅 정확도 ~90%, 그러나 F1은 0.62 수준</td>
+          <td>Automate Knowledge Concept Tagging</td>
+          <td>LLM 태깅은 쓸 만하지만 <strong>무검수 자동화는 불가</strong>. 신뢰도·근거를 함께 받아야 함</td>
+        </tr>
+        <tr>
+          <td>태깅 실패의 1번 원인은 <strong>개념 정의의 모호함</strong></td>
+          <td>동상</td>
+          <td>유형은 이름만 두면 실패한다. 정의문 + 포함/제외 경계 + 대표 예시가 한 세트</td>
+        </tr>
+        <tr>
+          <td>LLM으로 발견한 KC 군집이 <strong>전문가 설계 모델보다 학생 응답 예측이 좋았다</strong> (item-RMSE p=.0035)</td>
+          <td>KCluster</td>
+          <td>유형 사전을 100% 손으로 만들 필요 없다. 씨앗 + 자동 성장이 정당하다</td>
+        </tr>
+        <tr>
+          <td>코퍼스 1,000건 미만이면 하이브리드 검색·리랭커는 과잉</td>
+          <td>Hybrid Search 2026</td>
+          <td>초기에는 SQL 필터로 충분하다. 임베딩은 뒤로 미뤄도 된다</td>
+        </tr>
+        <tr>
+          <td>GraphRAG는 <strong>증분 갱신을 지원하지 않아</strong> 주기적 전체 재구축이 필요</td>
+          <td>Microsoft GraphRAG</td>
+          <td>깊은 계층 그래프를 만들면 문항이 추가될 때마다 재구축 비용이 생긴다 → 얕게 설계해야</td>
+        </tr>
+        <tr>
+          <td>표면 유사도보다 <strong>풀이 경로·전략 표상</strong>이 의미 있는 변별을 준다</td>
+          <td>Solution Strategies / RefGrader</td>
+          <td>이 앱은 이미 문항별 풀이를 저장한다 — 유사도 재료가 공짜로 있다</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout good">
+    <span class="tag">시장 빈틈</span>
+    <p>
+      콴다조교의 “AI 유사문제”는 <strong>DB 검색이 아니라 생성형</strong>이고,
+      안내문에 “최종 사용 전 수학적 오류 확인 필요”가 명시돼 있다.
+      즉 시장 1위도 <em>검증된 실물 문항 추천</em>은 하지 못하고 있다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">설계 1</span>온톨로지 — RDF/OWL이 아니라 “얇은 앵커 + 두꺼운 유도층”</h2>
+
+  <p>
+    온톨로지라 하면 그래프 DB를 떠올리기 쉬운데, 필요한 건 그게 아니다.
+    <strong>다면 분류(faceted taxonomy)</strong>는 중첩이 아니라 가산적이라
+    조합 폭발 없이 다차원 필터가 된다. 4개 층으로 나눈다.
+  </p>
+
+  <figure>
+    <div class="svgbox">
+      <svg viewBox="0 0 700 300" role="img" aria-label="4층 온톨로지 구조도: L0 성취기준(고정), L1 유형(자동 성장), L2 풀이 전략(임베딩), L3 표면 속성(사용자 다이얼)">
+        <defs>
+          <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="currentColor" opacity=".5"/>
+          </marker>
+        </defs>
+        <g font-family="var(--mono)" font-size="11" fill="currentColor">
+
+          <!-- L0 -->
+          <rect x="20" y="18" width="500" height="52" rx="4" fill="var(--indigo-bg)" stroke="var(--indigo)" stroke-width="1.5"/>
+          <text x="36" y="40" font-size="12" font-weight="600" fill="var(--indigo)">L0 · 커리큘럼 앵커</text>
+          <text x="36" y="58" fill="var(--ink-2)">2022 개정 성취기준 코드 · 폐쇄형 · 국가가 이미 만들어 둠</text>
+          <text x="540" y="40" fill="var(--ink-3)">수백 개</text>
+          <text x="540" y="58" fill="var(--ink-3)">고정</text>
+
+          <!-- L1 -->
+          <rect x="20" y="82" width="500" height="62" rx="4" fill="var(--surface-2)" stroke="var(--indigo)" stroke-width="2.5"/>
+          <text x="36" y="104" font-size="12" font-weight="600" fill="var(--indigo)">L1 · 문제 유형 &nbsp;★ 핵심</text>
+          <text x="36" y="122" fill="var(--ink-2)">유형 진술문(canonical statement) · 반개방형</text>
+          <text x="36" y="138" fill="var(--ink-2)">문항이 들어올 때마다 자동으로 자란다</text>
+          <text x="540" y="104" fill="var(--ink-3)">1,500~4,000개</text>
+          <text x="540" y="122" fill="var(--ink-3)">자동 성장</text>
+
+          <!-- L2 -->
+          <rect x="20" y="156" width="500" height="52" rx="4" fill="var(--teal-bg)" stroke="var(--teal)" stroke-width="1.5"/>
+          <text x="36" y="178" font-size="12" font-weight="600" fill="var(--teal)">L2 · 풀이 전략 지문</text>
+          <text x="36" y="196" fill="var(--ink-2)">solutions 테이블에서 추출한 단계 리스트 → 임베딩 대상</text>
+          <text x="540" y="178" fill="var(--ink-3)">문항당 1벌</text>
+          <text x="540" y="196" fill="var(--ink-3)">이미 보유</text>
+
+          <!-- L3 -->
+          <rect x="20" y="220" width="500" height="52" rx="4" fill="var(--verm-bg)" stroke="var(--vermilion)" stroke-width="1.5"/>
+          <text x="36" y="242" font-size="12" font-weight="600" fill="var(--vermilion)">L3 · 표면 속성 (facet)</text>
+          <text x="36" y="260" fill="var(--ink-2)">형식 · 배점 · 시각요소 · 맥락 · 계산량 · 출처</text>
+          <text x="540" y="242" fill="var(--ink-3)">유사도 아님</text>
+          <text x="540" y="260" fill="var(--ink-3)">사용자 다이얼</text>
+
+          <!-- 연결선 -->
+          <line x1="270" y1="70" x2="270" y2="80" stroke="currentColor" opacity=".35" marker-end="url(#ar)"/>
+          <line x1="270" y1="144" x2="270" y2="154" stroke="currentColor" opacity=".35" marker-end="url(#ar)"/>
+          <line x1="270" y1="208" x2="270" y2="218" stroke="currentColor" opacity=".35" marker-end="url(#ar)"/>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      위로 갈수록 안정적이고 사람이 관리하며, 아래로 갈수록 자동 생성되고 자주 바뀐다.
+      L0만으로는 “유사”가 성립하지 않고, L1 없이 L2만 쓰면 설명이 불가능하다.
+    </figcaption>
+  </figure>
+
+  <div class="layers">
+    <div class="layer">
+      <div class="lid">L0</div>
+      <div>
+        <h3>커리큘럼 앵커 — 폐쇄형, 고정</h3>
+        <p>2022 개정 교육과정 성취기준 코드. 중학교는 <code>[9수01-01]</code>, 고등 공통수학1은 <code>[10공수1-02-03]</code> 형식이다. 공통수학1만 4영역 19개로 실측 확인했다.</p>
+        <p><strong>장점</strong> — 외부 표준이라 안정적이고, 선생님이 이미 쓰는 말이며, “2단원까지 출제” 같은 시험범위 필터에 직결된다. <strong>한계</strong> — 너무 굵다. 근과 계수의 관계 하나에 수백 문항이 들어간다.</p>
+      </div>
+    </div>
+
+    <div class="layer key">
+      <div class="lid">L1</div>
+      <div>
+        <h3>문제 유형 — 시스템이 스스로 키우는 층</h3>
+        <p>“유사”의 실제 단위다. 한국 현장이 이미 쓰는 단위이기도 하다(문제집 <em>유형 07: 근과 계수의 관계를 이용한 대칭식의 값</em>).</p>
+        <p><strong>중고 전과목이면 유형은 1,500~4,000개 규모</strong>다. 사람이 손으로 못 만든다. 그래서 미리 만들지 않고 <strong>문항이 들어올 때 자라게 한다</strong> — 다음 절이 그 방법이다.</p>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="lid">L2</div>
+      <div>
+        <h3>풀이 전략 지문 — 이 앱의 구조적 우위</h3>
+        <p>같은 유형이어도 학생이 실제로 하는 일이 다르면 유사하지 않다. <code>solutions</code> 테이블에 이미 문항별 풀이가 있으므로, 발문 표면이 아니라 <strong>풀이 단계</strong>에서 유사도를 잴 재료가 공짜로 있는 상태다.</p>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="lid">L3</div>
+      <div>
+        <h3>표면 속성 — 유사도가 아니라 사용자 다이얼</h3>
+        <p>문항형식 · 배점 · 시각요소 · 맥락(순수/실생활) · 조건상자 유무 · 계산량 · 출처.</p>
+        <p><strong>이 층이 “조건 변형”의 애매함을 직접 해소한다.</strong> 뜻이 불분명한 3택 대신, <em>무엇을 고정하고 무엇을 풀지</em>를 명시적으로 고르게 한다.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">설계 2</span>유형 진술문 — 온톨로지를 자동으로 자라게 하는 장치</h2>
+
+  <p>
+    중고 전과목에서 유형 사전을 미리 손으로 만드는 것은 불가능하다.
+    그렇다고 순수 임베딩으로 가면 Prob2Vec의 75%에 갇힌다.
+    해법은 <strong>LLM이 각 문항을 정규화된 한 문장으로 환원하게 하고, 그 문장을 유형의 정체성으로 삼는 것</strong>이다.
+  </p>
+
+  <div class="code">
+    <div class="cap">유형 진술문(canonical statement) — 태깅 출력의 핵심 필드</div>
+<pre>"이차방정식의 두 근에 대한 대칭식의 값을,
+ 근을 직접 구하지 않고 근과 계수의 관계로 구한다."</pre>
+  </div>
+
+  <p>이 한 문장이 네 가지 역할을 동시에 한다.</p>
+  <ul>
+    <li><strong>임베딩 대상</strong> — 원문이 아니라 이 문장을 임베딩한다. 이것이 Prob2Vec의 75%→96.88%를 만든 “추상화” 단계의 정체다.</li>
+    <li><strong>유형 노드의 이름이자 정의</strong> — 별도로 유형 이름을 짓지 않아도 된다.</li>
+    <li><strong>사람이 읽고 검수 가능</strong> — LLM F1이 0.62인 이상 검수 경로가 반드시 필요하다.</li>
+    <li><strong>“LLM 위키”의 페이지 제목</strong> — 유형 하나가 위키 문서 하나가 된다.</li>
+  </ul>
+
+  <h3>자라는 방식 — 온라인 군집화</h3>
+  <figure>
+    <div class="svgbox">
+      <svg viewBox="0 0 700 150" role="img" aria-label="문항 유입 시 유형 카탈로그가 자라는 흐름: 문항 → 진술문 생성 → 임베딩 최근접 → 임계값 이상이면 기존 유형 병합, 미만이면 신규 유형 후보">
+        <g font-family="var(--mono)" font-size="11">
+          <rect x="8"   y="52" width="104" height="44" rx="4" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="60" y="72" text-anchor="middle" fill="var(--ink)" font-size="11.5">새 문항</text>
+          <text x="60" y="87" text-anchor="middle" fill="var(--ink-3)" font-size="10">크롭+판독+풀이</text>
+
+          <rect x="140" y="52" width="112" height="44" rx="4" fill="var(--indigo-bg)" stroke="var(--indigo)"/>
+          <text x="196" y="72" text-anchor="middle" fill="var(--indigo)" font-size="11.5">진술문 생성</text>
+          <text x="196" y="87" text-anchor="middle" fill="var(--ink-3)" font-size="10">LLM · 구조화 출력</text>
+
+          <rect x="280" y="52" width="112" height="44" rx="4" fill="var(--surface-2)" stroke="var(--rule)"/>
+          <text x="336" y="72" text-anchor="middle" fill="var(--ink)" font-size="11.5">임베딩 최근접</text>
+          <text x="336" y="87" text-anchor="middle" fill="var(--ink-3)" font-size="10">기존 유형과 대조</text>
+
+          <rect x="428" y="14" width="152" height="46" rx="4" fill="var(--teal-bg)" stroke="var(--teal)"/>
+          <text x="504" y="34" text-anchor="middle" fill="var(--teal)" font-size="11.5">기존 유형에 병합</text>
+          <text x="504" y="49" text-anchor="middle" fill="var(--ink-3)" font-size="10">LLM 이 최종 동일성 판정</text>
+
+          <rect x="428" y="88" width="152" height="46" rx="4" fill="var(--verm-bg)" stroke="var(--vermilion)"/>
+          <text x="504" y="108" text-anchor="middle" fill="var(--vermilion)" font-size="11.5">신규 유형 후보</text>
+          <text x="504" y="123" text-anchor="middle" fill="var(--ink-3)" font-size="10">status=proposed · 사람 승인</text>
+
+          <g stroke="currentColor" opacity=".4" fill="none">
+            <path d="M112,74 L138,74"/><path d="M132,70 L140,74 L132,78" fill="currentColor"/>
+            <path d="M252,74 L278,74"/><path d="M272,70 L280,74 L272,78" fill="currentColor"/>
+            <path d="M392,68 Q412,68 412,40 L426,40"/><path d="M420,36 L428,40 L420,44" fill="currentColor"/>
+            <path d="M392,80 Q412,80 412,110 L426,110"/><path d="M420,106 L428,110 L420,114" fill="currentColor"/>
+          </g>
+          <text x="404" y="30" text-anchor="end" fill="var(--ink-3)" font-size="9.5">가까움</text>
+          <text x="404" y="124" text-anchor="end" fill="var(--ink-3)" font-size="9.5">멀다</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      GraphRAG의 엔티티 해소(entity resolution)와 같은 문제, 같은 해법이다.
+      다만 <strong>계층을 깊게 만들지 않는 대가로 증분 갱신이 자연스러워진다</strong> —
+      GraphRAG가 전체 재구축을 요구하는 지점을 이 구조는 회피한다.
+    </figcaption>
+  </figure>
+
+  <div class="callout warn">
+    <span class="tag">확장성의 핵심 결정</span>
+    <p>
+      관계는 <strong>문항↔문항이 아니라 문항→유형→유형</strong>이어야 한다.
+      문항 쌍 관계를 저장하면 N² 폭발한다(문항 1만 개면 5천만 쌍).
+      유형은 수천 개고 유형 간 관계는 손에 잡힌다.
+      <strong>문항 유사도는 유형을 경유해 계산하지, 저장하지 않는다.</strong>
+    </p>
+  </div>
+
+  <h3>유형 간에 저장할 관계 — “LLM 위키”의 실체</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th style="width:22%">관계</th><th style="width:38%">의미</th><th>쓰임</th></tr></thead>
+      <tbody>
+        <tr><td><code>same_type</code></td><td>같은 유형</td><td>유사 문항 추천의 주력</td></tr>
+        <tr><td><code>harder / easier</code></td><td>같은 유형, 난이도 차</td><td>단계별 처방</td></tr>
+        <tr><td><code>prerequisite</code></td><td>선행 — 이 유형을 풀려면 저 유형을 알아야</td><td>취약 단원 역추적</td></tr>
+        <tr><td><code>composes</code></td><td>복합 — 유형 2개 이상이 결합</td><td>4점 문항 대부분이 여기</td></tr>
+        <tr><td><code>same_trap</code></td><td>같은 함정</td><td>오답노트와 직결 · 차별화 지점</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">설계 3</span>검색 — 3단, 단 3단째는 나중에</h2>
+
+  <div class="code">
+    <div class="cap">유사 문항 랭킹 파이프라인</div>
+<pre>1) 하드 필터   성취기준 일치(또는 인접) ∩ 시험범위 ∩ 학년
+
+2) 가중 스코어  유형 일치         × 0.45
+               풀이전략 코사인    × 0.25
+               난이도 거리        × 0.15
+               표면속성 일치      × 0.15   ← 사용자 다이얼이 이 가중치를 조절
+               − 같은 시험지 중복 페널티 (MMR)
+
+3) LLM 재순위   상위 20건 → 코퍼스 1,000건 넘기 전엔 생략</pre>
+  </div>
+
+  <p>
+    <strong>태그 기반을 임베딩 위에 두는 결정적 이유는 설명 가능성이다.</strong>
+    선생님에게 <em>“근과 계수의 관계 + 대칭식 유형이 같고, 배점도 3점으로 같습니다”</em>라고
+    말할 수 있어야 신뢰가 생긴다. 순수 임베딩은 이걸 못 한다.
+  </p>
+
+  <h3>난이도는 따로 다뤄야 한다</h3>
+  <p>태그 중 LLM이 가장 못 맞히는 값이다. 절대 등급을 물으면 흔들린다.</p>
+  <ol>
+    <li><strong>1차 신호는 배점</strong> — 이미 시험지에 찍혀 있고 출제자 본인이 매긴 값이다. 공짜이고 가장 정확하다.</li>
+    <li><strong>LLM에는 절대 등급 대신 쌍대 비교</strong>를 시킨다(“이 둘 중 어느 쪽이 어려운가”) → Elo / Bradley-Terry로 척도화. 절대 평정보다 훨씬 안정적이다.</li>
+    <li><strong>장기적으로는 오답노트가 정답</strong> — <code>note_items</code>에 쌓이는 “학생이 실제로 틀린 문항”이 진짜 난이도 신호다. 이 앱은 이미 그 데이터를 얻는 위치에 있다.</li>
+  </ol>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">설계 4</span>스키마</h2>
+
+  <div class="code">
+    <div class="cap">SQLite — 기존 storage.py 컨벤션에 맞춤</div>
+<pre>-- 통제 어휘. 유형 사전 자체.
+CREATE TABLE problem_types (
+  id          TEXT PRIMARY KEY,   -- 'T-0203-02'
+  achievement TEXT NOT NULL,      -- '10공수1-02-03'
+  statement   TEXT NOT NULL,      -- 유형 진술문 = 이름이자 정의
+  includes    TEXT NOT NULL,
+  excludes    TEXT NOT NULL,
+  status      TEXT NOT NULL,      -- 'active' | 'proposed'  ← 자동 성장분
+  created_at  TEXT NOT NULL
+);
+
+-- 문항 태그. (시험지, 문항) 당 1행. 재태깅은 덮어쓰기(variants 와 같은 규칙).
+CREATE TABLE problem_tags (
+  node_id           TEXT NOT NULL,
+  no                INTEGER NOT NULL,
+  achievements_json TEXT NOT NULL,  -- ["10공수1-02-03"]  복수 가능
+  statement         TEXT NOT NULL,  -- 이 문항의 유형 진술문
+  strategy_json     TEXT NOT NULL,  -- {steps:[], traps:[], step_count:n}
+  facets_json       TEXT NOT NULL,  -- {format, points, visual, context, ...}
+  difficulty        REAL NULL,      -- 배점 + 쌍대비교 Elo
+  confidence        REAL NOT NULL,  -- 낮으면 사람 확인 큐
+  evidence          TEXT NOT NULL,  -- 판단 근거(발문 인용). 검수용
+  source            TEXT NOT NULL,  -- 'ai' | 'manual'
+  created_at        TEXT NOT NULL,
+  PRIMARY KEY (node_id, no)
+);
+
+-- 유형 역색인. json1 대신 조인 테이블(인덱스 활용).
+CREATE TABLE problem_type_map (
+  type_id TEXT NOT NULL, node_id TEXT NOT NULL, no INTEGER NOT NULL,
+  PRIMARY KEY (type_id, node_id, no)
+);
+CREATE INDEX idx_type_map_problem ON problem_type_map(node_id, no);</pre>
+  </div>
+
+  <div class="callout">
+    <span class="tag">파이프라인 순서</span>
+    <p>
+      태깅 입력은 <strong>크롭 이미지 + <code>problems.transcript</code> + <code>solutions.solution</code></strong> 3종 결합이 최선이다.
+      판독본과 풀이가 있는 문항은 태깅 품질이 크게 오르므로,
+      순서를 <code>추출 → 텍스트화 → 풀이 → 태깅</code>으로 두면 된다.
+      기존 <code>jobs</code> 큐에 <code>kind='tag'</code>를 얹으면 진행·중단 UI가 그대로 재사용된다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">리스크</span>콜드스타트가 가장 큰 위험</h2>
+
+  <p>
+    현재 DB 실측: <strong>파일 1개, 문항 22개, 풀이 2개.</strong>
+    추천이 성립하려면 유형당 최소 5~10문항이 필요하고,
+    유형 50개면 <strong>250~500문항 = 시험지 15~25장</strong>이 임계점이다.
+  </p>
+
+  <ol>
+    <li>온보딩에서 폴더 통째 업로드를 유도하고, 업로드 시 태깅을 자동 실행한다.</li>
+    <li><strong>추천 결과가 비면 생성으로 폴백</strong>한다 — 그리고 생성물도 태깅해 코퍼스에 넣되 <code>출처=AI생성</code>으로 신뢰 등급을 구분한다.</li>
+    <li>실패를 정직하게 표시한다 — <em>“이 유형의 다른 문항이 아직 없습니다 → 변형 문제를 만들까요?”</em></li>
+  </ol>
+
+  <div class="callout good">
+    <span class="tag">결론</span>
+    <p>
+      <strong>추천 vs 생성이 아니라 “추천 우선 + 생성 폴백”</strong>이다.
+      추천은 수학 오류 0 · 조판 정상 · 출처 존재라는 압도적 이점이 있고,
+      생성은 코퍼스가 얇을 때의 안전망이다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">실행</span>로드맵 — 각 단계가 단독으로 가치를 낸다</h2>
+
+  <div class="phase">
+    <div class="p-id">Phase 0</div>
+    <div>
+      <h3>코드 없이 손태깅으로 검증</h3>
+      <p>시험지 3~5장을 손으로 태깅해, 유형 진술문이 실제로 변별되는지 눈으로 확인한다.</p>
+      <span class="gain">여기서 안 갈리면 뒤가 전부 무너진다 — 반드시 먼저</span>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="p-id">Phase 1</div>
+    <div>
+      <h3>태깅 job + 문항 태그 배지</h3>
+      <p><code>problem_tags</code> 테이블과 태깅 작업 큐를 붙이고, 문항 상세에 태그를 노출한다. 추천은 아직 없다.</p>
+      <span class="gain">시험지 성취기준 분포도 — 출제 균형 점검만으로 즉시 유용</span>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="p-id">Phase 2</div>
+    <div>
+      <h3>같은 유형 문항 찾기</h3>
+      <p>유형 조인 + 배점 근접만으로 SQL 검색. 임베딩 없음.</p>
+      <span class="gain">코퍼스가 작을 땐 이걸로 충분 — 리서치 근거 있음</span>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="p-id">Phase 3</div>
+    <div>
+      <h3>풀이 전략 임베딩 + 가중 스코어 + 다이얼 UI</h3>
+      <p>진술문 임베딩을 붙이고, 사용자가 “무엇을 고정할지” 고르는 UI를 만든다.</p>
+      <span class="gain">진짜 “유사 문항 추천”</span>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="p-id">Phase 4</div>
+    <div>
+      <h3>변형 생성기를 온톨로지 위에 재구축</h3>
+      <p>태그를 명시 입력으로 주고, 생성물을 재태깅해 원본 태그와 일치하는지 자동 검증한다. 불일치면 재생성.</p>
+      <span class="gain">“조건변형이 안 된다”의 직접 해법</span>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="p-id">Phase 5</div>
+    <div>
+      <h3>오답노트로 난이도 보정 · 학생별 처방</h3>
+      <p>실제 오답률로 난이도를 교정하고, 학생별 취약 유형에서 <code>prerequisite</code>를 역추적한다.</p>
+      <span class="gain">오답노트 기능이 여기서 자산으로 전환</span>
+    </div>
+  </div>
+
+  <h3 style="margin-top:40px">하지 말 것</h3>
+  <ul>
+    <li><strong>RDF/OWL 정식 온톨로지</strong> — 필요한 표현력을 한참 초과한다. SQL 테이블로 충분하다.</li>
+    <li><strong>깊은 계층 지식그래프</strong> — GraphRAG는 증분 갱신을 지원하지 않아 주기적 전체 재구축이 필요하다. 문항이 계속 추가되는 이 서비스와 맞지 않는다.</li>
+    <li><strong>자체 임베딩 모델 학습(MathBERT류 파인튜닝)</strong> — 데이터 22문항으로는 논외다.</li>
+    <li><strong>지식추적(DKT/BKT)</strong> — Phase 5 이후, 학생 응답이 수천 건 쌓인 뒤.</li>
+    <li><strong>성취기준만으로 유사 판정</strong> — L1 유형 층 없이는 “근과 계수의 관계” 수백 문항이 전부 유사가 된다.</li>
+  </ul>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">선행 과제</span>과목 하드코딩 제거 — 그리고 프롬프트 캐시</h2>
+
+  <p>
+    이 서비스는 중·고등 수학 전반을 다뤄야 하는데,
+    현재 <code>app/core/prompts.py</code>가 <strong>고1 공통수학1로 하드코딩</strong>돼 있다.
+    단원 목록까지 프롬프트에 박혀 있어, 다른 과목 시험지를 올리면 풀이·변형·판독이 모두 잘못된 범위로 작동한다.
+  </p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th style="width:26%">위치</th><th>내용</th></tr></thead>
+      <tbody>
+        <tr><td><code>prompts.py:26</code></td><td><code>_SKILL_PERSONA_SCOPE</code> — “고등학교 1학년 ‘공통수학1’(다항식, 나머지정리와 인수분해, …)”</td></tr>
+        <tr><td><code>prompts.py:157</code></td><td>SOLVE — “고등학교 1학년 학생이 독자입니다”</td></tr>
+        <tr><td><code>prompts.py:194</code></td><td>CHAT — “고등학교 1학년 ‘공통수학1’ 교과 범위 안에서”</td></tr>
+        <tr><td><code>prompts.py:269</code></td><td>VARIANT — “교과 범위(공통수학1) 밖의 개념을 끌어오지 마십시오”</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <span class="tag">함께 고쳐야 하는 것 — 프롬프트 캐시</span>
+    <p>
+      <code>providers/apikey.py:113</code>이 system 프롬프트에 <code>cache_control</code>을 건다.
+      Anthropic 프롬프트 캐시는 <strong>접두사 일치</strong>이고 렌더 순서는
+      <code>tools → system → messages</code>다. 접두사의 1바이트만 달라도 그 뒤가 전부 무효화된다.
+    </p>
+    <p>
+      그런데 <code>_SKILL_PERSONA_SCOPE</code>는 <strong>system 프롬프트의 맨 첫 줄</strong>이다.
+      여기를 과목별로 바꾸면 캐시가 100% 미스가 된다 — 문항별 개별 호출이라 타격이 크다.
+    </p>
+  </div>
+
+  <div class="callout good">
+    <span class="tag">해법</span>
+    <p>
+      <strong>system 프롬프트는 과목과 무관하게 완전히 고정하고,
+      과목·학년·시험범위 같은 가변 정보는 user 메시지로 내린다.</strong>
+      messages는 system 뒤에 렌더되므로 system 캐시를 깨지 않는다.
+      즉 과목 하드코딩 제거와 캐시 최적화가 같은 한 번의 수정으로 해결된다.
+    </p>
+  </div>
+
+  <p style="color:var(--ink-2);font-size:14.5px">
+    참고 — docstring의 “프롬프트 캐시 최소 토큰 1024~2048”은 현재 기본 모델
+    <code>claude-opus-5</code> 기준 <strong>512 토큰</strong>으로 낮아졌다.
+  </p>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="num">결정 대기</span>지금 정해야 하는 것</h2>
+  <ol>
+    <li><strong>유형 씨앗의 시작 범위</strong> — 한 과목(공통수학1, 유형 40~60개)부터 검증할지, 처음부터 중1~고3 전체를 자동 유도에 맡길지.</li>
+    <li><strong>코퍼스 확보 경로</strong> — 손에 실제 시험지가 몇 장 있는지. Phase 2가 성립하려면 15~25장이 필요하다. 없으면 Phase 4(온톨로지 기반 변형)를 먼저 하는 순서 조정이 맞다.</li>
+    <li><strong>기존 <code>condition</code> 변형 모드의 처분</strong> — 유지할지, L3 facet 기반 다이얼로 대체하고 제거할지.</li>
+  </ol>
+</section>
+
+<hr class="rule">
+
+<section>
+  <h4>출처</h4>
+  <ul class="sources">
+    <li><a href="https://arxiv.org/abs/2003.10838">Prob2Vec: Mathematical Semantic Embedding for Problem Retrieval in Adaptive Tutoring</a></li>
+    <li><a href="https://arxiv.org/html/2403.17281v1">Automate Knowledge Concept Tagging on Math Questions with LLMs</a></li>
+    <li><a href="https://arxiv.org/html/2406.13885">Knowledge Tagging System on Math Questions via LLMs with Flexible Demonstration Retriever (KnowTS)</a></li>
+    <li><a href="https://arxiv.org/html/2505.06469">KCluster: An LLM-based Clustering Approach to Knowledge Component Discovery</a></li>
+    <li><a href="https://pact.cs.cmu.edu/pubs/PSLC-Theory-Framework-Tech-Rep.pdf">The Knowledge-Learning-Instruction (KLI) Framework</a></li>
+    <li><a href="https://arxiv.org/html/2604.08693">Towards Generalizable Representations of Mathematical Solution Strategies</a></li>
+    <li><a href="https://aclanthology.org/2025.acl-long.1442.pdf">TaxoAdapt: Aligning LLM-Based Multidimensional Taxonomy Construction</a></li>
+    <li><a href="https://www.microsoft.com/en-us/research/blog/graphrag-new-tool-for-complex-data-discovery-now-on-github/">Microsoft GraphRAG — 증분 갱신 한계</a></li>
+    <li><a href="https://arxiv.org/html/2608.03006">ProPRL: Property-Aware Prerequisite Relation Learning in Educational Knowledge Graphs</a></li>
+    <li><a href="https://www.digitalapplied.com/blog/hybrid-search-bm25-vector-reranking-reference-2026">Hybrid Search: BM25, Vector &amp; Reranking Reference 2026</a></li>
+    <li><a href="https://namu.wiki/w/2022%20%EA%B0%9C%EC%A0%95%20%EA%B5%90%EC%9C%A1%EA%B3%BC%EC%A0%95/%EC%88%98%ED%95%99%EA%B3%BC/%EA%B3%A0%EB%93%B1%ED%95%99%EA%B5%90/%EA%B3%B5%ED%86%B5%EC%88%98%ED%95%99">2022 개정 교육과정 — 공통수학 성취기준</a></li>
+    <li><a href="https://ta.qanda.ai/guides/similar-math-problem-generator">콴다조교 — AI 유사문제와 변형문제 생성</a></li>
+  </ul>
+</section>
+
+</div>
