@@ -31,8 +31,9 @@ SECTION_NOTE: Final[str] = "note"
 # 스키마 버전. 1 = 최초, 2 = nodes.section / chat_messages.problem_no / note_items,
 # 3 = jobs(작업 큐), 4 = variants(변형 저장), 5 = problems.label(원문 번호 표기),
 # 6 = problems.transcript / transcript_source / transcript_note (문항 텍스트화),
-# 7 = note_items.transcript / transcript_source (판독본 스냅샷).
-SCHEMA_VERSION: Final[int] = 7
+# 7 = note_items.transcript / transcript_source (판독본 스냅샷),
+# 8 = problem_types / bank_problems / problem_tags (공용 문항 코퍼스).
+SCHEMA_VERSION: Final[int] = 8
 
 # `problems.transcript_source` 값. 출처마다 신뢰도가 다르므로 반드시 남긴다.
 #   pua    = PDF 텍스트 레이어 디코딩(AI 호출 0회, 결정적)
@@ -41,6 +42,30 @@ SCHEMA_VERSION: Final[int] = 7
 TRANSCRIPT_PUA: Final[str] = "pua"
 TRANSCRIPT_AI: Final[str] = "ai"
 TRANSCRIPT_MANUAL: Final[str] = "manual"
+
+# `bank_problems.origin` 값. 문항이 어디서 왔는지 = 저작권/신뢰도 판단의 근거다.
+#   seed = 시드 적재(교재 PDF 를 스크립트로 넣은 것)
+#   user = 사용자 업로드에서 편입한 것
+#   ai   = AI 가 생성한 변형 문항
+BANK_ORIGIN_SEED: Final[str] = "seed"
+BANK_ORIGIN_USER: Final[str] = "user"
+BANK_ORIGIN_AI: Final[str] = "ai"
+
+# `bank_problems.visibility` 값. `shared` 만 다른 사용자의 검색·추천에 노출된다.
+BANK_PRIVATE: Final[str] = "private"
+BANK_SHARED: Final[str] = "shared"
+
+# `problem_tags.source` 값. 태그의 근거가 무엇인지 = 정확도의 상한이다.
+#   label  = 교재에 **인쇄된** 분류 라벨(결정적, confidence 1.0)
+#   ai     = AI 분류
+#   manual = 사람이 지정
+TAG_SOURCE_LABEL: Final[str] = "label"
+TAG_SOURCE_AI: Final[str] = "ai"
+TAG_SOURCE_MANUAL: Final[str] = "manual"
+
+# `problem_types.status` 값. `proposed` 는 아직 사전에 확정되지 않은 후보다.
+TYPE_STATUS_ACTIVE: Final[str] = "active"
+TYPE_STATUS_PROPOSED: Final[str] = "proposed"
 
 SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -183,6 +208,49 @@ CREATE TABLE IF NOT EXISTS variants (
     created_at TEXT NOT NULL,
     PRIMARY KEY (node_id, no, mode)
 );
+
+-- 유형 사전. 문제집에 인쇄된 4단계 분류를 그대로 받는다.
+-- statement/includes/excludes 는 다음 단계에서 채운다(지금은 NULL).
+CREATE TABLE IF NOT EXISTS problem_types (
+    id          TEXT PRIMARY KEY,   -- '08.06.01.01'  (과목.대단원.중단원.유형 번호)
+    subject     TEXT NOT NULL,      -- '08 공통수학2'
+    area        TEXT NOT NULL,      -- '06 집합의연산'
+    chapter     TEXT NOT NULL,      -- '01 집합의연산자'
+    name        TEXT NOT NULL,      -- '01 집합연산자1 (기본의미)'
+    achievement TEXT NULL,          -- 2022 개정 성취기준 코드. 나중에 매핑
+    statement   TEXT NULL,          -- 유형 진술문. 다음 단계에서
+    includes    TEXT NULL,
+    excludes    TEXT NULL,
+    status      TEXT NOT NULL,      -- 'active' | 'proposed'
+    created_at  TEXT NOT NULL
+);
+
+-- 공용 문항 코퍼스. 검색·추천의 대상. 업로드(node_id)와 무관하게 존재한다.
+CREATE TABLE IF NOT EXISTS bank_problems (
+    id           TEXT PRIMARY KEY,
+    crop_path    TEXT NOT NULL,
+    raw_text     TEXT NOT NULL,     -- PDF 텍스트 레이어 원문(PUA 포함 가능)
+    transcript   TEXT NULL,         -- 판독본. 나중에
+    solution     TEXT NULL,         -- 풀이. 나중에
+    content_hash TEXT NOT NULL,
+    origin       TEXT NOT NULL,     -- 'seed' | 'user' | 'ai'
+    visibility   TEXT NOT NULL,     -- 'private' | 'shared'
+    owner_id     TEXT NULL,
+    source_label TEXT NOT NULL,     -- 출처 표기. 예 '학원자료 집합1'
+    created_at   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_hash ON bank_problems(content_hash);
+
+-- 문항 <-> 유형. 태그는 문항의 성질이므로 bank_id 를 키로 잡는다.
+CREATE TABLE IF NOT EXISTS problem_tags (
+    bank_id    TEXT PRIMARY KEY,
+    type_id    TEXT NOT NULL,
+    confidence REAL NOT NULL,       -- 인쇄 라벨은 1.0
+    source     TEXT NOT NULL,       -- 'label' | 'ai' | 'manual'
+    evidence   TEXT NOT NULL,       -- 판단 근거(라벨 원문 4줄)
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tags_type ON problem_tags(type_id);
 """
 
 # `SCHEMA` 뒤(= 컬럼 추가 뒤)에만 만들 수 있는 인덱스.
@@ -1546,3 +1614,177 @@ def interrupt_unfinished_jobs(conn: sqlite3.Connection) -> int:
         (now_iso(),),
     )
     return int(cursor.rowcount or 0)
+
+
+# ------------------------------------------------------- 공용 문항 코퍼스(bank)
+# `problem_types` / `bank_problems` / `problem_tags` 세 테이블이 한 벌이다.
+# 업로드(`nodes`/`problems`)와 **독립**이다 — 시험지를 지워도 코퍼스는 남는다.
+
+
+def upsert_problem_type(
+    conn: sqlite3.Connection,
+    *,
+    type_id: str,
+    subject: str,
+    area: str,
+    chapter: str,
+    name: str,
+    status: str = TYPE_STATUS_ACTIVE,
+) -> bool:
+    """유형을 넣는다. 같은 id 가 이미 있으면 **아무것도 하지 않는다**.
+
+    덮어쓰지 않는 것이 중요하다. `statement`/`includes`/`excludes` 는 나중에
+    사람이 채우는 열이라, 같은 교재를 다시 적재할 때 덮어쓰면 그 작업이 날아간다.
+
+    Args:
+        conn: 열린 커넥션.
+        type_id: '08.06.01.01' 형태의 4단계 번호.
+        subject: 과목 라벨 원문('08 공통수학2').
+        area: 대단원 라벨 원문.
+        chapter: 중단원 라벨 원문.
+        name: 유형 라벨 원문.
+        status: `TYPE_STATUS_ACTIVE` 또는 `TYPE_STATUS_PROPOSED`.
+
+    Returns:
+        새로 넣었으면 True, 이미 있어 건너뛰었으면 False.
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO problem_types
+            (id, subject, area, chapter, name,
+             achievement, statement, includes, excludes, status, created_at)
+        VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)
+        ON CONFLICT(id) DO NOTHING
+        """,
+        (type_id, subject, area, chapter, name, status, now_iso()),
+    )
+    return int(cursor.rowcount or 0) > 0
+
+
+def get_problem_type(conn: sqlite3.Connection, type_id: str) -> dict[str, Any] | None:
+    """유형 1건(없으면 None)."""
+    row = conn.execute(
+        "SELECT * FROM problem_types WHERE id = ?", (type_id,)
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
+def list_problem_types(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """유형 사전 전체(id 오름차순 = 과목/단원 순서)."""
+    rows = conn.execute("SELECT * FROM problem_types ORDER BY id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def insert_bank_problem(
+    conn: sqlite3.Connection,
+    *,
+    bank_id: str,
+    crop_path: str,
+    raw_text: str,
+    content_hash: str,
+    origin: str,
+    visibility: str,
+    source_label: str,
+    owner_id: str | None = None,
+) -> bool:
+    """코퍼스 문항을 넣는다. `content_hash` 가 겹치면 넣지 않는다.
+
+    같은 문항이 여러 교재 파일에 실려 있는 것이 정상이므로, 중복은 오류가 아니라
+    **건너뛸 일**이다(유니크 인덱스 `idx_bank_hash` + `DO NOTHING`).
+
+    Args:
+        conn: 열린 커넥션.
+        bank_id: 새 문항 id.
+        crop_path: 크롭 PNG 경로.
+        raw_text: PDF 텍스트 레이어 원문(PUA 포함 가능, 없으면 빈 문자열).
+        content_hash: 정규화 본문의 sha256.
+        origin: `BANK_ORIGIN_SEED` / `BANK_ORIGIN_USER` / `BANK_ORIGIN_AI`.
+        visibility: `BANK_PRIVATE` / `BANK_SHARED`.
+        source_label: 출처 표기(예 '학원자료 집합1').
+        owner_id: 소유자(공용 시드면 None).
+
+    Returns:
+        실제로 넣었으면 True, 중복이라 건너뛰었으면 False.
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO bank_problems
+            (id, crop_path, raw_text, transcript, solution, content_hash,
+             origin, visibility, owner_id, source_label, created_at)
+        VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
+        """,
+        (
+            bank_id,
+            crop_path,
+            raw_text,
+            content_hash,
+            origin,
+            visibility,
+            owner_id,
+            source_label,
+            now_iso(),
+        ),
+    )
+    return int(cursor.rowcount or 0) > 0
+
+
+def get_bank_problem(conn: sqlite3.Connection, bank_id: str) -> dict[str, Any] | None:
+    """코퍼스 문항 1건(없으면 None)."""
+    row = conn.execute(
+        "SELECT * FROM bank_problems WHERE id = ?", (bank_id,)
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
+def insert_problem_tag(
+    conn: sqlite3.Connection,
+    *,
+    bank_id: str,
+    type_id: str,
+    confidence: float,
+    source: str,
+    evidence: str,
+) -> bool:
+    """문항에 유형 태그를 단다. 이미 태그가 있으면 아무것도 하지 않는다.
+
+    한 문항의 태그는 하나다(`bank_id` 가 기본키). 근거가 다른 태그를 덮어쓰면
+    "인쇄 라벨"이 "AI 추정"으로 조용히 바뀔 수 있어, 갱신은 명시적 경로로만 한다.
+
+    Args:
+        conn: 열린 커넥션.
+        bank_id: 코퍼스 문항 id.
+        type_id: `problem_types.id`.
+        confidence: 0.0~1.0. 인쇄 라벨은 1.0.
+        source: `TAG_SOURCE_LABEL` / `TAG_SOURCE_AI` / `TAG_SOURCE_MANUAL`.
+        evidence: 판단 근거 원문(라벨 4줄 등).
+
+    Returns:
+        실제로 넣었으면 True.
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO problem_tags
+            (bank_id, type_id, confidence, source, evidence, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bank_id) DO NOTHING
+        """,
+        (bank_id, type_id, confidence, source, evidence, now_iso()),
+    )
+    return int(cursor.rowcount or 0) > 0
+
+
+def get_problem_tag(conn: sqlite3.Connection, bank_id: str) -> dict[str, Any] | None:
+    """문항의 유형 태그(없으면 None)."""
+    row = conn.execute(
+        "SELECT * FROM problem_tags WHERE bank_id = ?", (bank_id,)
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
+def count_tags_by_type(conn: sqlite3.Connection) -> dict[str, int]:
+    """유형별 태그 수(분포 리포트용)."""
+    rows = conn.execute(
+        "SELECT type_id, COUNT(*) AS n FROM problem_tags GROUP BY type_id"
+    ).fetchall()
+    return {str(row["type_id"]): int(row["n"]) for row in rows}

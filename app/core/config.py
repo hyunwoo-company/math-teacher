@@ -83,6 +83,16 @@ def note_crops_dir() -> Path:
     return data_dir() / "note_crops"
 
 
+def bank_crops_dir() -> Path:
+    """공용 문항 코퍼스(`bank_problems`)의 크롭 PNG 디렉터리.
+
+    사용자 업로드 크롭(`crops/`)과 **분리한다.** 코퍼스 문항은 업로드 노드와
+    수명이 다르다 — 시험지를 지워도 코퍼스는 남아야 하므로, 노드 삭제가 훑는
+    `crops/` 밑에 두면 안 된다.
+    """
+    return data_dir() / "bank"
+
+
 def settings_path() -> Path:
     """설정(API 키) 파일 경로."""
     return data_dir() / "settings.json"
@@ -93,6 +103,7 @@ def ensure_dirs() -> None:
     files_dir().mkdir(parents=True, exist_ok=True)
     crops_dir().mkdir(parents=True, exist_ok=True)
     note_crops_dir().mkdir(parents=True, exist_ok=True)
+    bank_crops_dir().mkdir(parents=True, exist_ok=True)
 
 
 def deploy_mode() -> DeployMode:

@@ -252,7 +252,7 @@ def test_v2_db_gains_variants_table(tmp_path: Path) -> None:
 
         conn = storage.connect()
         try:
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 7
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 8
             assert "variants" in {
                 str(row["name"])
                 for row in conn.execute(
@@ -500,7 +500,7 @@ def test_v6_db_gains_note_item_transcript_snapshot(tmp_path: Path) -> None:
         config.use_data_dir(data_dir)
         storage.init_db()
         with storage.transaction() as conn:
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 7
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 8
             assert {"transcript", "transcript_source"} <= storage.table_columns(
                 conn, "note_items"
             )
