@@ -280,6 +280,68 @@ def _transcript_blocks(transcript: str, no: int) -> list[Block]:
     return [] if body is None else [body]
 
 
+# 판독본이 그림을 가리키는 표현. 공백 변형(`그림 과 같이`)에 관대하게 잡는다.
+# 판정을 텍스트로만 하는 이유: 스키마를 늘리지 않고 **이미 저장된 판독본에도**
+# 그대로 동작해야 하기 때문이다(재판독 없이).
+_FIGURE_REF_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:다음|아래|위)\s*(?:[와과]\s*같은\s*)?그림"
+    r"|그림\s*(?:[과와]\s*같이|에서|의)"
+    r"|(?:그래프|도형)\s*(?:[와과]\s*같이|에서)"
+)
+
+
+def _needs_figure(transcript: str) -> bool:
+    """판독본이 그림을 가리키고 있는지 판정한다.
+
+    판독본은 글자·수식만 복원하고 그림은 복원하지 못하므로, 이런 표현이 있으면
+    크롭을 함께 실어야 한다.
+
+    Args:
+        transcript: 복원한 문항 전문.
+
+    Returns:
+        도형 참조 표현이 있으면 True.
+    """
+    return _FIGURE_REF_RE.search(transcript) is not None
+
+
+def _item_body_blocks(
+    *,
+    transcript: str | None,
+    no: int,
+    image: Path | None,
+    body: BodyMode,
+) -> tuple[list[Block], bool]:
+    """문항 본문 블록(판독본 텍스트 / 크롭 이미지)을 고른다.
+
+    `body="image"`(기본)면 예전 그대로 크롭만 낸다 — 판독본이 실려 있어도 보지
+    않는다. `body="text"` 면 판독본을 텍스트로 조판하되, 판독본이 없거나 평문화
+    결과가 비면 조용히 이미지로 폴백한다.
+
+    **판독본을 썼더라도 그 문항이 그림을 가리키면 크롭을 뒤에 함께 넣는다.**
+    판독본은 글자와 수식만 복원할 뿐 좌표평면 그래프나 도형은 복원하지 못하므로,
+    텍스트만 내보내면 그림이 사라져 문제가 성립하지 않는다.
+
+    Args:
+        transcript: 복원한 문항 전문. 없으면 None.
+        no: 문항 번호(앞머리 번호 중복 제거에 쓴다).
+        image: 크롭 PNG 경로. 없으면 None.
+        body: `image`(기본) 또는 `text`.
+
+    Returns:
+        (본문 블록 목록, 판독본을 텍스트로 썼는지). 두 번째 값이 True 일 때만
+        호출자가 고지 출처(`_notice`)에 그 항목의 출처를 넣는다.
+    """
+    text_blocks = (
+        _transcript_blocks(transcript, no) if body == "text" and transcript else []
+    )
+    if not text_blocks:
+        return ([Image(image)] if image is not None else [], False)
+    if image is not None and transcript is not None and _needs_figure(transcript):
+        return ([*text_blocks, Image(image)], True)
+    return (text_blocks, True)
+
+
 def _notice(sources: Sequence[str | None]) -> str | None:
     """텍스트로 나간 항목들의 출처를 보고 첫 페이지 고지 문구를 정한다.
 
@@ -331,7 +393,8 @@ def build_exam_doc(
     문항 본문은 `body` 가 정한다. `image`(기본)면 예전과 똑같이 크롭 이미지만
     넣는다 — 항목에 판독본이 실려 있어도 보지 않는다. `text` 면 판독본을
     텍스트로 조판하고, **판독본이 없거나 평문화 결과가 빈 문항은 조용히
-    이미지로 폴백**한다(혼합 문서가 정상 동작이다).
+    이미지로 폴백**한다(혼합 문서가 정상 동작이다). 판독본이 그림을 가리키는
+    문항은 텍스트 뒤에 크롭도 함께 넣는다(`_item_body_blocks`).
 
     Args:
         title: 문서 제목(시험지 이름).
@@ -347,16 +410,12 @@ def build_exam_doc(
     used_sources: list[str | None] = []
     for item in items:
         blocks.append(Heading(f"{item.no}번", 2))
-        text_blocks = (
-            _transcript_blocks(item.transcript, item.no)
-            if body == "text" and item.transcript
-            else []
+        item_blocks, used_text = _item_body_blocks(
+            transcript=item.transcript, no=item.no, image=item.image, body=body
         )
-        if text_blocks:
-            blocks.extend(text_blocks)
+        blocks.extend(item_blocks)
+        if used_text:
             used_sources.append(item.transcript_source)
-        elif item.image is not None:
-            blocks.append(Image(item.image))
         if include_full and item.solution:
             blocks.extend(_solution_blocks(item.solution))
     return ExportDoc(
@@ -420,7 +479,8 @@ def build_note_doc(
 
     원본이 삭제된 항목도 스냅샷(크롭·판독본)으로 넣는다(풀이만 빠진다).
     본문 선택 규칙은 `build_exam_doc` 과 같다 — `body="text"` 면 판독본
-    스냅샷을 텍스트로, 없으면 크롭 스냅샷으로 낸다.
+    스냅샷을 텍스트로, 없으면 크롭 스냅샷으로 낸다. 판독본이 그림을 가리키면
+    크롭 스냅샷을 함께 넣는 것도 같다.
 
     Args:
         title: 문서 제목(노트 이름).
@@ -436,16 +496,15 @@ def build_note_doc(
     used_sources: list[str | None] = []
     for item in items:
         blocks.append(Heading(f"{item.source_name} {item.problem_no}번", 2))
-        text_blocks = (
-            _transcript_blocks(item.transcript, item.problem_no)
-            if body == "text" and item.transcript
-            else []
+        item_blocks, used_text = _item_body_blocks(
+            transcript=item.transcript,
+            no=item.problem_no,
+            image=item.image,
+            body=body,
         )
-        if text_blocks:
-            blocks.extend(text_blocks)
+        blocks.extend(item_blocks)
+        if used_text:
             used_sources.append(item.transcript_source)
-        elif item.image is not None:
-            blocks.append(Image(item.image))
         if item.memo:
             blocks.append(_prefixed(_MEMO_PREFIX, _body(item.memo)))
         if include_full and item.solution:

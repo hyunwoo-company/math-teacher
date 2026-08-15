@@ -24,7 +24,7 @@ from export import build as export_build
 from export import docx as export_docx
 from export import hwpx as export_hwpx
 from export import model as export_model
-from export.hwpeq import HwpEquationError, latex_to_hwp_equation
+from export.hwpeq import HwpEquationError, _tighten, latex_to_hwp_equation
 from export.omml import UnsupportedLatexError, latex_to_omml
 
 MATH_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
@@ -303,6 +303,48 @@ def test_omml_sized_delimiters() -> None:
     assert delimiter.find(f".//{MATH_NS}f") is not None
 
 
+def test_omml_set_builder_separator() -> None:
+    """`\\middle|` 은 `m:sepChr` 로 낸다 — 조건제시법 집합의 세로 막대.
+
+    회귀 방지: 예전에는 `\\middle` 이 매핑에 없어 낱말 "middle" 이 그대로
+    찍혔다(`A_k = x middle | ...`).
+    """
+    latex = (
+        r"A_k=\left\{ x \middle| \log x-[\log x]=\frac{1}{k},"
+        r"\ 1 \le x \le 10^5 \right\}"
+    )
+    xml = latex_to_omml(latex)
+    assert "middle" not in xml
+    assert '<m:sepChr m:val="|"/>' in xml
+    delimiter = _first(ET.fromstring(xml), "d")
+    assert _children(delimiter) == ["dPr", "e", "e"]
+    beginning = delimiter.find(f"{MATH_NS}dPr/{MATH_NS}begChr")
+    ending = delimiter.find(f"{MATH_NS}dPr/{MATH_NS}endChr")
+    assert beginning is not None
+    assert ending is not None
+    assert beginning.get(f"{MATH_NS}val") == "{"
+    assert ending.get(f"{MATH_NS}val") == "}"
+    assert _text_of(delimiter[1]) == "x"
+
+
+def test_omml_delimiters_without_middle_keep_one_part() -> None:
+    """`\\middle` 이 없으면 예전 그대로 `m:e` 하나 + 빈 `m:sepChr` 다."""
+    xml = latex_to_omml(r"\left( a+b \right)")
+    assert '<m:sepChr m:val=""/>' in xml
+    delimiter = _first(ET.fromstring(xml), "d")
+    assert _children(delimiter) == ["dPr", "e"]
+
+
+def test_omml_unpaired_middle_keeps_the_separator() -> None:
+    """짝 없는 `\\middle` 은 거절하지 않고 구분자만 남긴다.
+
+    거절하면 수식 전체가 평문으로 되돌아가 지금보다 나빠진다.
+    """
+    root = _parse(r"a \middle| b")
+    assert "middle" not in latex_to_omml(r"a \middle| b")
+    assert _text_of(root) == "a|b"
+
+
 def test_omml_overline_is_a_bar() -> None:
     """`\\overline{AB}` 은 `m:bar`(위 선)다."""
     bar = _first(_parse(r"\overline{AB}"), "bar")
@@ -476,18 +518,18 @@ def test_docx_without_math_is_unchanged() -> None:
     ("latex", "expected"),
     [
         # 분수: `over` 가 위/아래로 나눈다.
-        (r"\frac{x+1}{2}", "{x + 1} over {2}"),
-        (r"\dfrac{x+1}{2}", "{x + 1} over {2}"),
+        (r"\frac{x+1}{2}", "{x+1} over {2}"),
+        (r"\dfrac{x+1}{2}", "{x+1} over {2}"),
         # `\cfrac` 은 변환기가 모르는 이름이라 `\frac` 으로 정규화해 넘긴다.
         (r"\cfrac{1}{2}", "{1} over {2}"),
         # 제곱근: 근호가 피근수를 덮는다.
-        (r"\sqrt{x^2+1}", "sqrt {x ^{2} + 1}"),
+        (r"\sqrt{x^2+1}", "sqrt {x^{2}+1}"),
         (r"\sqrt[3]{8}", "root {3} of {8}"),
         # 극한.
-        (r"\lim_{x \to 0}", "lim _{x -> 0}"),
+        (r"\lim_{x \to 0}", "lim _{x->0}"),
         # 큰 연산자의 위아래 한계.
-        (r"\sum_{k=1}^{n} k^2", "sum _{k = 1} ^{n} k ^{2}"),
-        (r"\prod_{i=1}^{n} a_i", "prod _{i = 1} ^{n} a _{i}"),
+        (r"\sum_{k=1}^{n} k^2", "sum _{k=1} ^{n} k^{2}"),
+        (r"\prod_{i=1}^{n} a_i", "prod _{i=1} ^{n} a _{i}"),
         # 크기 조절 괄호.
         (r"\left( \frac{a}{b} \right)", "LEFT ( {a} over {b} RIGHT )"),
         # 기호.
@@ -498,19 +540,64 @@ def test_docx_without_math_is_unchanged() -> None:
         # 도(°) 는 `circ` 위첨자로 나간다.
         (r"90^\circ", "90 ^{circ}"),
         # 간격 명령은 공백으로 눌러 통과시킨다(변환기가 거절하던 문법).
-        (r"\int_0^1 x\,dx", "int _{0} ^{1} x dx"),
+        (r"\int_0^1 x\,dx", "int _{0}^{1}x dx"),
         # 서체 명령은 벗기고 내용만 통과시킨다.
         (r"\mathbb{R}", "{R}"),
         # 근의 공식(사용자가 지목한 조합).
         (
             r"\frac{-b \pm \sqrt{b^2-4ac}}{2a}",
-            "{- b +- sqrt {b ^{2} - 4 ac}} over {2 a}",
+            "{-b+- sqrt {b^{2}-4 ac}} over {2a}",
         ),
     ],
 )
 def test_hwp_equation_script(latex: str, expected: str) -> None:
-    """한글 수식 스크립트는 python-hwpx 의 검증된 변환기 결과와 같다."""
+    """한글 수식 스크립트는 변환기 결과에서 군더더기 공백만 지운 것이다."""
     assert latex_to_hwp_equation(latex) == expected
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        # 위첨자·연산자·괄호는 모두 붙는다.
+        ("x ^{2} + y ^{2} = a ^{2} + 16", "x^{2}+y^{2}=a^{2}+16"),
+        ("( 4 , a )", "(4,a)"),
+        ("y = 2 x + 3", "y=2x+3"),
+        # `over` 는 낱말 키워드라 양옆 공백이 구분자다. 지우면 깨진다.
+        ("{a ^{2} + 16} over {4} = 5", "{a^{2}+16} over {4}=5"),
+        ("sqrt {3}", "sqrt {3}"),
+        ("A cap B", "A cap B"),
+        ("2 sqrt {3}", "2 sqrt {3}"),
+        # `lim` 뒤 공백은 남고, `f ( x )` 는 붙는다.
+        ("lim _{x} f ( x )", "lim _{x} f(x)"),
+    ],
+)
+def test_tighten_removes_only_render_gaps(script: str, expected: str) -> None:
+    """한글이 간격으로 그리는 군더더기 공백만 지운다."""
+    assert _tighten(script) == expected
+
+
+@pytest.mark.parametrize(
+    "word",
+    ["over", "sqrt", "cap", "cup", "times", "div", "sum", "lim", "int", "rm"],
+)
+def test_tighten_keeps_keyword_separators(word: str) -> None:
+    """낱말 키워드의 앞뒤 공백은 절대 지우지 않는다(붙이면 파싱이 깨진다)."""
+    assert _tighten(f"a {word} b") == f"a {word} b"
+    assert _tighten(f"{{1}} {word} {{2}}") == f"{{1}} {word} {{2}}"
+
+
+def test_tighten_collapses_and_strips_whitespace() -> None:
+    """연속 공백은 하나로, 양끝은 없앤다."""
+    assert _tighten("  x   +    1  ") == "x+1"
+    assert _tighten("  a   over   b  ") == "a over b"
+
+
+def test_hwp_equation_tightens_the_converter_output() -> None:
+    """실제 변환 경로 끝에서 공백 정리가 적용된다."""
+    script = latex_to_hwp_equation(r"\frac{a^{2}+16}{4}=5")
+    assert " over " in script
+    assert "a^{2}" in script
+    assert script == "{a^{2}+16} over {4}=5"
 
 
 @pytest.mark.parametrize(
@@ -539,7 +626,7 @@ def test_hwpx_embeds_equation_objects() -> None:
     """`.hwpx` 의 `Contents/section0.xml` 에 `hp:equation` + EqEdit 스크립트."""
     payload = export_hwpx.build_hwpx(_doc(_math_block(r"\frac{x+1}{2}")))
     assert "<hp:equation" in _hwpx_section(payload)
-    assert _hwpx_scripts(payload) == ["{x + 1} over {2}"]
+    assert _hwpx_scripts(payload) == ["{x+1} over {2}"]
     assert "폴백" not in _hwpx_section(payload)
 
 
@@ -549,9 +636,9 @@ def test_hwpx_embeds_equation_objects() -> None:
         (r"\frac{a}{b}", "{a} over {b}"),
         (r"\sqrt{x}", "sqrt {x}"),
         (r"\sqrt[3]{8}", "root {3} of {8}"),
-        (r"\lim_{n \to \infty} a_n", "lim _{n -> infty} a _{n}"),
-        (r"\sum_{k=1}^{n} k", "sum _{k = 1} ^{n} k"),
-        (r"\left( x \right)", "LEFT ( x RIGHT )"),
+        (r"\lim_{n \to \infty} a_n", "lim _{n-> infty} a _{n}"),
+        (r"\sum_{k=1}^{n} k", "sum _{k=1} ^{n} k"),
+        (r"\left( x \right)", "LEFT (x RIGHT )"),
     ],
 )
 def test_hwpx_carries_each_required_structure(latex: str, script: str) -> None:

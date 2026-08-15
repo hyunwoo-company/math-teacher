@@ -183,7 +183,8 @@ def test_exam_full_hwpx_contains_solution_text(client: TestClient) -> None:
         ).decode("utf-8")
     assert "꼭짓점 " in body
     assert " 에서 최댓값을 갖습니다." in body
-    assert "<hp:script>LEFT ( 1 , 4 RIGHT )</hp:script>" in body
+    # 변환기가 토큰마다 넣는 공백은 한글에서 실제 간격으로 그려지므로 지운다.
+    assert "<hp:script>LEFT (1,4 RIGHT )</hp:script>" in body
     assert "문제 확인" not in body
     # LaTeX 구분자가 그대로 남지 않는다.
     assert "\\left" not in body
@@ -757,3 +758,185 @@ def test_docx_heading_styles_are_tight_and_use_the_body_font(style_id: str) -> N
     assert size is not None, f"{style_id} 에 w:sz 가 없다"
     # 본문 10pt(=20) 보다 크고, 제목이라도 16pt(=32) 를 넘지 않는다.
     assert 20 < int(size.group(1)) <= 32
+
+
+# ------------------------------------------------- 판독본 + 그림(도형) 동반 크롭
+#
+# 판독본은 글자와 수식만 복원하고 **그림은 복원하지 못한다.** 그래서 판독본이
+# 그림을 가리키는 문항을 텍스트로만 내보내면 좌표평면 그래프·도형이 사라져
+# 문제가 성립하지 않는다. 그런 문항은 크롭을 함께 실어야 한다.
+
+# 그림을 가리키는 판독본(좌표평면 그래프 문항).
+FIGURE_TRANSCRIPT = "그림과 같이 좌표평면 위의 두 점 A, B 에 대하여 값을 구하시오."
+# 그림을 가리키지 않는 판독본.
+PLAIN_TRANSCRIPT = "두 다항식의 합을 구하시오. [3점]"
+
+
+def _crop(tmp_path: Path, name: str = "crop.png") -> Path:
+    """빈 크롭 PNG 한 장."""
+    path = tmp_path / name
+    PilImage.new("RGB", (600, 200), "white").save(path)
+    return path
+
+
+def _blocks_of(doc: export_model.ExportDoc) -> list[object]:
+    return list(doc.blocks)
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "그림과 같이",
+        "그림에서",
+        "그림의",
+        "다음 그림",
+        "아래 그림",
+        "위 그림",
+        "그래프와 같이",
+        "그래프에서",
+        "도형과 같이",
+        "다음과 같은 그림",
+    ],
+)
+def test_needs_figure_catches_figure_references(phrase: str) -> None:
+    """도형 참조 표현이 있으면 그림이 필요하다고 본다(공백 변형에도 관대하다)."""
+    assert export_build._needs_figure(f"{phrase} 값을 구하시오.")
+    # 공백이 늘어나거나 문장 중간에 나와도 잡는다.
+    spaced = phrase.replace(" ", "  ")
+    assert export_build._needs_figure(f"좌표평면 위에 {spaced} 나타낸 도형이 있다.")
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "",
+        PLAIN_TRANSCRIPT,
+        "이차방정식 x^2-1=0 의 두 근의 합을 구하시오.",
+        "다음 수열의 첫째항을 구하시오.",
+    ],
+)
+def test_needs_figure_is_false_for_plain_text(transcript: str) -> None:
+    """평범한 발문은 크롭을 끌어오지 않는다."""
+    assert not export_build._needs_figure(transcript)
+
+
+def test_text_body_keeps_the_crop_when_the_transcript_points_at_a_figure(
+    tmp_path: Path,
+) -> None:
+    """판독본 텍스트 **다음에** 크롭 이미지가 온다(그림이 사라지지 않는다)."""
+    crop = _crop(tmp_path)
+    doc = export_build.build_exam_doc(
+        title="시험지",
+        items=[
+            export_build.ExamItem(
+                no=1,
+                image=crop,
+                transcript=FIGURE_TRANSCRIPT,
+                transcript_source=storage.TRANSCRIPT_PUA,
+            )
+        ],
+        include_full=False,
+        body="text",
+    )
+    blocks = _blocks_of(doc)
+    texts = [b for b in blocks if isinstance(b, export_model.Text)]
+    images = [b for b in blocks if isinstance(b, export_model.Image)]
+    assert texts and "좌표평면" in texts[0].text
+    assert [b.path for b in images] == [crop]
+    assert blocks.index(texts[0]) < blocks.index(images[0])
+    # 텍스트로 나갔으므로 고지도 붙는다.
+    assert doc.notice == export_build.NOTICE_RESTORED
+
+
+def test_text_body_omits_the_crop_without_a_figure_reference(tmp_path: Path) -> None:
+    """도형 참조가 없으면 예전처럼 텍스트만 나간다."""
+    doc = export_build.build_exam_doc(
+        title="시험지",
+        items=[
+            export_build.ExamItem(
+                no=1,
+                image=_crop(tmp_path),
+                transcript=PLAIN_TRANSCRIPT,
+                transcript_source=storage.TRANSCRIPT_PUA,
+            )
+        ],
+        include_full=False,
+        body="text",
+    )
+    blocks = _blocks_of(doc)
+    assert not [b for b in blocks if isinstance(b, export_model.Image)]
+    assert any(isinstance(b, export_model.Text) for b in blocks)
+
+
+def test_text_body_without_a_crop_stays_text_only() -> None:
+    """크롭이 없으면(`image=None`) 도형 참조가 있어도 텍스트만 낸다."""
+    doc = export_build.build_exam_doc(
+        title="시험지",
+        items=[
+            export_build.ExamItem(
+                no=1,
+                image=None,
+                transcript=FIGURE_TRANSCRIPT,
+                transcript_source=storage.TRANSCRIPT_PUA,
+            )
+        ],
+        include_full=False,
+        body="text",
+    )
+    blocks = _blocks_of(doc)
+    assert not [b for b in blocks if isinstance(b, export_model.Image)]
+    assert any(isinstance(b, export_model.Text) for b in blocks)
+
+
+def test_image_body_is_unchanged_by_the_figure_rule(tmp_path: Path) -> None:
+    """`body="image"`(기본) 경로는 그대로다 — 판독본을 아예 보지 않는다."""
+    crop = _crop(tmp_path)
+    items = [
+        export_build.ExamItem(
+            no=1,
+            image=crop,
+            transcript=FIGURE_TRANSCRIPT,
+            transcript_source=storage.TRANSCRIPT_PUA,
+        )
+    ]
+    doc = export_build.build_exam_doc(
+        title="시험지", items=items, include_full=False, body="image"
+    )
+    blocks = _blocks_of(doc)
+    assert [type(b) for b in blocks] == [export_model.Heading, export_model.Image]
+    assert not [b for b in blocks if isinstance(b, export_model.Text)]
+    assert doc.notice is None
+    # 렌더한 본문 XML 도 판독본이 없을 때와 바이트 단위로 같다.
+    bare = export_build.build_exam_doc(
+        title="시험지",
+        items=[export_build.ExamItem(no=1, image=crop)],
+        include_full=False,
+        body="image",
+    )
+    assert _document_text(export_docx.build_docx(doc), "docx") == _document_text(
+        export_docx.build_docx(bare), "docx"
+    )
+
+
+def test_note_text_body_keeps_the_crop_snapshot_for_a_figure(tmp_path: Path) -> None:
+    """오답노트도 같은 규칙을 쓴다(크롭 스냅샷을 함께 낸다)."""
+    crop = _crop(tmp_path)
+    doc = export_build.build_note_doc(
+        title="오답노트",
+        items=[
+            export_build.NoteItem(
+                source_name="풍문고",
+                problem_no=1,
+                image=crop,
+                transcript=FIGURE_TRANSCRIPT,
+                transcript_source=storage.TRANSCRIPT_PUA,
+            )
+        ],
+        include_full=False,
+        body="text",
+    )
+    blocks = _blocks_of(doc)
+    texts = [b for b in blocks if isinstance(b, export_model.Text)]
+    images = [b for b in blocks if isinstance(b, export_model.Image)]
+    assert texts and images
+    assert blocks.index(texts[0]) < blocks.index(images[0])

@@ -164,10 +164,12 @@ class _Stop:
     Attributes:
         at_brace: True 면 `}` 에서 멈춘다(중괄호 그룹 안).
         at_right: True 면 `\\right` 에서 멈춘다(`\\left ... \\right` 안).
+        at_middle: True 면 `\\middle` 에서 멈춘다(`m:d` 의 파트가 갈리는 자리).
     """
 
     at_brace: bool = False
     at_right: bool = False
+    at_middle: bool = False
 
 
 def _is_letter(char: str) -> bool:
@@ -309,6 +311,14 @@ class _Parser:
                     if stop.at_right:
                         return items
                     raise UnsupportedLatexError(r"\right 에 짝이 되는 \left 가 없다")
+                if self._at_command("middle"):
+                    if stop.at_middle:
+                        return items
+                    # 짝 없는 `\middle` 은 구분자만 평문으로 남긴다(수식 전체를
+                    # 평문으로 되돌리는 것보다 낫다 — 명령 폴백과 같은 사고방식).
+                    self._index += len(r"\middle")
+                    items.append(_text_item(self._read_delimiter()))
+                    continue
                 if self._command(items, depth, stop):
                     return items
                 continue
@@ -620,20 +630,37 @@ class _Parser:
     def _delimited(self, depth: int) -> str:
         r"""`\left( ... \right)` 를 `m:d` 로(괄호가 내용 높이에 맞춰 커진다).
 
+        `\middle|` 로 갈린 파트는 `m:e` 를 여러 개 두고 `m:sepChr` 에 구분자를
+        지정한다. 워드가 이 구분자도 내용 높이에 맞춰 그려 준다(조건제시법 집합).
+
         Raises:
             UnsupportedLatexError: 짝이 되는 `\right` 가 없다.
         """
         opening = self._read_delimiter()
-        body = _serialize(self._sequence(depth + 1, _Stop(at_right=True)))
+        parts: list[str] = []
+        separator = ""
+        while True:
+            parts.append(
+                _serialize(
+                    self._sequence(depth + 1, _Stop(at_right=True, at_middle=True))
+                )
+            )
+            if not self._at_command("middle"):
+                break
+            self._index += len(r"\middle")
+            char = self._read_delimiter()
+            # `m:sepChr` 는 구분자를 하나만 받는다. 여러 개면 첫 번째를 쓴다.
+            if not separator:
+                separator = char
         if not self._at_command("right"):
             raise UnsupportedLatexError(r"\left 에 짝이 되는 \right 가 없다")
         self._index += len(r"\right")
         closing = self._read_delimiter()
+        body = "".join(_arg("e", part) for part in parts)
         return (
             f"<m:d><m:dPr><m:begChr m:val={quoteattr(opening)}/>"
-            f'<m:sepChr m:val=""/>'
-            f"<m:endChr m:val={quoteattr(closing)}/></m:dPr>"
-            f"{_arg('e', body)}</m:d>"
+            f"<m:sepChr m:val={quoteattr(separator)}/>"
+            f"<m:endChr m:val={quoteattr(closing)}/></m:dPr>{body}</m:d>"
         )
 
     def _read_delimiter(self) -> str:
