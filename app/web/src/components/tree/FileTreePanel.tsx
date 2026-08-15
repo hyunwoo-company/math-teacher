@@ -10,9 +10,11 @@ import {
   matchNodeIds,
   type TreeItem,
 } from '@/lib/tree';
+import { autoScrollSpeed } from '@/lib/tree-autoscroll';
 import { resolveDropTarget, resolveUploadTarget } from '@/lib/upload-target';
 import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { ContextMenu, type ContextMenuItem } from '@/components/tree/ContextMenu';
+import { MoveDialog } from '@/components/tree/MoveDialog';
 import { NODE_MIME, TreeRow, type DragState } from '@/components/tree/TreeRow';
 import {
   deleteSummary,
@@ -54,6 +56,8 @@ type DialogState =
   | { kind: 'newFolder'; parentId: string | null }
   | { kind: 'newNote'; parentId: string | null }
   | { kind: 'rename'; id: string; current: string }
+  // 이동은 우클릭한 하나일 수도, 선택 전체일 수도 있다(드래그와 같은 규칙).
+  | { kind: 'move'; ids: string[] }
   // 삭제는 항목 하나(컨텍스트 메뉴)일 수도, 선택 전체(드래그 삭제)일 수도 있다.
   | { kind: 'delete'; ids: string[] };
 
@@ -237,6 +241,83 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     };
   }, [marqueeOn]);
 
+  /**
+   * 드래그 중 가장자리 자동 스크롤.
+   *
+   * 브라우저는 자체 스크롤 컨테이너를 대신 굴려 주지 않는다. 그래서 화면 밖의
+   * 폴더로는 항목을 끌고 갈 수가 없었다.
+   *
+   * 리스너를 컨테이너 DOM 에 직접 단다. 행(`TreeRow`)의 `onDragOver` 가
+   * `stopPropagation()` 을 하기 때문에 React 합성 이벤트로는 컨테이너까지
+   * 올라오지 않는데, 네이티브 버블은 컨테이너를 먼저 지나가므로 여기서는 잡힌다.
+   */
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+
+    // 렌더에 쓰지 않는 값이라 state 로 두지 않는다(프레임마다 다시 그릴 이유가 없다).
+    let frame: number | null = null;
+    let speed = 0;
+
+    const stop = () => {
+      speed = 0;
+      if (frame != null) {
+        cancelAnimationFrame(frame);
+        frame = null;
+      }
+    };
+
+    const step = () => {
+      frame = null;
+      if (speed === 0) return;
+      const before = container.scrollTop;
+      const limit = Math.max(0, container.scrollHeight - container.clientHeight);
+      const next = Math.min(limit, Math.max(0, before + speed));
+      // 이미 끝까지 갔으면 아무것도 하지 않는다(다시 움직이면 dragover 가 깨운다).
+      if (next === before) {
+        stop();
+        return;
+      }
+      container.scrollTop = next;
+      frame = requestAnimationFrame(step);
+    };
+
+    const handleDragOver = (event: globalThis.DragEvent) => {
+      const box = container.getBoundingClientRect();
+      speed = autoScrollSpeed({ pointerY: event.clientY, top: box.top, bottom: box.bottom });
+      if (speed === 0) {
+        stop();
+        return;
+      }
+      if (frame == null) frame = requestAnimationFrame(step);
+    };
+
+    const handleDragLeave = (event: globalThis.DragEvent) => {
+      const box = container.getBoundingClientRect();
+      // 자식 행으로 넘어갈 때도 dragleave 가 뜬다. 진짜로 컨테이너를 벗어났을 때만 멈춘다
+      // (아니면 스크롤이 매 행마다 끊긴다).
+      const inside =
+        event.clientX >= box.left &&
+        event.clientX <= box.right &&
+        event.clientY >= box.top &&
+        event.clientY <= box.bottom;
+      if (!inside) stop();
+    };
+
+    container.addEventListener('dragover', handleDragOver);
+    container.addEventListener('dragleave', handleDragLeave);
+    // 놓거나 취소하면 무조건 멈춘다. 창 밖에서 끝난 드래그까지 잡으려고 window 에서도 듣는다.
+    window.addEventListener('drop', stop);
+    window.addEventListener('dragend', stop);
+    return () => {
+      stop();
+      container.removeEventListener('dragover', handleDragOver);
+      container.removeEventListener('dragleave', handleDragLeave);
+      window.removeEventListener('drop', stop);
+      window.removeEventListener('dragend', stop);
+    };
+  }, []);
+
   const beginDrag = (nodeId: string): string[] => {
     const ids = dragPayloadIds(selectedIds, nodeId, visibleIds);
     // 선택 밖의 행을 끌면 그 행 하나만 옮긴다. 그러면 화면 표시도 거기에 맞춰야
@@ -294,6 +375,13 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     items.push({
       label: '이름 변경',
       onSelect: () => setDialog({ kind: 'rename', id: node.id, current: node.name }),
+    });
+    // 드래그가 힘든 깊은 트리를 위한 대안. 무엇을 옮길지는 끌기와 똑같이 정한다 —
+    // 우클릭한 행이 선택 안에 있으면 선택 전체, 아니면 그 행 하나(`dragPayloadIds`).
+    const moveIds = dragPayloadIds(selectedIds, node.id, visibleIds);
+    items.push({
+      label: moveIds.length > 1 ? `이동… (${moveIds.length}개)` : '이동…',
+      onSelect: () => setDialog({ kind: 'move', ids: moveIds }),
     });
     items.push({
       label: '삭제',
@@ -498,35 +586,45 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
             />
           )
         ) : (
-          <ul role="tree" aria-label={isNote ? '오답노트 폴더 트리' : '시험지 폴더 트리'}>
-            {roots.map((item) => (
-              <TreeRow
-                key={item.node.id}
-                item={item}
-                expanded={effectiveExpanded}
-                query={query}
-                selectedFileId={highlightedId}
-                selectedIds={selectedIds}
-                dragOverId={dragOverId}
-                setDragOverId={setDragOverId}
-                drag={drag}
-                setDrag={setDrag}
-                onToggle={toggleExpanded}
-                onSelectFile={(id) => void openNode(id)}
-                onFocusNode={focusNode}
-                onRowClick={handleRowClick}
-                onContextMenu={openRowMenu}
-                getDragIds={beginDrag}
-                onDropNode={dropNodes}
-                onDropFiles={dropFilesOnNode}
-              />
-            ))}
-          </ul>
+          <>
+            <ul role="tree" aria-label={isNote ? '오답노트 폴더 트리' : '시험지 폴더 트리'}>
+              {roots.map((item) => (
+                <TreeRow
+                  key={item.node.id}
+                  item={item}
+                  expanded={effectiveExpanded}
+                  query={query}
+                  selectedFileId={highlightedId}
+                  selectedIds={selectedIds}
+                  dragOverId={dragOverId}
+                  setDragOverId={setDragOverId}
+                  drag={drag}
+                  setDrag={setDrag}
+                  onToggle={toggleExpanded}
+                  onSelectFile={(id) => void openNode(id)}
+                  onFocusNode={focusNode}
+                  onRowClick={handleRowClick}
+                  onContextMenu={openRowMenu}
+                  getDragIds={beginDrag}
+                  onDropNode={dropNodes}
+                  onDropFiles={dropFilesOnNode}
+                />
+              ))}
+            </ul>
+            {/*
+              목록 아래 여백(96px). 마지막 행 바로 밑이 곧 끝이면 최상위로 빼낼 자리도,
+              드래그를 놓을 여유도 없다. dragover·drop 을 따로 처리하지 않고 그대로
+              컨테이너로 올려보낸다 = 최상위로 이동(`onDrop` 의 `dropNodes(ids, null)`).
+              빈 공간이므로 여기서 고무줄 선택이 시작되는 것도 그대로 둔다.
+            */}
+            <div data-testid="tree-tail-space" className="h-24 w-full" />
+          </>
         )}
 
         {marqueeRect ? (
           <div
             aria-hidden
+            data-testid="tree-marquee"
             className="pointer-events-none absolute z-10 rounded-sm border border-blue-400 bg-blue-400/20"
             style={{
               left: marqueeRect.left,
@@ -640,6 +738,22 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
           void renameNode(id, value);
         }}
       />
+
+      {dialog.kind === 'move' ? (
+        <MoveDialog
+          nodes={nodes}
+          movingIds={dialog.ids}
+          section={section}
+          onCancel={() => setDialog({ kind: 'none' })}
+          onMove={(parentId) => {
+            const ids = dialog.kind === 'move' ? dialog.ids : [];
+            setDialog({ kind: 'none' });
+            // 실패는 `moveNodes` 가 토스트로 알린다. 여기서 또 띄우지 않는다.
+            // 선택은 유지한다(드래그 이동과 같다 — 옮긴 것들이 그대로 선택되어 있다).
+            void moveNodes(ids, parentId);
+          }}
+        />
+      ) : null}
 
       <ConfirmDialog
         open={dialog.kind === 'delete'}

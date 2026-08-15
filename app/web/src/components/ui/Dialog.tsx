@@ -12,11 +12,21 @@ interface ModalProps {
   width?: string;
 }
 
+/** Tab 으로 갈 수 있는 것들. 포커스가 모달 밖으로 새지 않게 되돌릴 때 쓴다. */
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 /**
  * 최소 기능 모달. Esc 로 닫고, 배경 클릭으로 닫는다.
  * (라이브러리를 새로 들이지 않기 위해 직접 구현)
+ *
+ * 포커스는 모달 안에 가둔다. 앞뒤에 보이지 않는 감시자(tabIndex=0)를 두어,
+ * 거기로 Tab 이 빠져나오면 반대쪽 끝으로 돌려보낸다. 브라우저의 기본 Tab 순서를
+ * 가로채지 않으므로 라디오 그룹처럼 특수한 이동 규칙도 그대로 지켜진다.
  */
 export function Modal({ open, title, children, footer, onClose, width = 'w-[420px]' }: ModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -25,6 +35,13 @@ export function Modal({ open, title, children, footer, onClose, width = 'w-[420p
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, onClose]);
+
+  const focusEdge = (edge: 'first' | 'last') => {
+    const targets = dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+    if (!targets || targets.length === 0) return;
+    const target = edge === 'first' ? targets[0] : targets[targets.length - 1];
+    target?.focus();
+  };
 
   if (!open) return null;
 
@@ -35,7 +52,9 @@ export function Modal({ open, title, children, footer, onClose, width = 'w-[420p
         if (event.target === event.currentTarget) onClose();
       }}
     >
+      <span tabIndex={0} aria-hidden onFocus={() => focusEdge('last')} />
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -51,6 +70,7 @@ export function Modal({ open, title, children, footer, onClose, width = 'w-[420p
           </footer>
         ) : null}
       </div>
+      <span tabIndex={0} aria-hidden onFocus={() => focusEdge('first')} />
     </div>
   );
 }
