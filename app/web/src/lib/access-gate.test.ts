@@ -15,10 +15,10 @@ import {
   readStoredPassword,
   reportUnauthorized,
   setUnauthorizedHandler,
-  withAccess,
   writeStoredPassword,
 } from '@/lib/access-gate';
 import { ApiError } from '@/lib/api-error';
+import { resetDownloadTokens } from '@/lib/download-token';
 import { httpClient } from '@/lib/http-client';
 import type { EnvResponse } from '@/types/api';
 
@@ -42,6 +42,7 @@ function fakeResponse(body: unknown, status = 200): Response {
 afterEach(() => {
   window.localStorage.clear();
   setUnauthorizedHandler(null);
+  resetDownloadTokens();
   vi.unstubAllGlobals();
 });
 
@@ -96,48 +97,24 @@ describe('accessHeaders (헤더 생성)', () => {
   });
 });
 
-describe('withAccess (바이너리 URL 에 ?access= 부착)', () => {
-  const raw = 'http://127.0.0.1:8100/api/files/f1/raw';
-
-  it('저장 비번이 없으면(로컬) URL 을 그대로 둔다', () => {
-    expect(withAccess(raw)).toBe(raw);
-  });
-
-  it('저장 비번이 있으면 ?access=<비번> 을 붙인다', () => {
+describe('바이너리 URL 에 비밀번호를 싣지 않는다', () => {
+  // 비번을 쿼리로 싣던 withAccess 는 없앴다. 인증은 lib/download-token 의 단기 토큰이 맡고,
+  // 여기서는 "저장 비번이 있어도 URL 에 비번이 새지 않는지" 만 지킨다(회귀 방지선).
+  it('httpClient 의 세 바이너리 URL 어디에도 access= 가 붙지 않는다', () => {
     writeStoredPassword('friend');
-    expect(withAccess(raw)).toBe(`${raw}?access=friend`);
+    const urls = [
+      httpClient.fileRawUrl('f1'),
+      httpClient.cropUrl('f1', 3),
+      httpClient.noteCropUrl('n1', 'it1'),
+    ];
+    for (const value of urls) {
+      expect(value).not.toContain('access=');
+      expect(value).not.toContain('friend');
+    }
   });
 
-  it('이미 쿼리스트링이 있으면 & 로 이어 붙인다', () => {
+  it('토큰 캐시가 비어 있으면 쿼리 없이 그대로 돌려준다(발급은 호출부가 시작한다)', () => {
     writeStoredPassword('friend');
-    expect(withAccess(`${raw}?v=2`)).toBe(`${raw}?v=2&access=friend`);
-  });
-
-  it('비번을 URL 인코딩한다', () => {
-    writeStoredPassword('p w&x');
-    expect(withAccess(raw)).toBe(`${raw}?access=p%20w%26x`);
-  });
-
-  it('data: URI 는 쿼리를 붙이지 않는다(깨짐 방지)', () => {
-    writeStoredPassword('friend');
-    const dataUri = 'data:image/svg+xml;charset=utf-8,%3Csvg%3E%3C%2Fsvg%3E';
-    expect(withAccess(dataUri)).toBe(dataUri);
-  });
-
-  it('httpClient 의 세 바이너리 URL 에 ?access= 가 붙는다', () => {
-    writeStoredPassword('friend');
-    expect(httpClient.fileRawUrl('f1')).toBe(
-      'http://127.0.0.1:8100/api/files/f1/raw?access=friend',
-    );
-    expect(httpClient.cropUrl('f1', 3)).toBe(
-      'http://127.0.0.1:8100/api/files/f1/problems/3/crop?access=friend',
-    );
-    expect(httpClient.noteCropUrl('n1', 'it1')).toBe(
-      'http://127.0.0.1:8100/api/notes/n1/items/it1/crop?access=friend',
-    );
-  });
-
-  it('비번이 없으면 세 바이너리 URL 에 쿼리를 붙이지 않는다', () => {
     expect(httpClient.fileRawUrl('f1')).toBe('http://127.0.0.1:8100/api/files/f1/raw');
     expect(httpClient.cropUrl('f1', 3)).toBe(
       'http://127.0.0.1:8100/api/files/f1/problems/3/crop',

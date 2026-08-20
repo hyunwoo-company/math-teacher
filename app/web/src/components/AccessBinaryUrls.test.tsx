@@ -1,6 +1,10 @@
 /**
- * 배포 인증(web-auth)에서 바이너리 URL 에 `?access=` 가 실제로 실려 DOM 까지
- * 도달하는지 확인한다. (실서버 3001 브라우저 확인의 대체 수단)
+ * 목(web-auth) 화면의 바이너리 URL 에 **자격증명이 실리지 않는지** 확인한다.
+ *
+ * 예전에는 여기서 `?access=<비번>` 이 DOM 까지 도달하는지를 봤다. 지금은 비번을
+ * URL 에 싣지 않으므로(→ lib/download-token 의 단기 토큰), 목의 바이너리 소스가
+ * 애초에 게이트를 지나지 않는 것들(프론트 정적 자산 · `data:` URI)임을 못박아 둔다.
+ * 실서버 클라이언트에서 `?token=` 이 DOM 까지 가는지는 BinaryTokenUrls.test 가 본다.
  *
  * 왜 jsdom 렌더인가: 이 저장소는 `.next` 를 공유하는 dev 서버(3000)가 떠 있는
  * 동안 같은 폴더에서 `next dev`/`build` 를 다시 돌리면 그 dev 를 깨뜨린다.
@@ -43,8 +47,8 @@ afterEach(() => {
   resetMockState();
 });
 
-describe('web-auth 배포에서 바이너리 URL 에 ?access= 부착', () => {
-  it('로그인 후 원본 PDF URL 에 ?access=<비번> 이 붙어 뷰어로 전달된다', async () => {
+describe('web-auth 목에서 바이너리 URL 에 자격증명이 실리지 않는다', () => {
+  it('로그인 후 원본 PDF URL 이 비번 없이 뷰어로 전달된다', async () => {
     const user = userEvent.setup();
     render(<Workspace />);
 
@@ -57,19 +61,23 @@ describe('web-auth 배포에서 바이너리 URL 에 ?access= 부착', () => {
     await user.click(await screen.findByRole('treeitem', { name: /공통수학1/ }, { timeout: 5000 }));
     await user.click(await screen.findByRole('treeitem', { name: /풍문고/ }, { timeout: 5000 }));
 
-    // PDF 뷰어 대역이 받은 fileUrl 에 ?access= 가 실려 있어야 한다.
+    // 목의 원본 PDF 는 프론트가 서빙하는 정적 자산이라 게이트를 지나지 않는다.
+    // 무엇보다 비밀번호가 URL 로 새면 안 된다(전환의 목적).
     const stub = await screen.findByTestId('pdf-viewer-stub', {}, { timeout: 5000 });
-    expect(stub).toHaveTextContent(`?access=${MOCK_ACCESS_PASSWORD}`);
+    expect(stub).toHaveTextContent('/mock/sample.pdf');
+    expect(stub.textContent ?? '').not.toContain('access=');
+    expect(stub.textContent ?? '').not.toContain(MOCK_ACCESS_PASSWORD);
   }, 30_000);
 
   it('크롭 <img> 는 목의 data: URI 라 쿼리를 붙이지 않는다(깨짐 방지)', () => {
-    // 목 크롭은 data: URI 이므로 비번이 있어도 withAccess 가 그대로 둔다.
-    // (실서버 http 크롭 URL 에 ?access= 가 붙는 것은 access-gate.test 에서 확인한다.)
+    // data: URI 는 네트워크 요청이 없으니 인증할 것도 없다. 비번이 저장돼 있어도
+    // 토큰 발급을 기다리지 않고 첫 렌더에 그대로 그려야 한다(로컬/목 흐름 보존).
     writeStoredPassword(MOCK_ACCESS_PASSWORD);
     render(<ProblemCrop fileId="file-1" no={3} />);
     const img = screen.getByRole('img', { name: '3번 문제 이미지' });
     const src = img.getAttribute('src') ?? '';
     expect(src.startsWith('data:')).toBe(true);
-    expect(src).not.toContain('?access=');
+    expect(src).not.toContain('access=');
+    expect(src).not.toContain('token=');
   });
 });

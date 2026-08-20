@@ -8,6 +8,7 @@ import { ExportButton } from '@/components/center/ExportButton';
 import { InlineSolutionPanel } from '@/components/center/InlineSolutionPanel';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { ConfirmDialog } from '@/components/ui/Dialog';
+import { useBinaryUrl } from '@/hooks/useBinaryUrl';
 import { formatDate } from '@/lib/format';
 import { nodePath } from '@/lib/tree';
 import { useWorkspace } from '@/store/workspace';
@@ -139,7 +140,8 @@ function NoteItemCard({
 }) {
   const [imgFailed, setImgFailed] = useState(false);
   const [zoomed, setZoomed] = useState(false);
-  const cropUrl = api.noteCropUrl(noteId, item.id);
+  // 배포 인증 환경에서는 단기 토큰이 붙어야 크롭이 열린다. 아직이면 null 이 온다.
+  const cropUrl = useBinaryUrl(api.noteCropUrl(noteId, item.id));
 
   // 라이트박스는 Esc 로도 닫는다(배경/닫기 버튼과 동일).
   useEffect(() => {
@@ -192,9 +194,9 @@ function NoteItemCard({
       </div>
 
       {/* 문제 크롭 이미지(클릭 시 확대). 파싱 텍스트는 원본 수식폰트가 깨져 미리보기에서 제외. */}
-      {imgFailed ? (
+      {imgFailed || cropUrl == null ? (
         <div className="flex h-28 w-full items-center justify-center rounded border border-dashed border-slate-300 bg-slate-50 text-[11px] text-slate-400">
-          미리보기 없음
+          {imgFailed ? '미리보기 없음' : '불러오는 중…'}
         </div>
       ) : (
         <button
@@ -214,7 +216,7 @@ function NoteItemCard({
         </button>
       )}
 
-      {zoomed && !imgFailed ? (
+      {zoomed && !imgFailed && cropUrl != null ? (
         <div
           role="dialog"
           aria-modal="true"

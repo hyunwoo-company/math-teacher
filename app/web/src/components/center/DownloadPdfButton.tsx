@@ -3,10 +3,11 @@
 import { useState } from 'react';
 import clsx from 'clsx';
 import { Spinner } from '@/components/ui/Feedback';
+import { authorizeBinaryUrl } from '@/lib/download-token';
 import { useWorkspace } from '@/store/workspace';
 
 interface DownloadPdfButtonProps {
-  /** 원본 PDF URL. 인증 환경이면 이미 `withAccess()` 로 `?access=` 가 붙어 있어야 한다. */
+  /** 원본 PDF URL. 인증은 이 컴포넌트가 클릭 시점에 단기 토큰으로 건다(아래 주석). */
   url: string;
   /** 저장 파일명(노드 이름). 없으면 exam.pdf. */
   fileName: string;
@@ -18,7 +19,10 @@ interface DownloadPdfButtonProps {
  *
  * 정적 export(SSR 없음) + 백엔드가 다른 오리진일 수 있어 `<a download>` 의 파일명이
  * 무시될 수 있다. 그래서 fetch → blob → objectURL 방식으로 받아 파일명을 강제한다.
- * 인증은 URL 의 `?access=` 쿼리로 통과시킨다(이 라우트는 쿼리 인증 허용).
+ * 인증은 클릭 시점에 `authorizeBinaryUrl()` 로 단기 토큰(`?token=`)을 받아 건다.
+ * 왜 클릭 시점인가: 화면을 열어 두고 한참 뒤에 누르는 일이 흔한데, 렌더 때 박아 둔
+ * 토큰은 그사이 만료될 수 있다. 비동기 경로라 그때그때 받아 붙이면 그만이다.
+ * (비밀번호를 URL 에 싣던 예전 `?access=` 방식은 기록에 평문으로 남아 걷어냈다.)
  */
 export function DownloadPdfButton({ url, fileName, className }: DownloadPdfButtonProps) {
   const [busy, setBusy] = useState(false);
@@ -31,7 +35,7 @@ export function DownloadPdfButton({ url, fileName, className }: DownloadPdfButto
     setBusy(true);
     let objectUrl: string | null = null;
     try {
-      const response = await fetch(url, { cache: 'no-store' });
+      const response = await fetch(await authorizeBinaryUrl(url), { cache: 'no-store' });
       if (!response.ok) throw new Error(`다운로드 실패 (HTTP ${response.status})`);
       const blob = await response.blob();
       objectUrl = URL.createObjectURL(blob);

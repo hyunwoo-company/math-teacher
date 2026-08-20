@@ -7,7 +7,7 @@
  */
 
 import { ApiError } from '@/lib/api-error';
-import { readStoredPassword, reportUnauthorized, withAccess } from '@/lib/access-gate';
+import { readStoredPassword, reportUnauthorized } from '@/lib/access-gate';
 import { iterateSSE } from '@/lib/sse';
 import { toStreamEvent } from '@/lib/stream-events';
 import { mockSseStream, type MockSseEvent } from '@/lib/mock/sse-stream';
@@ -864,13 +864,14 @@ export const mockClient: ApiClient = {
 
   fileRawUrl() {
     // 목 모드에서는 실제 시험지 사본을 그대로 열어 pdf.js 렌더를 확인한다.
-    // auth 켠 목(web-auth)에서 실서버처럼 ?access= 가 붙는지 확인할 수 있게 감싼다.
-    return withAccess(MOCK_PDF_PATH);
+    // 프론트가 서빙하는 정적 자산이라 백엔드 게이트를 지나지 않는다 → 자격증명을 붙이지
+    // 않는다(예전에는 ?access= 를 붙였지만, 비번을 URL 에 싣지 않기로 하면서 걷어냈다).
+    return MOCK_PDF_PATH;
   },
 
   cropUrl(_id: string, no: number) {
-    // 목 크롭은 data: URI 라 withAccess 가 쿼리를 붙이지 않고 그대로 돌려준다(깨짐 방지).
-    return withAccess(mockCropUrl(no));
+    // 목 크롭은 data: URI 다. 요청 자체가 없으니 인증할 것도 없다.
+    return mockCropUrl(no);
   },
 
   async exportDocument(
@@ -1180,9 +1181,9 @@ export const mockClient: ApiClient = {
 
   noteCropUrl(_noteId: string, itemId: string) {
     // 목에서는 항목 id 뒤 숫자를 번호처럼 써서 플레이스홀더를 만든다.
+    // data: URI 라 네트워크 요청이 없다 → 토큰/비번 모두 무의미하다.
     const match = /(\d+)/.exec(itemId);
-    // data: URI 라 withAccess 는 그대로 돌려준다(쿼리 미부착).
-    return withAccess(mockCropUrl(match ? Number(match[1]) % 22 || 1 : 1));
+    return mockCropUrl(match ? Number(match[1]) % 22 || 1 : 1);
   },
 
   chat(id: string, body: ChatRequest, signal?: AbortSignal) {

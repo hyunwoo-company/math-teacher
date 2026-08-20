@@ -93,6 +93,21 @@ export interface EnvResponse {
   auth_required?: boolean;
 }
 
+/**
+ * `POST /api/download-tokens` 응답.
+ *
+ * `scope` 는 토큰이 통하는 노드 범위(`/api/files/{id}` 또는 `/api/notes/{id}`)다.
+ * 그 노드의 raw·crop·export 가 이 토큰 하나를 공유한다.
+ * 만료는 절대 시각이 아니라 `expires_in`(초)으로 온다 — 클라이언트 시계가 서버와
+ * 어긋나 있어도 "받은 지 N초" 는 항상 맞기 때문이다.
+ * 게이트가 꺼진 로컬에서는 `token`/`expires_in` 이 null 이다(붙일 것이 없다).
+ */
+export interface DownloadTokenResponse {
+  token: string | null;
+  scope: string;
+  expires_in: number | null;
+}
+
 /** 파일 노드에만 붙는 추출 메타데이터. */
 export interface FileMeta {
   pages: number;

@@ -7,7 +7,8 @@
  */
 
 import { API_BASE, API_KEY_STORAGE } from '@/lib/config';
-import { accessHeaders, reportUnauthorized, withAccess } from '@/lib/access-gate';
+import { accessHeaders, reportUnauthorized } from '@/lib/access-gate';
+import { withDownloadToken } from '@/lib/download-token';
 import { ApiError, errorFromResponse, isAbortError, networkError } from '@/lib/api-error';
 import { iterateSSE } from '@/lib/sse';
 import { toStreamEvent } from '@/lib/stream-events';
@@ -316,13 +317,15 @@ export const httpClient: ApiClient = {
   },
 
   fileRawUrl(id: string) {
-    // 브라우저가 직접 GET 하는 바이너리 URL → 헤더를 못 붙이니 ?access= 로 인증(있을 때만).
-    return withAccess(url(`/api/files/${encodeURIComponent(id)}/raw`));
+    // 브라우저가 직접 GET 하는 바이너리 URL → 헤더를 못 붙이니 단기 토큰(?token=)으로 인증.
+    // 동기 함수라 캐시에 토큰이 있을 때만 붙는다. 없으면 그대로 나가므로, 호출부는
+    // useBinaryUrl(렌더용) 이나 authorizeBinaryUrl(비동기용) 로 발급을 보장해야 한다.
+    return withDownloadToken(url(`/api/files/${encodeURIComponent(id)}/raw`));
   },
 
   cropUrl(id: string, no: number) {
-    // 크롭 <img src> 도 헤더를 못 붙이므로 ?access= 로 인증(있을 때만).
-    return withAccess(url(`/api/files/${encodeURIComponent(id)}/problems/${no}/crop`));
+    // 크롭 <img src> 도 헤더를 못 붙이므로 같은 노드 토큰(?token=)을 쓴다.
+    return withDownloadToken(url(`/api/files/${encodeURIComponent(id)}/problems/${no}/crop`));
   },
 
   async exportDocument(
@@ -333,8 +336,9 @@ export const httpClient: ApiClient = {
     source?: string,
     body: ExportBody = 'image',
   ): Promise<{ blob: Blob; filename: string | null }> {
-    // 바이너리 다운로드. fetch 로 받으므로 헤더 인증(authHeaders)과 ?access= 를 함께 건다
-    // (백엔드는 이 경로들에 두 방식 모두 허용). 파일명은 서버 Content-Disposition 우선.
+    // 바이너리 다운로드지만 fetch 라 헤더를 붙일 수 있다 → 헤더 인증(authHeaders)만 쓴다.
+    // 게이트는 헤더가 있으면 쿼리를 아예 보지 않으므로, URL 에 자격증명(비번이든 토큰이든)을
+    // 실을 이유가 없다. 파일명은 서버 Content-Disposition 우선.
     const encoded = encodeURIComponent(id);
     const base =
       target === 'note'
@@ -353,7 +357,7 @@ export const httpClient: ApiClient = {
       (body === 'image' ? '' : `&body=${body}`);
     let response: Response;
     try {
-      response = await fetch(withAccess(url(path)), {
+      response = await fetch(url(path), {
         cache: 'no-store',
         headers: authHeaders(),
       });
@@ -485,8 +489,8 @@ export const httpClient: ApiClient = {
   },
 
   noteCropUrl(noteId: string, itemId: string) {
-    // 오답노트 크롭 스냅샷 <img src> → 헤더 대신 ?access= 로 인증(있을 때만).
-    return withAccess(
+    // 오답노트 크롭 스냅샷 <img src> → 헤더 대신 노트 노드 토큰(?token=)으로 인증.
+    return withDownloadToken(
       url(`/api/notes/${encodeURIComponent(noteId)}/items/${encodeURIComponent(itemId)}/crop`),
     );
   },

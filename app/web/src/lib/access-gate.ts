@@ -49,32 +49,15 @@ export function accessHeaders(): Record<string, string> {
   return password ? { 'X-Access-Password': password } : {};
 }
 
-/**
- * 바이너리 GET URL(크롭 이미지·원본 PDF)에 접속 비번을 쿼리로 실어 준다.
+/* 바이너리 URL 인증에 대하여 (예전 `withAccess()` 자리)
  *
- * 왜 쿼리인가: `<img src>` 와 pdf.js 는 브라우저가 직접 GET 으로 로드하므로
- * 커스텀 헤더(`X-Access-Password`)를 붙일 수 없다. 백엔드는 이 사정 때문에
- * 아래 세 바이너리 라우트에 한해 `?access=<비번>` 쿼리도 허용한다:
- *   - GET /api/files/{id}/raw                         (원본 PDF)
- *   - GET /api/files/{id}/problems/{no}/crop          (문제 크롭)
- *   - GET /api/notes/{noteId}/items/{itemId}/crop     (오답노트 크롭)
- * 그 외 라우트는 헤더 전용(쿼리 거부)이므로 이 헬퍼를 쓰면 안 된다.
- *
- * ⚠️ 비번 노출 최소화: `?access=` 는 URL 쿼리라 브라우저 히스토리/서버 access log
- * 등에 남는다(완벽 은닉 불가). 친구 전용 공유암호라 허용 범위이며, 그래서 이 헬퍼는
- * 오직 위 세 바이너리 URL 에만 적용한다. 다른 링크·로그·화면 텍스트에 붙이지 말 것.
- *
- * - 저장된 비번이 없으면(로컬 개발) URL 을 그대로 돌려준다.
- * - 이미 쿼리스트링이 있으면 `&` 로 이어 붙인다.
- * - `data:` URI(목 모드의 인라인 크롭 등)엔 쿼리가 무의미하고 오히려 깨지므로 건드리지 않는다.
+ * `<img src>` 와 pdf.js 는 브라우저가 직접 GET 하므로 `X-Access-Password` 헤더를
+ * 붙일 수 없다. 예전에는 그 자리에 비밀번호를 `?access=<비번>` 로 실었지만,
+ * URL 은 방문 기록·서버 액세스 로그·Referer 에 남고 비번은 전원 공용이라
+ * 한 번 새면 앱 전체가 열린다. 그래서 지금은 `lib/download-token.ts` 의
+ * 단기 서명 토큰(`?token=`)을 쓴다 — **이 모듈은 URL 에 비번을 싣지 않는다.**
+ * (백엔드는 구버전 프론트를 위해 `?access=` 를 아직 받아 주지만, 프론트는 쓰지 않는다.)
  */
-export function withAccess(url: string): string {
-  const password = readStoredPassword();
-  if (!password) return url;
-  if (url.startsWith('data:')) return url;
-  const separator = url.includes('?') ? '&' : '?';
-  return `${url}${separator}access=${encodeURIComponent(password)}`;
-}
 
 /**
  * 게이트(로그인 화면)를 보여줘야 하는지.
