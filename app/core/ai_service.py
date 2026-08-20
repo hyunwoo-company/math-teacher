@@ -296,11 +296,25 @@ async def solve_events(
     """문항들을 순차로 풀며 SSE 문자열을 흘린다.
 
     캐시 히트를 노리려면 순차 호출이어야 한다(첫 호출이 캐시를 쓰고 이후가 읽는다).
+
+    이미지 문항의 풀이가 **실패**(`ProviderError`)했고 그 문항에 **이미 저장된
+    판독본**이 있으면, 그 텍스트로 한 번만 다시 푼다. 사용자가 손으로 하던 우회
+    (이미지로 안 풀리면 텍스트로 옮겨 붙여 푼다)를 자동화한 것이다. 여기서
+    판독(`transcribe_events`)을 새로 돌리지는 않는다 — 언제 판독을 함께 돌릴지는
+    쿼터 정책 문제라 이 함수가 정할 일이 아니다.
+
+    문항 하나가 내는 `done`/`error` 는 재시도를 해도 **정확히 한 번**이다
+    (작업 진행률이 `total` 을 넘지 않아야 한다). 재시도에 들어가면 `problem`
+    이벤트를 한 번 더 내서 실패한 부분 출력을 지운다.
     """
     total_usage: dict[str, int] = dict.fromkeys(_USAGE_KEYS, 0)
     total_usd = 0.0
     has_usage = False
     has_cost = False
+
+    # 판독본 폴백 스위치. 폴백까지 실패하면 이 작업에서는 더 시도하지 않는다
+    # (아래 `ProviderError` 처리 참고 — 쿼터 보호).
+    fallback_enabled = True
 
     try:
         yield ("start", {"total": len(targets)})
@@ -308,72 +322,103 @@ async def solve_events(
         for problem in targets:
             no = int(problem["no"])
             yield ("problem", {"no": no, "status": "running"})
-            try:
-                image_b64 = (
-                    await run_in_threadpool(_read_crop_b64, problem)
-                    if mode == "image"
-                    else None
-                )
-                async for chunk in provider.solve_problem(
-                    no=no,
-                    mode=mode,
-                    text=str(problem.get("text") or ""),
-                    image_b64=image_b64,
-                    model=model,
-                    effort=effort,
-                    max_tokens=config.DEFAULT_MAX_TOKENS,
-                ):
-                    if chunk["type"] == "delta":
-                        yield ("delta", {"no": no, "text": chunk["text"]})
-                        continue
-
-                    usage = chunk["usage"]
-                    cost = chunk["cost"]
-                    await run_in_threadpool(
-                        _save_solution,
-                        node_id=node_id,
-                        no=no,
-                        solution=chunk["text"],
-                        usage=usage,
-                        cost=cost,
-                        truncated=chunk["truncated"],
+            # 이미지 풀이가 실패했을 때 다시 시도할 텍스트. **이미 저장돼 있는
+            # 판독본만** 쓴다 — 여기서 판독까지 새로 돌리면 문항 하나가 AI 호출을
+            # 세 번(이미지 풀이 + 판독 + 텍스트 풀이) 태운다. 판독 시점을 언제로
+            # 할지는 아직 정해지지 않은 비용 정책이라 여기서 결정하지 않는다.
+            fallback_text = (
+                str(problem.get("transcript") or "").strip() if mode == "image" else ""
+            )
+            attempt_mode: Mode = mode
+            attempt_text = str(problem.get("text") or "")
+            while True:
+                try:
+                    image_b64 = (
+                        await run_in_threadpool(_read_crop_b64, problem)
+                        if attempt_mode == "image"
+                        else None
                     )
-                    has_usage = _accumulate(total_usage, usage) or has_usage
-                    if cost is not None:
-                        has_cost = True
-                        total_usd += float(cost.get("total_usd", 0.0) or 0.0)
+                    async for chunk in provider.solve_problem(
+                        no=no,
+                        mode=attempt_mode,
+                        text=attempt_text,
+                        image_b64=image_b64,
+                        model=model,
+                        effort=effort,
+                        max_tokens=config.DEFAULT_MAX_TOKENS,
+                    ):
+                        if chunk["type"] == "delta":
+                            yield ("delta", {"no": no, "text": chunk["text"]})
+                            continue
+
+                        usage = chunk["usage"]
+                        cost = chunk["cost"]
+                        await run_in_threadpool(
+                            _save_solution,
+                            node_id=node_id,
+                            no=no,
+                            solution=chunk["text"],
+                            usage=usage,
+                            cost=cost,
+                            truncated=chunk["truncated"],
+                        )
+                        has_usage = _accumulate(total_usage, usage) or has_usage
+                        if cost is not None:
+                            has_cost = True
+                            total_usd += float(cost.get("total_usd", 0.0) or 0.0)
+                        yield (
+                            "done",
+                            {
+                                "no": no,
+                                "solution": chunk["text"],
+                                "usage": usage,
+                                "cost": cost,
+                                "truncated": chunk["truncated"],
+                            },
+                        )
+                except ProviderError as exc:
+                    if fallback_enabled and attempt_mode == "image" and fallback_text:
+                        # 사용자가 손으로 하던 우회(이미지로 안 풀리면 텍스트로
+                        # 옮겨 푼다)를 그대로 자동화한다. 판독본이 **이미** 있을
+                        # 때만 성립하므로 추가 판독 비용은 0 이다.
+                        logger.info(
+                            "이미지 풀이 실패 → 저장된 판독본으로 재시도 (no=%s): %s",
+                            no,
+                            exc.message,
+                        )
+                        attempt_mode = "text"
+                        attempt_text = fallback_text
+                        # 같은 문항을 다시 시작한다는 신호. 실패한 부분 출력이
+                        # 여기서 비워진다(`jobs.LiveJob` 의 `_apply`).
+                        yield ("problem", {"no": no, "status": "running"})
+                        continue
+                    if attempt_mode == "text" and mode == "image":
+                        # 판독본으로 바꿔도 실패했다면 원인이 문항이 아니라
+                        # 프로바이더 쪽(쿼터 소진·CLI 다운)일 가능성이 크다.
+                        # 남은 문항까지 두 배로 호출하지 않도록 폴백을 끈다.
+                        fallback_enabled = False
+                    logger.warning("풀이 실패 (no=%s): %s", no, exc.message)
                     yield (
-                        "done",
+                        "error",
                         {
                             "no": no,
-                            "solution": chunk["text"],
-                            "usage": usage,
-                            "cost": cost,
-                            "truncated": chunk["truncated"],
+                            "error_code": exc.error_code,
+                            "message": exc.message,
+                            "hint": exc.hint,
                         },
                     )
-            except ProviderError as exc:
-                logger.warning("풀이 실패 (no=%s): %s", no, exc.message)
-                yield (
-                    "error",
-                    {
-                        "no": no,
-                        "error_code": exc.error_code,
-                        "message": exc.message,
-                        "hint": exc.hint,
-                    },
-                )
-            except Exception as exc:
-                logger.exception("풀이 중 예상치 못한 오류 (no=%s)", no)
-                yield (
-                    "error",
-                    {
-                        "no": no,
-                        "error_code": "internal_error",
-                        "message": "풀이 중 서버 오류가 발생했습니다.",
-                        "hint": f"{type(exc).__name__}: {exc}",
-                    },
-                )
+                except Exception as exc:
+                    logger.exception("풀이 중 예상치 못한 오류 (no=%s)", no)
+                    yield (
+                        "error",
+                        {
+                            "no": no,
+                            "error_code": "internal_error",
+                            "message": "풀이 중 서버 오류가 발생했습니다.",
+                            "hint": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                break
 
         yield (
             "end",
