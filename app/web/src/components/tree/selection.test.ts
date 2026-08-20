@@ -7,9 +7,11 @@ import {
   dragPayloadIds,
   exceedsMarqueeThreshold,
   marqueeSelection,
+  nextFocusId,
   nextSelection,
   normalizeRect,
   parseDragIds,
+  selectAll,
   shouldStartMarquee,
   toContainerPoint,
   visibleNodeIds,
@@ -375,5 +377,67 @@ describe('marqueeSelection', () => {
       additive: false,
     });
     expect([...result.selected]).toEqual([]);
+  });
+});
+
+/* ── 키보드 이동 ───────────────────────────────────────────────── */
+
+describe('nextFocusId', () => {
+  const IDS = ['a', 'a1', 'a2', 'b'];
+
+  it('아래로 한 칸 내려간다', () => {
+    expect(nextFocusId(IDS, 'a1', 1)).toBe('a2');
+  });
+
+  it('위로 한 칸 올라간다', () => {
+    expect(nextFocusId(IDS, 'a1', -1)).toBe('a');
+  });
+
+  it('맨 아래에서 더 내려가지 않는다', () => {
+    expect(nextFocusId(IDS, 'b', 1)).toBe('b');
+  });
+
+  it('맨 위에서 더 올라가지 않는다', () => {
+    expect(nextFocusId(IDS, 'a', -1)).toBe('a');
+  });
+
+  it('포커스가 없으면 아래 방향은 첫 행을 잡는다', () => {
+    expect(nextFocusId(IDS, null, 1)).toBe('a');
+  });
+
+  it('포커스가 없으면 위 방향은 마지막 행을 잡는다', () => {
+    expect(nextFocusId(IDS, null, -1)).toBe('b');
+  });
+
+  it('사라진 행에 포커스가 남아 있어도 첫/마지막 행으로 복구한다', () => {
+    expect(nextFocusId(IDS, 'gone', 1)).toBe('a');
+    expect(nextFocusId(IDS, 'gone', -1)).toBe('b');
+  });
+
+  it('보이는 행이 없으면 null 이다', () => {
+    expect(nextFocusId([], 'a', 1)).toBeNull();
+  });
+});
+
+describe('selectAll', () => {
+  it('보이는 행을 전부 고르고 첫 행을 기준점으로 삼는다', () => {
+    const result = selectAll(['a', 'a1', 'b']);
+    expect([...result.selected]).toEqual(['a', 'a1', 'b']);
+    expect(result.anchorId).toBe('a');
+  });
+
+  it('접힌 폴더의 자식은 보이는 목록에 없으므로 고르지 않는다', () => {
+    const roots = buildTree(NODES);
+    // a 만 펼치고 b 는 접어 둔다.
+    const visible = visibleNodeIds(roots, { a: true });
+    const result = selectAll(visible);
+    expect(result.selected.has('b1')).toBe(false);
+    expect(result.selected.has('a1')).toBe(true);
+  });
+
+  it('보이는 행이 없으면 기준점도 없다', () => {
+    const result = selectAll([]);
+    expect(result.selected.size).toBe(0);
+    expect(result.anchorId).toBeNull();
   });
 });

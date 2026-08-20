@@ -1,6 +1,14 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent,
+} from 'react';
 import clsx from 'clsx';
 import { useWorkspace } from '@/store/workspace';
 import {
@@ -29,9 +37,11 @@ import {
   dragPayloadIds,
   exceedsMarqueeThreshold,
   marqueeSelection,
+  nextFocusId,
   nextSelection,
   normalizeRect,
   parseDragIds,
+  selectAll,
   shouldStartMarquee,
   toContainerPoint,
   visibleNodeIds,
@@ -201,6 +211,80 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     focusNode(item.node.id);
     if (item.node.type === 'folder') toggleExpanded(item.node.id);
     else void openNode(item.node.id);
+  };
+
+  /**
+   * 행에 실제 DOM 포커스를 준다.
+   *
+   * 스토어의 `focusedNodeId` 는 행의 `onFocus` 가 따라서 갱신하므로 여기서 따로
+   * 부르지 않는다. `focus()` 가 화면 밖 행을 스크롤해 들여오는 것도 브라우저 몫이다.
+   */
+  const focusRow = useCallback((id: string) => {
+    const row = scrollRef.current?.querySelector<HTMLElement>(
+      `[data-node-id="${CSS.escape(id)}"]`,
+    );
+    row?.focus();
+  }, []);
+
+  /**
+   * 트리 안에서의 키보드 조작.
+   *
+   * 행에서 올라오는 이벤트를 컨테이너 한 곳에서 받는다. 행마다 달면 포커스가
+   * 빈 곳에 있을 때 Ctrl+A 가 먹지 않는다.
+   *
+   * ←→(폴더 접기·펼치기)와 Enter/Space(열기)는 행이 이미 처리한다. 여기서는
+   * 행을 가로지르는 조작만 맡는다.
+   */
+  const handleTreeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    // 대화상자가 떠 있는 동안의 키는 그쪽 것이다.
+    if (dialog.kind !== 'none') return;
+    // 검색창에서 누른 키는 글자 입력이다(Ctrl+A 는 텍스트 전체 선택이어야 한다).
+    if (event.target instanceof Element && event.target.closest('input, textarea') != null) return;
+
+    // 한글 입력 상태에서는 `key` 가 'ㅁ' 으로 온다. 물리 키(`code`)도 함께 본다.
+    const isSelectAll =
+      (event.ctrlKey || event.metaKey) && (event.key === 'a' || event.key === 'A' || event.code === 'KeyA');
+    if (isSelectAll) {
+      event.preventDefault();
+      const result = selectAll(visibleIds);
+      setPickedIds(result.selected);
+      setAnchorId(result.anchorId);
+      return;
+    }
+
+    if (event.key === 'Delete') {
+      // 고른 것이 있으면 그것들을, 없으면 포커스가 있는 행 하나를 지운다.
+      // 확인 창이 개수를 세어 보여주므로 여기서 바로 지우지는 않는다.
+      const ids =
+        selectedIds.size > 0
+          ? visibleIds.filter((id) => selectedIds.has(id))
+          : focusedNodeId != null
+            ? [focusedNodeId]
+            : [];
+      if (ids.length === 0) return;
+      event.preventDefault();
+      setDialog({ kind: 'delete', ids });
+      return;
+    }
+
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    // 방향키의 기본 동작은 컨테이너 스크롤이다. 행 이동으로 바꾼다.
+    event.preventDefault();
+    const target = nextFocusId(visibleIds, focusedNodeId, event.key === 'ArrowDown' ? 1 : -1);
+    if (target == null) return;
+    focusRow(target);
+
+    if (!event.shiftKey) return;
+    // 기준점이 없으면 지금 있던 자리를 기준으로 삼는다(Shift+클릭과 같은 규칙).
+    const result = nextSelection({
+      current: selectedIds,
+      anchorId: anchorId ?? focusedNodeId ?? target,
+      clickedId: target,
+      modifiers: { toggle: false, range: true },
+      visibleIds,
+    });
+    setPickedIds(result.selected);
+    setAnchorId(result.anchorId);
   };
 
   /**
@@ -603,6 +687,7 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
           (rootDragOver ? 'bg-blue-50/60 ring-2 ring-blue-300 ring-inset' : '')
         }
         onMouseDown={handleTreeMouseDown}
+        onKeyDown={handleTreeKeyDown}
         onContextMenu={openRootMenu}
         onDragOver={(event) => {
           const hasNode = event.dataTransfer.types.includes(NODE_MIME);

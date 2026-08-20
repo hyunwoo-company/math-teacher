@@ -336,3 +336,55 @@ export function parseDragIds(raw: string): string[] {
   }
   return [value];
 }
+
+/* ── 키보드 이동 ───────────────────────────────────────────────── */
+
+/**
+ * 방향키가 옮겨 갈 다음 행을 고른다.
+ *
+ * 목록 끝에서는 제자리에 머문다(순환하지 않는다). 파일 탐색기와 같은 규칙이고,
+ * 순환하면 긴 목록에서 지금 어디에 있는지 감을 잃는다.
+ *
+ * 포커스가 없거나 그 행이 이미 사라졌으면 진행 방향의 끝에서 다시 시작한다
+ * (아래로 누르면 첫 행, 위로 누르면 마지막 행).
+ *
+ * @param visibleIds 화면에 보이는 순서대로의 id 들({@link visibleNodeIds}).
+ * @param currentId 지금 포커스가 있는 행. 없으면 null.
+ * @param delta 1 = 아래, -1 = 위.
+ * @returns 포커스를 옮길 행 id. 보이는 행이 하나도 없으면 null.
+ */
+export function nextFocusId(
+  visibleIds: readonly string[],
+  currentId: string | null,
+  delta: 1 | -1,
+): string | null {
+  if (visibleIds.length === 0) return null;
+
+  const at = currentId == null ? -1 : visibleIds.indexOf(currentId);
+  if (at < 0) return (delta > 0 ? visibleIds[0] : visibleIds[visibleIds.length - 1]) ?? null;
+
+  const next = at + delta;
+  if (next < 0 || next >= visibleIds.length) return visibleIds[at] ?? null;
+  return visibleIds[next] ?? null;
+}
+
+export interface SelectAllResult {
+  selected: Set<string>;
+  /** 다음 범위 선택이 쓸 기준점. 고를 것이 없으면 null. */
+  anchorId: string | null;
+}
+
+/**
+ * 보이는 행을 전부 고른다(Ctrl/Cmd+A).
+ *
+ * 접힌 폴더의 자식은 `visibleIds` 에 없으므로 함께 고르지 않는다. 화면에 안 보이는
+ * 것까지 골라 두면 그대로 삭제·이동으로 이어졌을 때 예상 못 한 것이 딸려 간다.
+ *
+ * @param visibleIds 화면에 보이는 순서대로의 id 들.
+ */
+export function selectAll(visibleIds: readonly string[]): SelectAllResult {
+  return {
+    selected: new Set(visibleIds),
+    anchorId: visibleIds[0] ?? null,
+  };
+}
