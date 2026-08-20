@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import markdown_sections
 import prompts
 
 
@@ -238,3 +239,134 @@ def test_figure_rule_is_variant_only() -> None:
         prompts._SKILL_ANSWER_FORMAT,
     ):
         assert "그림을 가리키는 표현을 쓰지 마십시오" not in _squeezed(block)
+
+
+# ------------------------------------------------- 오류 문항의 정답 표기
+#
+# 실제 사고: 문항 자체가 잘못된 문항에서 "## 정답" 칸이 두 줄로 나갔다.
+#
+#     수학적 엄밀성에 따른 정답: 정답 없음 (보기 ㄱ, ㄴ, ㄷ 모두 거짓)
+#     출제 의도에 따른 학교 시험용 정답: ⑤ ㄱ, ㄴ, ㄷ
+#
+# 오류 판정 자체는 옳았다. 문제는 "정답" 자리에 기준이 다른 답이 둘 보여 학생이
+# 무엇이 답인지 알 수 없었다는 것이다. 정보를 지우지 않고 자리만 옮긴다.
+
+
+def test_answer_section_takes_exactly_one_answer() -> None:
+    """공유 정답 형식 규약이 "정답 칸에는 답 하나" 를 요구한다."""
+    block = _squeezed(prompts._SKILL_ANSWER_FORMAT)
+    assert "이 섹션에는 답을 하나만 씁니다" in block
+    # 값이 여러 개인 답(예: x = 1, 2)과 혼동하지 않게 구분해 둔다.
+    assert "여러 값이면 그 값들은 함께 적지만" in block
+    # 실제로 나갔던 두 줄을 반례로 박아 둔다.
+    assert "수학적 엄밀성에 따른 정답" in block
+    assert "학교 시험용 정답" in block
+    # 공유 블록이므로 풀이·변형 양쪽에 걸린다.
+    for prompt in (prompts.SOLVE_SYSTEM_PROMPT, prompts.VARIANT_SYSTEM_PROMPT):
+        assert prompts._SKILL_ANSWER_FORMAT in prompt
+
+
+def test_broken_item_answer_section_holds_only_the_error_line() -> None:
+    """오류 문항의 "## 정답" 은 `정답 없음 (문항 오류)` 한 줄뿐이다."""
+    solve = _squeezed(prompts.SOLVE_SYSTEM_PROMPT)
+    assert prompts.SOLVE_ANSWER_ERROR_LINE == "정답 없음 (문항 오류)"
+    assert f"`{prompts.SOLVE_ANSWER_ERROR_LINE}` **한 줄만** 씁니다" in solve
+    assert '"학교 시험용 정답" 같은 두 번째 답을 나란히 적지 마십시오' in solve
+
+
+def test_broken_item_intent_moves_to_the_mistake_section() -> None:
+    """출제 의도 추정과 학교 채점답은 "## 오답 주의" 로 내려간다(삭제가 아니다)."""
+    solve = _squeezed(prompts.SOLVE_SYSTEM_PROMPT)
+    assert '답이 되는지는 "## 오답 주의" 에 씁니다' in solve
+    # 정보를 지우라는 지시로 읽히면 안 된다.
+    assert "이 내용을 빠뜨리지 마십시오" in solve
+    assert "학교가 어떤 답으로 채점했을지는 학생에게 여전히 필요한 정보입니다" in solve
+    assert '지우는 것이 아니라 "## 정답" 이 아닌 자리에 적는 것입니다' in solve
+    # "## 오답 주의" 출력 형식 쪽에도 안내가 걸려 있다.
+    assert "출제 의도 추정과 학교 채점답도 이 섹션에 씁니다" in solve
+
+
+def test_broken_item_section_shows_a_concrete_example() -> None:
+    """문구만으로는 모델이 해석을 달리한다. 출력 예시를 프롬프트에 직접 넣는다."""
+    solve = prompts.SOLVE_SYSTEM_PROMPT
+    example = f"## 정답\n{prompts.SOLVE_ANSWER_ERROR_LINE}\n\n## 오답 주의\n"
+    assert example in solve
+    # 예시의 "## 오답 주의" 본문이 학교 채점답(⑤)을 실제로 담고 있다.
+    body = solve[solve.index(example) + len(example) :]
+    body = body[: body.index("```")]
+    assert "⑤" in body
+    assert "채점했을 가능성이 높으니" in _squeezed(body)
+
+
+def test_error_answer_line_is_solve_only() -> None:
+    """변형은 자기가 만든 문제를 내므로 "정답 없음" 표기가 끼면 해롭다."""
+    for prompt in (
+        prompts.VARIANT_SYSTEM_PROMPT,
+        prompts.CHAT_SYSTEM_PROMPT,
+        prompts.TRANSCRIBE_SYSTEM_PROMPT,
+    ):
+        assert prompts.SOLVE_ANSWER_ERROR_LINE not in prompt
+    assert prompts.SOLVE_ANSWER_ERROR_LINE not in prompts._SKILL_ANSWER_FORMAT
+
+
+def test_broken_item_self_doubt_guards_are_preserved() -> None:
+    """성급한 "문항 오류" 선언을 막는 안전장치는 그대로 남는다.
+
+    이번 변경은 **오류라고 판정한 뒤의 표기 방식**만 건드린다. 아래 세 문장이
+    사라지면 모델이 자기 계산 실수를 문항 오류로 떠넘긴다.
+    """
+    solve = _squeezed(prompts.SOLVE_SYSTEM_PROMPT)
+    assert (
+        "객관식인데 구한 값이 선택지에 없으면, 반드시 풀이를 되짚어 오류를 찾으십시오"
+        in solve
+    )
+    assert (
+        "답이 정수로 떨어지지 않으면 계산 실수를 의심하고 한 번 더 확인하십시오"
+        in solve
+    )
+    assert (
+        "문항이 잘못됐다고 단정하기 전에 자신의 판독과 계산을 먼저 의심해야 합니다"
+        in solve
+    )
+    # 오류 판정 트리거 목록도 유지된다.
+    assert "조건들이 서로 모순된다" in solve
+    assert "구한 값이 선택지에 없다" in solve
+
+
+def test_broken_item_output_still_matches_the_section_contract() -> None:
+    """오류 문항의 해설도 기존 섹션 계약 그대로 파싱된다.
+
+    내보내기(`export/build.py`)는 `## 제목` 단위로만 자르므로 섹션 이름·순서가
+    그대로면 영향이 없다. 새 표기가 그 계약을 깨지 않는지 실제 파서로 확인한다.
+    """
+    solution = f"""\
+## 문제 확인
+보기 ㄱ, ㄴ, ㄷ 중 옳은 것을 모두 고르는 문항입니다. 세 보기가 모두 거짓이어서
+고를 수 있는 선택지가 없어 보입니다.
+
+## 핵심 개념
+부등식의 성질
+
+## 풀이
+1. ㄱ 을 확인합니다.
+
+## 정답
+{prompts.SOLVE_ANSWER_ERROR_LINE}
+
+## 오답 주의
+출제자는 ㄷ 의 부등호 방향을 반대로 쓰려던 것으로 보이며, 그 의도대로 읽으면
+⑤ 가 답이 됩니다. 학교에서는 ⑤ 로 채점했을 가능성이 높습니다.
+"""
+    sections = markdown_sections.split_sections(solution)
+    assert list(sections) == ["문제 확인", "핵심 개념", "풀이", "정답", "오답 주의"]
+    # "## 정답" 은 한 줄뿐이다.
+    assert sections["정답"] == prompts.SOLVE_ANSWER_ERROR_LINE
+    assert "\n" not in sections["정답"]
+    # 학교 채점답은 지워지지 않고 "오답 주의" 에 살아 있다.
+    assert "⑤" in sections["오답 주의"]
+    # 내보내기에서 버리는 섹션 목록은 그대로다(정답·오답 주의는 문서에 나간다).
+    assert markdown_sections.PROBLEM_CHECK_TITLE in sections
+    assert "정답" not in {
+        markdown_sections.PROBLEM_CHECK_TITLE,
+        markdown_sections.VERIFY_TITLE,
+    }
