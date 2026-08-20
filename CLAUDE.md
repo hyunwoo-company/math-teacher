@@ -46,8 +46,11 @@
 | `app/web/**` | GitHub push → Vercel 자동배포 | 1~2분 |
 | `app/core/**` | GitHub push → CI → GHCR → k8s-helm 태그 커밋 → ArgoCD | 4~10분 |
 
-- Vercel 프로젝트는 **Root Directory 가 `app/web`** 이고, `app/web` 에 변경이 없는
-  커밋은 **Skip deployments** 로 빌드를 건너뛴다(docs 커밋마다 배포되지 않는다).
+- Vercel 프로젝트의 **Root Directory 는 `app/web`** 이다(빌드가 그 안에서 돈다 — 로그로 확인).
+- **Skip deployments 토글은 켜 두었지만 실제로 스킵되지 않는다.** 루트의 `CLAUDE.md` 만
+  바꾼 커밋(`1452cf9`)에서도 전체 빌드가 돌았다. *추측:* 같은 설정 섹션의 "Include files
+  outside the root directory in the Build Step" 이 Enabled 라 빌드 입력이 레포 전체가
+  되기 때문. **확인되기 전까지는 어떤 커밋이든 프론트 배포가 돈다고 가정할 것.**
 - 백엔드 주소는 런타임이 아니라 **빌드 시점** `NEXT_PUBLIC_API_BASE` 로 들어간다.
   값은 Vercel 프로젝트 환경변수에 있다. 로컬 `app/web/.env.production` 은 gitignore 라
   Git 배포 경로에는 올라가지 않는다.
@@ -56,6 +59,9 @@
 
 ### 배포 검증
 
+- 검증에 쓸 공개 URL 은 **`https://web-five-peach-4vf3xgcbap.vercel.app/`** 다.
+  프로젝트명 기반 `math-teacher-jenu8628s-projects.vercel.app` 은 Vercel SSO 로 302 가 나서
+  외부에서 못 읽는다(같은 배포인데 도메인에 따라 갈린다).
 - 배포 성공 여부는 HTTP 200 으로 판단하지 않는다. 옛 번들이 그대로 떠 있어도 200 이다.
   **프로덕션 번들에 새 코드 마커가 들어갔는지 grep 으로 확인**한다.
 - 청크 목록을 뽑는 정규식에 **`/` 를 반드시 넣는다** — `/_next/static/[a-zA-Z0-9._/-]+\.js`.
