@@ -473,6 +473,9 @@ def test_docx_math_sits_in_the_same_paragraph_as_its_text() -> None:
         (r"\lim_{n \to \infty} a_n", "limLow"),
         (r"\sum_{k=1}^{n} k", "nary"),
         (r"\left( x \right)", "d"),
+        # 맨몸 구분자 쌍도 `m:d` 로 간다(집합·구간).
+        (r"A=\{1,2\}", "d"),
+        (r"[0, 3]", "d"),
     ],
 )
 def test_docx_carries_each_required_structure(latex: str, structure: str) -> None:
@@ -639,6 +642,9 @@ def test_hwpx_embeds_equation_objects() -> None:
         (r"\lim_{n \to \infty} a_n", "lim _{n-> infty} a _{n}"),
         (r"\sum_{k=1}^{n} k", "sum _{k=1} ^{n} k"),
         (r"\left( x \right)", "LEFT (x RIGHT )"),
+        (r"A=\{1,2\}", "A= LEFT { 1,2 RIGHT }"),
+        # 유니코드로 적힌 기호도 평문 폴백이 아니라 수식 개체로 들어간다.
+        ("2≤x≤5", "2 leq x leq 5"),
     ],
 )
 def test_hwpx_carries_each_required_structure(latex: str, script: str) -> None:
@@ -692,3 +698,160 @@ def test_hwpx_without_math_is_unchanged() -> None:
         assert f"<hp:t>{line}</hp:t>" in section
 
 
+
+
+# ── OMML: 리터럴 구분자 쌍 ───────────────────────────────────────────
+
+
+def test_omml_literal_braces_are_a_delimiter_pair() -> None:
+    r"""`\{1,2\}` 는 글자가 아니라 `m:d` 다 — 기울지 않고 내용에 맞춰 커진다."""
+    xml = latex_to_omml(r"A=\{1,2,3\}")
+    delimiter = _first(ET.fromstring(xml), "d")
+    beginning = delimiter.find(f"{MATH_NS}dPr/{MATH_NS}begChr")
+    ending = delimiter.find(f"{MATH_NS}dPr/{MATH_NS}endChr")
+    assert beginning is not None and beginning.get(f"{MATH_NS}val") == "{"
+    assert ending is not None and ending.get(f"{MATH_NS}val") == "}"
+    assert _text_of(_first(delimiter, "e")) == "1,2,3"
+    # 중괄호가 텍스트 런으로 남아 있으면 안 된다(그게 기울어 보이던 원인).
+    assert "{" not in _text_of(ET.fromstring(xml))
+
+
+def test_omml_literal_brackets_are_a_delimiter_pair() -> None:
+    """대괄호도 마찬가지다(`[0,1]`, 가우스 기호)."""
+    delimiter = _first(_parse(r"[0,1]"), "d")
+    beginning = delimiter.find(f"{MATH_NS}dPr/{MATH_NS}begChr")
+    ending = delimiter.find(f"{MATH_NS}dPr/{MATH_NS}endChr")
+    assert beginning is not None and beginning.get(f"{MATH_NS}val") == "["
+    assert ending is not None and ending.get(f"{MATH_NS}val") == "]"
+    assert _text_of(delimiter) == "0,1"
+
+
+def test_omml_literal_delimiters_grow_with_their_content() -> None:
+    """`m:d` 라야 분수처럼 키 큰 내용을 감쌀 때 괄호가 같이 커진다."""
+    delimiter = _first(_parse(r"\{\frac{a}{b}\}"), "d")
+    assert delimiter.find(f".//{MATH_NS}f") is not None
+
+
+def test_omml_unbalanced_literal_delimiter_stays_text() -> None:
+    """짝이 없으면(잘린 원고) 예전처럼 글자로 남긴다 — 거절하지 않는다."""
+    root = _parse(r"A_{k}=\{x")
+    assert root.find(f".//{MATH_NS}d") is None
+    assert "{" in _text_of(root)
+
+
+def test_omml_root_index_bracket_is_not_a_delimiter() -> None:
+    r"""`\sqrt[3]{8}` 의 대괄호는 지수 자리다 — `m:d` 로 새지 않는다(회귀 방지)."""
+    root = _parse(r"\sqrt[3]{8}")
+    assert root.find(f".//{MATH_NS}d") is None
+    radical = _first(root, "rad")
+    assert _text_of(_first(radical, "deg")) == "3"
+
+
+def test_omml_nested_literal_delimiters() -> None:
+    r"""`\{ [0,1] \}` 처럼 겹쳐도 각각 `m:d` 로 나간다."""
+    outer = _first(_parse(r"\{[0,1]\}"), "d")
+    inner = outer.find(f".//{MATH_NS}d")
+    assert inner is not None
+    beginning = inner.find(f"{MATH_NS}dPr/{MATH_NS}begChr")
+    assert beginning is not None and beginning.get(f"{MATH_NS}val") == "["
+
+
+# ── 한글 수식: 맨몸 중괄호와 유니코드 기호 ───────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("latex", "expected"),
+    [
+        (r"A=\{1,2,3\}", "A= LEFT { 1,2,3 RIGHT }"),
+        (r"\{1,3,5\}", "LEFT { 1,3,5 RIGHT }"),
+        # 이미 크기 조절 괄호면 그대로다(이중으로 감싸지 않는다).
+        (r"\left\{ 1,2 \right\}", "LEFT { 1,2 RIGHT }"),
+    ],
+)
+def test_hwp_equation_braces_use_verified_delimiters(
+    latex: str, expected: str
+) -> None:
+    r"""맨몸 `\{ \}` 도 렌더 검증된 `LEFT { ... RIGHT }` 로 낸다."""
+    assert latex_to_hwp_equation(latex) == expected
+
+
+def test_hwp_equation_unbalanced_brace_keeps_the_old_spelling() -> None:
+    r"""짝이 안 맞으면(잘린 원고) 예전 표기로 되돌아간다 — 거절하지 않는다."""
+    assert latex_to_hwp_equation(r"A_{k}=\{x") == "A _{k} = LBRACE x"
+
+
+@pytest.mark.parametrize(
+    ("latex", "expected"),
+    [
+        # PUA 디코더가 유니코드로 복원해 둔 기호들(tmp/decode_*.txt 실측).
+        ("2≤x≤5", "2 leq x leq 5"),
+        ("B⊂A", "B subset A"),
+        (r"X∩\{2,4\}=∅", "X cap LEFT { 2,4 RIGHT } = emptyset"),
+        ("∠B", "angle B"),
+        (r"f\left(1\right)×g\left(3\right)", "f LEFT (1 RIGHT ) times g LEFT (3 RIGHT )"),
+        ("z^{1}+⋯+z^{3}", "z^{1}+ cdots +z^{3}"),
+        ("x→0", "x->0"),
+    ],
+)
+def test_hwp_equation_accepts_decoded_unicode_symbols(
+    latex: str, expected: str
+) -> None:
+    """이미 유니코드로 복원된 기호도 수식 개체로 나간다(평문 폴백 아님)."""
+    assert latex_to_hwp_equation(latex) == expected
+
+
+def test_hwp_symbol_table_is_derived_and_round_trips() -> None:
+    """기호 표는 `to_plain_text.SYMBOLS` 를 뒤집은 것이고, 왕복이 맞아야 한다.
+
+    표를 손으로 적지 않는다는 것과, 각 항목이 정말 같은 기호로 되읽힌다는 것을
+    한꺼번에 못박는다.
+    """
+    from hwpx.equation.eqedit import eqedit_to_latex
+
+    from export.hwpeq import _UNICODE_SYMBOLS
+    from to_plain_text import SYMBOLS, to_plain_text
+
+    assert _UNICODE_SYMBOLS  # 비어 있으면 변환기 쪽이 통째로 바뀐 것이다
+    for symbol, command in _UNICODE_SYMBOLS.items():
+        assert SYMBOLS[command.lstrip("\\")] == symbol
+        script = latex_to_hwp_equation(command)
+        assert to_plain_text("$" + eqedit_to_latex(script) + "$") == symbol
+    # 변환기가 받아 주는 기호는 빠짐없이 표에 있어야 한다(표가 썩지 않게).
+    for name, symbol in SYMBOLS.items():
+        if symbol.isascii() or symbol in _UNICODE_SYMBOLS:
+            continue
+        with pytest.raises(HwpEquationError):
+            latex_to_hwp_equation("\\" + name)
+
+
+def test_omml_exponent_binds_the_whole_braced_group() -> None:
+    r"""`\{f'(x)\}^{2}` 의 지수는 묶음 전체에 붙는다.
+
+    재현 파일(2023 잠실여고 고2 2학기 중간) 실측: 예전에는 닫는 중괄호 한 글자가
+    지수의 밑이 돼 `m:t` 에 `(x-1){f'(x)` + `sSup(}, 2)` 로 쪼개졌다(중괄호 22쌍).
+    """
+    root = _parse(r"(x-1)\{f'(x)\}^{2}")
+    script = _first(root, "sSup")
+    assert _children(script) == ["e", "sup"]
+    base = script.find(f"{MATH_NS}e/{MATH_NS}d")
+    assert base is not None, "지수의 밑이 구분자 묶음이어야 한다"
+    assert _text_of(base) == "f'(x)"
+    assert _text_of(_first(script, "sup")) == "2"
+
+
+def test_omml_delimiter_pair_does_not_cross_a_brace_group() -> None:
+    """`{[a}b]` 처럼 그룹을 가로지르는 짝은 짝이 아니다(글자로 남긴다)."""
+    root = _parse("{[a}b]")
+    assert root.find(f".//{MATH_NS}d") is None
+    assert _text_of(root) == "[ab]"
+
+
+def test_omml_survives_a_flood_of_unclosed_delimiters() -> None:
+    """짝 없는 여는 괄호가 쏟아져도 되읽기로 폭주하지 않는다.
+
+    회귀 방지: 자리마다 짝을 찾아보게 두면 같은 구간을 몇 번이고 다시 읽는다.
+    짝짓기는 파싱 전에 한 번만 한다.
+    """
+    root = _parse("[" * 200)
+    assert root.find(f".//{MATH_NS}d") is None
+    assert _text_of(root) == "[" * 200

@@ -21,7 +21,7 @@ from typing import Final
 
 from hwpx.equation import EquationConversionError, latex_to_eqedit
 
-from to_plain_text import DROP
+from to_plain_text import DROP, SYMBOLS
 
 # 같은 뜻의 지원 명령으로 갈아끼운다. `\cfrac` 은 연분수 조판만 다른 분수이고
 # 변환기는 `\frac`/`\dfrac`/`\tfrac` 만 받는다.
@@ -42,6 +42,82 @@ _FONT_COMMANDS: Final[frozenset[str]] = frozenset(
 # 명령 하나를 통째로 집는다. `\\`(줄바꿈)은 `[A-Za-z]+` 가 아니라 `.` 로 잡혀
 # 원문 그대로 남고, 변환기가 거절한다(행렬 밖 줄바꿈은 옮길 수 없다).
 _COMMAND_RE: Final[re.Pattern[str]] = re.compile(r"\\(?:[A-Za-z]+|.)", re.DOTALL)
+
+# 이미 크기 조절 괄호가 붙은 중괄호와 맨몸 중괄호를 한 번에 훑는다. 앞쪽 대안이
+# 먼저 맞아야 `\left\{` 를 `\left\left\{` 로 두 번 감싸지 않는다.
+_BRACE_RE: Final[re.Pattern[str]] = re.compile(
+    r"\\(?:left|right)\s*\\[{}]|\\[{}]"
+)
+
+
+def _sized_braces(latex: str) -> str:
+    r"""맨몸 `\{ \}` 를 `\left\{ \right\}` 로 바꾼다(동등 변환).
+
+    왜: 변환기는 리터럴 중괄호를 `LBRACE`/`RBRACE` 낱말로 낸다. 그런데 같은
+    라이브러리의 읽기 방향(`eqedit_to_latex`)조차 그 낱말을 중괄호로 되읽지
+    못하고 글자 그대로 돌려준다 — 렌더 검증을 거친 표기가 아니라는 뜻이다.
+    반면 `LEFT { ... RIGHT }` 는 P0 계약에서 검증된 표기이고, 내용 높이에 맞춰
+    커진다. 사용자 보고 "`\{ \}` 기울어짐" 도 리터럴 표기 쪽이라 이쪽으로 옮긴다.
+
+    짝이 맞는지는 여기서 따지지 않는다. 짝이 어긋나면 변환기가 거절하고
+    호출부(`latex_to_hwp_equation`)가 예전 표기로 되돌아간다.
+
+    Args:
+        latex: 정규화된 LaTeX 수식 본문.
+
+    Returns:
+        중괄호를 크기 조절 괄호로 바꾼 LaTeX. 뜻은 바뀌지 않는다.
+    """
+    return _BRACE_RE.sub(
+        lambda match: {r"\{": r"\left\{", r"\}": r"\right\}"}.get(
+            match.group(0), match.group(0)
+        ),
+        latex,
+    )
+
+
+def _supported_symbol_commands() -> dict[str, str]:
+    r"""유니코드 수학 기호 -> 변환기가 받아 주는 LaTeX 명령.
+
+    왜: 원고에는 `≤ ⊂ ∩ ⋯ ∠ ⇒` 와 곱셈기호(U+00D7)처럼 **이미 유니코드로 적힌**
+    수학 기호가 그대로 들어온다(PUA 디코더 출력과 AI 가 쓴 풀이 양쪽 다).
+    변환기의 렉서는 ASCII 밖 문자를 거절하므로 그 수식은 통째로 평문으로
+    폴백했다 — 사용자 보고 "식을 수식으로 안하고 뽑아낸게 있음".
+
+    실측 근거: `tmp/decode_*.txt`(디코더 출력) 454개 스팬 중 21개가 이 이유로
+    거절됐고, 재현 파일 `2023 잠실여고 고2 2학기 중간_문제와해설.hwpx` 에서
+    평문으로 떨어진 7곳 중 4곳이 `⇒` 하나 때문이었다(docx 는 같은 자리가 수식으로
+    들어가 있다 — OMML 은 기호를 글자로 통과시키므로).
+
+    표를 새로 적지 않는다. `to_plain_text.SYMBOLS`(명령->기호)를 뒤집고, 변환기가
+    실제로 받는 명령만 남긴다(받는지는 여기서 직접 물어본다 — 133회 호출에
+    0.5ms 라 수입 시간에 해도 된다). 같은 기호에 이름이 여럿이면 SYMBOLS 의
+    선언 순서가 우선순위다(`le` 가 `leq` 보다 앞).
+
+    Returns:
+        기호 한 글자 -> 백슬래시가 붙은 LaTeX 명령.
+    """
+    table: dict[str, str] = {}
+    for name, symbol in SYMBOLS.items():
+        # ASCII 는 렉서가 이미 통과시킨다. 굳이 명령으로 바꿀 이유가 없다.
+        if symbol.isascii() or symbol in table:
+            continue
+        command = "\\" + name
+        try:
+            latex_to_eqedit(command)
+        except EquationConversionError:
+            continue  # 검증된 토큰 집합 밖이다. 그대로 두고 폴백시킨다.
+        table[symbol] = command
+    return table
+
+
+_UNICODE_SYMBOLS: Final[dict[str, str]] = _supported_symbol_commands()
+
+# `str.translate` 용. 명령 뒤에 공백을 붙여야 뒤 글자가 이름에 먹히지 않는다
+# (`2≤x` -> `2\le x`. 공백이 없으면 `\lex` 라는 없는 명령이 된다).
+_SYMBOL_TRANSLATION: Final[dict[int, str]] = {
+    ord(symbol): command + " " for symbol, command in _UNICODE_SYMBOLS.items()
+}
 
 
 # 한글 수식 편집기에서 앞뒤 공백 없이 붙여 써도 뜻이 그대로인 문자들.
@@ -80,7 +156,11 @@ def _rewrite_command(match: re.Match[str]) -> str:
 
 
 def _normalize(latex: str) -> str:
-    """변환기에 넘기기 전 LaTeX 를 동등 변환한다.
+    r"""변환기에 넘기기 전 LaTeX 를 동등 변환한다.
+
+    유니코드 기호를 먼저 명령으로 되돌린다(`≤` -> `\le `). 그렇게 만든 명령도
+    바로 뒤 `_rewrite_command` 를 지나가지만, 기호 명령은 손댈 대상이 아니라
+    그대로 통과한다.
 
     Args:
         latex: 구분자를 벗긴 LaTeX 수식 본문.
@@ -88,7 +168,8 @@ def _normalize(latex: str) -> str:
     Returns:
         정규화된 LaTeX. 뜻은 바뀌지 않는다.
     """
-    return _COMMAND_RE.sub(_rewrite_command, latex).replace("~", " ")
+    restored = latex.translate(_SYMBOL_TRANSLATION)
+    return _COMMAND_RE.sub(_rewrite_command, restored).replace("~", " ")
 
 
 def _is_safe_unit(unit: str) -> bool:
@@ -196,6 +277,39 @@ def _tighten(script: str) -> str:
     return "".join(kept)
 
 
+def _convert(normalized: str) -> str:
+    r"""정규화된 LaTeX 를 EqEdit 스크립트로 옮긴다.
+
+    `_sized_braces` 로 손본 쪽을 **먼저** 시도한다. 중괄호 짝이 어긋난 원고
+    (`A_{k}=\{x` 처럼 추출이 잘린 것)에서는 `\left\{` 에 짝이 없어 변환기가
+    거절하므로, 그때는 손대지 않은 원문으로 한 번 더 시도한다. 둘 다 실패하면
+    **원문 쪽 오류**를 올린다 — 우리가 끼워 넣은 `\left` 얘기를 하면 로그를 보고
+    원인을 찾을 수 없다.
+
+    Args:
+        normalized: `_normalize` 를 지난 LaTeX 수식 본문.
+
+    Returns:
+        변환기가 내놓은 EqEdit 스크립트(공백 정리 전).
+
+    Raises:
+        HwpEquationError: 검증된 토큰 집합 밖의 문법이 있다.
+    """
+    candidates = [normalized]
+    sized = _sized_braces(normalized)
+    if sized != normalized:
+        candidates.insert(0, sized)
+    error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return latex_to_eqedit(candidate)
+        except EquationConversionError as failure:
+            error = failure
+        except Exception as failure:  # 변환기 내부 오류가 문서 생성을 막지 않게
+            raise HwpEquationError(f"변환기 내부 오류: {failure}") from failure
+    raise HwpEquationError(str(error))
+
+
 def latex_to_hwp_equation(latex: str) -> str:
     r"""LaTeX 수식 본문을 한글 수식(EqEdit) 스크립트로 바꾼다.
 
@@ -211,12 +325,7 @@ def latex_to_hwp_equation(latex: str) -> str:
     normalized = _normalize(latex).strip()
     if not normalized:
         raise HwpEquationError("빈 수식")
-    try:
-        script = latex_to_eqedit(normalized)
-    except EquationConversionError as error:
-        raise HwpEquationError(str(error)) from error
-    except Exception as error:  # 변환기 내부 오류가 문서 생성을 막지 않게 한다
-        raise HwpEquationError(f"변환기 내부 오류: {error}") from error
+    script = _convert(normalized)
     tightened = _tighten(script)
     if not tightened:
         raise HwpEquationError("변환 결과가 비었다")

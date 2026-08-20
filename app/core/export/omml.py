@@ -16,7 +16,7 @@ r"""LaTeX -> OMML(`m:oMath`) 변환. 워드 네이티브 수식 조판.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 from xml.sax.saxutils import escape, quoteattr
 
@@ -122,6 +122,22 @@ _DELIMITER_COMMANDS: Final[dict[str, str]] = {
     "Vert": "‖",
 }
 
+# `\left`/`\right` 없이 맨몸으로 온 구분자 쌍. 여는 토큰, 닫는 토큰, `m:begChr`,
+# `m:endChr` 순이다.
+#
+# 왜: 집합 `A=\{1,2,3\}` 이나 구간 `[0,1]` 을 글자 런(`m:t`)으로 내보내면 워드가
+# 이걸 구분자가 아니라 **수식 문자**로 조판한다. 사용자 보고 "`\{ \}` 기울어짐 /
+# `\[ \]` 기울어지고" 가 그 증상이고, 안에 분수가 들어가도 괄호가 글자 높이 그대로
+# 남는 문제도 같이 따라온다. 워드 자신은 이런 괄호를 `m:d` 로 저장한다 —
+# `\left(...\right)`(`_delimited`) 와 같은 표현으로 맞춘다.
+#
+# 소괄호는 일부러 넣지 않았다. 보고에 없었고, 이미 대부분의 원고가 `\left(` 로
+# 들어온다(PUA 디코더 출력). 필요해지면 이 표에 한 줄 더 넣으면 된다.
+_LITERAL_DELIMITERS: Final[tuple[tuple[str, str, str, str], ...]] = (
+    (r"\{", r"\}", "{", "}"),
+    ("[", "]", "[", "]"),
+)
+
 # 런 스타일 -> `m:rPr`. `p` 는 곧게(plain), `nor` 는 수식이 아닌 리터럴 텍스트다.
 # `m:rPr` 의 자식 순서는 스펙이 못박고 있어(lit, nor, scr, sty, brk, aln) 둘을
 # 동시에 넣지 않는다.
@@ -165,11 +181,14 @@ class _Stop:
         at_brace: True 면 `}` 에서 멈춘다(중괄호 그룹 안).
         at_right: True 면 `\\right` 에서 멈춘다(`\\left ... \\right` 안).
         at_middle: True 면 `\\middle` 에서 멈춘다(`m:d` 의 파트가 갈리는 자리).
+        at_literal: 비어 있지 않으면 이 토큰(`]` / `\\}`)에서 멈춘다
+            (맨몸 구분자 쌍의 닫는 쪽).
     """
 
     at_brace: bool = False
     at_right: bool = False
     at_middle: bool = False
+    at_literal: str = ""
 
 
 def _is_letter(char: str) -> bool:
@@ -240,6 +259,61 @@ def _arg(tag: str, xml: str) -> str:
     return f"<m:{tag}>{xml}</m:{tag}>" if xml else f"<m:{tag}/>"
 
 
+def _pair_literal_delimiters(source: str) -> dict[int, int]:
+    r"""맨몸 구분자 쌍의 짝을 **한 번에** 훑어 `{여는 위치: 닫는 위치}` 로.
+
+    파서가 자리마다 "닫는 짝이 있나" 를 찾아보게 두면 짝이 없는 원고(`[[[[...`)
+    에서 같은 구간을 몇 번이고 다시 읽는다. 그래서 짝짓기는 여기서 한 번에
+    끝내고, 파서는 이 표를 O(1) 로 물어보기만 한다.
+
+    규칙은 파서의 층 개념과 같다. 중괄호 그룹(`{...}`)을 가로지르는 짝은 짝이
+    아니다(`{[a}b]` 의 `[` 는 짝 없음). 명령(`\frac`, `\left` …)은 통째로
+    건너뛰고, 이스케이프된 중괄호(`\{` `\}`)만 구분자 후보로 본다.
+
+    Args:
+        source: LaTeX 수식 본문.
+
+    Returns:
+        여는 토큰의 시작 위치 -> 닫는 토큰의 시작 위치.
+    """
+    closer_of = {opening: closing for opening, closing, _, _ in _LITERAL_DELIMITERS}
+    closers = {closing for _, closing, _, _ in _LITERAL_DELIMITERS}
+    pairs: dict[int, int] = {}
+    # (기다리는 닫는 토큰, 여는 위치). `}` 는 중괄호 그룹의 경계 표시다.
+    stack: list[tuple[str, int]] = []
+    index = 0
+    while index < len(source):
+        token = source[index]
+        step = 1
+        if token == "\\":
+            following = source[index + 1] if index + 1 < len(source) else ""
+            token = "\\" + following
+            step = 2
+            if token not in closer_of and token not in closers:
+                if _is_letter(following):
+                    step = 1
+                    while index + step < len(source) and _is_letter(
+                        source[index + step]
+                    ):
+                        step += 1
+                index += step
+                continue
+        if token in closer_of:
+            stack.append((closer_of[token], index))
+        elif token == "{":
+            stack.append(("}", index))
+        elif token == "}":
+            # 그룹이 닫히면 그 안에서 열린 채로 남은 구분자는 짝이 없다.
+            while stack and stack[-1][0] != "}":
+                stack.pop()
+            if stack:
+                stack.pop()
+        elif token in closers and stack and stack[-1][0] == token:
+            pairs[stack.pop()[1]] = index
+        index += step
+    return pairs
+
+
 class _Parser:
     """LaTeX 본문을 OMML 로 바꾸는 재귀 하강 파서."""
 
@@ -251,6 +325,10 @@ class _Parser:
         """
         self._source = source
         self._index = 0
+        self._pairs = _pair_literal_delimiters(source)
+        # 표가 짝이라고 했는데도 파서가 그 자리에서 멈추지 못한 위치들. 다시
+        # 시도해 봐야 같은 결과라 두 번 읽지 않는다(되읽기 폭주 방지).
+        self._unpaired: set[int] = set()
 
     # ── 진입점 ──────────────────────────────────────────────────────
     def parse(self) -> str:
@@ -297,6 +375,14 @@ class _Parser:
             raise UnsupportedLatexError("수식 중첩이 너무 깊다")
         items: list[_Item] = []
         while (char := self._peek()) is not None:
+            if stop.at_literal and self._source.startswith(
+                stop.at_literal, self._index
+            ):
+                return items
+            literal = self._literal_delimited(depth, stop)
+            if literal is not None:
+                items.append(_Item(literal))
+                continue
             if char == "}":
                 if stop.at_brace:
                     return items
@@ -662,6 +748,48 @@ class _Parser:
             f"<m:sepChr m:val={quoteattr(separator)}/>"
             f"<m:endChr m:val={quoteattr(closing)}/></m:dPr>{body}</m:d>"
         )
+
+    def _literal_delimited(self, depth: int, stop: _Stop) -> str | None:
+        r"""`\{ ... \}` / `[ ... ]` 를 `m:d` 로. 짝이 없으면 손대지 않는다.
+
+        여는 토큰을 소비해 보고, 같은 층에서 닫는 토큰까지 정확히 읽혔을 때만
+        `m:d` 를 만든다. 아니면 커서를 되돌려 `None` 을 준다 — 잘린 원고
+        (`A_{k}=\{x`) 는 예전처럼 글자로 남아야지 수식 전체가 평문으로
+        되돌아가면 안 된다.
+
+        Args:
+            depth: 현재 중첩 깊이.
+            stop: 바깥 시퀀스의 멈춤 조건. 그대로 물려줘야 `{ [a }` 처럼 짝이
+                엇갈린 원고에서 안쪽 파서가 바깥 그룹을 넘어 삼키지 않는다.
+
+        Returns:
+            `m:d` XML. 이 자리에서 만들 수 없으면 None.
+        """
+        start = self._index
+        if start in self._unpaired or start not in self._pairs:
+            return None
+        for opening, closing, begin_char, end_char in _LITERAL_DELIMITERS:
+            if not self._source.startswith(opening, start):
+                continue
+            self._index = start + len(opening)
+            try:
+                body: str | None = _serialize(
+                    self._sequence(depth + 1, replace(stop, at_literal=closing))
+                )
+            except UnsupportedLatexError:
+                body = None
+            if body is not None and self._source.startswith(closing, self._index):
+                self._index += len(closing)
+                return (
+                    f"<m:d><m:dPr><m:begChr m:val={quoteattr(begin_char)}/>"
+                    f'<m:sepChr m:val=""/>'
+                    f"<m:endChr m:val={quoteattr(end_char)}/></m:dPr>"
+                    f"{_arg('e', body)}</m:d>"
+                )
+            self._index = start
+            self._unpaired.add(start)
+            return None
+        return None
 
     def _read_delimiter(self) -> str:
         r"""`\left` / `\right` 뒤의 구분자 문자를 읽는다.
