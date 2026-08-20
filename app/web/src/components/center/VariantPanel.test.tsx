@@ -51,6 +51,27 @@ describe('풀이 탭의 변형 문제 만들기', () => {
     return user;
   }
 
+  it('변형이 만들어지면 완료 수·완료 배지가 보인다', async () => {
+    const user = await openProblemOne();
+
+    // 헤더 집계는 탭 바 바로 앞 줄이다.
+    const headerText = () =>
+      screen
+        .getByRole('tablist', { name: '변형 유형' })
+        .previousElementSibling?.textContent?.replace(/\s+/g, ' ') ?? '';
+
+    // 첫 탭(숫자)이 자동 생성되어 끝나면 완료 수가 1 이 된다.
+    await waitFor(() => expect(modeDone(1, 'number')).toBe(true), { timeout: 15_000 });
+    await waitFor(() => expect(headerText()).toContain('변형 완료 1 / 3'));
+    // 본문 카드에도 완료 배지가 뜬다(풀이 탭의 "풀이 완료" 배지와 같은 자리).
+    expect(screen.getAllByText('변형 완료').length).toBeGreaterThan(0);
+
+    // 두 번째 탭까지 만들면 2 로 오른다.
+    await user.click(screen.getByRole('tab', { name: '조건 변형' }));
+    await waitFor(() => expect(modeDone(1, 'condition')).toBe(true), { timeout: 15_000 });
+    await waitFor(() => expect(headerText()).toContain('변형 완료 2 / 3'));
+  }, 40_000);
+
   it('탭 바 3개가 보이고, 패널이 열리면 첫 탭(숫자)만 자동 생성된다', async () => {
     const spy = vi.spyOn(api, 'createJob');
     await openProblemOne();

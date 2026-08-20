@@ -16,7 +16,10 @@ import {
   VARIANT_PICK_KINDS,
   VARIANT_PICK_LABEL,
   allPicksRunning,
+  VARIANT_MODES,
+  doneVariantModeCount,
   hasRunningVariant,
+  variantDoneProblemCount,
   runningPickCount,
   variantProgressOf,
   type VariantProgress,
@@ -81,6 +84,17 @@ export function SolutionsTab() {
   const solvedCount = useMemo(
     () => problems.filter((problem) => solutions[problem.no]?.status === 'done').length,
     [problems, solutions],
+  );
+
+  /**
+   * 변형을 하나라도 만들어 둔 문항 수. 풀이 완료와 같은 형식(`N / 문항수`)으로 읽히게
+   * **문항 단위**로 센다 — 유형 조합 단위로 세면 `5/60` 처럼 나와 "몇 문항이 됐나" 에
+   * 답하지 못한다. 근거 자리는 문항 행·변형 패널과 같다(variants 의 done).
+   */
+  const variantDoneCount = useMemo(
+    () =>
+      fileId ? variantDoneProblemCount(variants, fileId, problems.map((problem) => problem.no)) : 0,
+    [variants, fileId, problems],
   );
 
   const visible = useMemo(
@@ -176,6 +190,10 @@ export function SolutionsTab() {
       <div className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-3 py-1.5 text-[12px] text-slate-600">
         <span>
           풀이 완료 <span className="font-semibold text-slate-800">{solvedCount}</span> / {problems.length}
+        </span>
+        <span>
+          변형 완료 <span className="font-semibold text-slate-800">{variantDoneCount}</span> /{' '}
+          {problems.length}
         </span>
         {solve.running ? (
           <span className="text-blue-700">
@@ -408,6 +426,7 @@ export function SolutionsTab() {
                 pickMode={pickMode}
                 transcript={transcripts[transcriptCacheKey(fileId, problem.no)]}
                 variantRunning={hasRunningVariant(variants, fileId, problem.no)}
+                variantDone={doneVariantModeCount(variants, fileId, problem.no)}
                 picked={pickedSet.has(problem.no)}
                 onTogglePick={() =>
                   pickMode === 'variant'
@@ -447,6 +466,8 @@ interface SolutionRowProps {
   transcript: TranscriptEntry | undefined;
   /** 이 문항의 변형이 유형 하나라도 생성 중인지(변형 모드에서 배지로 알린다). */
   variantRunning: boolean;
+  /** 이 문항에서 이미 만들어 둔 변형 유형 수(0 ~ 3). 완료 배지에 쓴다. */
+  variantDone: number;
   /** 이 문항이 고른 대상인지. */
   picked: boolean;
   onTogglePick: () => void;
@@ -561,6 +582,7 @@ function SolutionRow({
   pickMode,
   transcript,
   variantRunning,
+  variantDone,
   picked,
   onTogglePick,
 }: SolutionRowProps) {
@@ -617,6 +639,16 @@ function SolutionRow({
               {/* 변형 모드에서 어떤 문항이 이미 돌고 있는지 행에서 바로 보이게. */}
               {pickMode === 'variant' && variantRunning ? (
                 <InlineBadge tone="violet">변형 생성 중</InlineBadge>
+              ) : null}
+              {/*
+                변형을 만들어 둔 문항은 풀이 완료와 마찬가지로 **모드와 무관하게** 표시한다.
+                생성 중 배지처럼 변형 모드에서만 보이면, 정작 "무엇을 이미 만들었나" 를
+                확인하려고 모드를 켜야 해서 순서가 뒤집힌다.
+              */}
+              {variantDone > 0 ? (
+                <InlineBadge tone="violet">
+                  변형 완료 {variantDone}/{VARIANT_MODES.length}
+                </InlineBadge>
               ) : null}
             </span>
             <span className="mt-1 block truncate text-[12px] text-slate-500">

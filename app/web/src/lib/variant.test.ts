@@ -11,12 +11,15 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  VARIANT_MODES,
   allPicksRunning,
   countRunningVariants,
+  doneVariantModeCount,
   hasRunningVariant,
   isPickRunning,
   runningPickCount,
   variantCacheKey,
+  variantDoneProblemCount,
   variantProgressOf,
   type VariantJobLike,
   type VariantStatusLike,
@@ -228,5 +231,69 @@ describe('variantProgressOf', () => {
       jobs: [job({ status: 'done' })],
     });
     expect(progress).toBeNull();
+  });
+});
+
+/* ── "완료" 판정 ────────────────────────────────────────────────────
+ *
+ * 진행 중과 같은 자리(`variants[key][mode].status`)만 본다. 완료 수를 따로
+ * 집계해 두면 같은 사실의 사본이 생겨, 위아래가 서로 다른 말을 하는 문제가
+ * 형태만 바꿔 다시 난다.
+ */
+
+describe('doneVariantModeCount', () => {
+  it('그 문항에서 만들어진 유형 수를 센다', () => {
+    const variants = cache([FILE, 4, 'number', 'done'], [FILE, 4, 'condition', 'done']);
+    expect(doneVariantModeCount(variants, FILE, 4)).toBe(2);
+  });
+
+  it('생성 중·실패·없음은 완료로 세지 않는다', () => {
+    const variants = cache(
+      [FILE, 4, 'number', 'done'],
+      [FILE, 4, 'condition', 'streaming'],
+      [FILE, 4, 'number_condition', 'error'],
+    );
+    expect(doneVariantModeCount(variants, FILE, 4)).toBe(1);
+  });
+
+  it('3종을 다 만들면 유형 수만큼 나온다', () => {
+    const variants = cache(
+      [FILE, 4, 'number', 'done'],
+      [FILE, 4, 'condition', 'done'],
+      [FILE, 4, 'number_condition', 'done'],
+    );
+    expect(doneVariantModeCount(variants, FILE, 4)).toBe(VARIANT_MODES.length);
+  });
+
+  it('다른 시험지·다른 문항의 완료는 섞이지 않는다', () => {
+    const variants = cache([OTHER, 4, 'number', 'done'], [FILE, 5, 'number', 'done']);
+    expect(doneVariantModeCount(variants, FILE, 4)).toBe(0);
+  });
+
+  it('캐시가 비어 있으면 0', () => {
+    expect(doneVariantModeCount(cache(), FILE, 4)).toBe(0);
+  });
+});
+
+describe('variantDoneProblemCount', () => {
+  it('유형 하나라도 만들어진 문항 수를 센다(문항 단위)', () => {
+    const variants = cache(
+      [FILE, 1, 'number', 'done'],
+      [FILE, 2, 'number', 'done'],
+      [FILE, 2, 'condition', 'done'],
+      [FILE, 3, 'number', 'streaming'],
+    );
+    // 1번·2번은 완료, 3번은 생성 중이라 아직 아니다.
+    expect(variantDoneProblemCount(variants, FILE, [1, 2, 3])).toBe(2);
+  });
+
+  it('목록에 없는 문항은 세지 않는다', () => {
+    const variants = cache([FILE, 9, 'number', 'done']);
+    expect(variantDoneProblemCount(variants, FILE, [1, 2])).toBe(0);
+  });
+
+  it('문항 목록이 비면 0', () => {
+    const variants = cache([FILE, 1, 'number', 'done']);
+    expect(variantDoneProblemCount(variants, FILE, [])).toBe(0);
   });
 });

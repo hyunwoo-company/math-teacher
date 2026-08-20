@@ -132,6 +132,54 @@ export function hasRunningVariant(
   return VARIANT_MODES.some((mode) => byMode[mode]?.status === 'streaming');
 }
 
+/* ── "완료" 판정 ──────────────────────────────────────────────────────
+ *
+ * 진행 중과 **같은 자리**(`variants[key][mode].status`)만 본다. 완료 수를 따로
+ * 세어 두면 같은 사실의 사본이 생겨, 위아래가 서로 다른 말을 하는 문제가 형태만
+ * 바꿔 다시 난다(위 진행 판정 주석과 같은 이유).
+ */
+
+/** 그 (문항, 유형)의 변형이 이미 만들어져 있는지. */
+export function isVariantModeDone(
+  variants: VariantStatusMap,
+  fileId: string,
+  no: number,
+  mode: VariantMode,
+): boolean {
+  return variants[variantCacheKey(fileId, no)]?.[mode]?.status === 'done';
+}
+
+/**
+ * 그 문항에서 만들어진 변형 유형 수(0 ~ `VARIANT_MODES.length`).
+ *
+ * 생성 중·실패는 세지 않는다. 문항 행과 변형 패널이 `N/3` 을 같은 근거로 낸다.
+ */
+export function doneVariantModeCount(
+  variants: VariantStatusMap,
+  fileId: string,
+  no: number,
+): number {
+  const byMode = variants[variantCacheKey(fileId, no)];
+  if (!byMode) return 0;
+  return VARIANT_MODES.filter((mode) => byMode[mode]?.status === 'done').length;
+}
+
+/**
+ * 변형이 **하나라도** 만들어진 문항 수(문항 단위).
+ *
+ * 상단 집계가 쓴다. 유형 조합 단위로 세면 `5/60` 처럼 나와 "몇 문항이 끝났나" 라는
+ * 질문에 답하지 못한다 — 풀이 완료 집계(`N/문항수`)와 읽는 법을 맞춘다.
+ *
+ * @param nos 셀 대상 문항 번호들(지금 시험지의 문항 목록).
+ */
+export function variantDoneProblemCount(
+  variants: VariantStatusMap,
+  fileId: string,
+  nos: readonly number[],
+): number {
+  return nos.filter((no) => doneVariantModeCount(variants, fileId, no) > 0).length;
+}
+
 /** 고른 문항 중 그 유형으로 이미 생성 중인 문항 수. */
 export function runningPickCount(
   variants: VariantStatusMap,

@@ -5,8 +5,8 @@ import clsx from 'clsx';
 import { MathText } from '@/components/MathText';
 import { CopyButton } from '@/components/ui/CopyButton';
 import { toPlainText } from '@/lib/to-plain-text';
-import { Spinner } from '@/components/ui/Feedback';
-import { VARIANT_MODE_LABEL, VARIANT_MODES } from '@/lib/variant';
+import { InlineBadge, Spinner } from '@/components/ui/Feedback';
+import { VARIANT_MODE_LABEL, VARIANT_MODES, doneVariantModeCount } from '@/lib/variant';
 import { useWorkspace, type VariantEntry } from '@/store/workspace';
 import type { VariantMode } from '@/types/api';
 
@@ -60,6 +60,7 @@ export function VariantPanel({ fileId, no, disabled = false, className }: Varian
 function VariantTabs({ fileId, no, disabled }: { fileId: string; no: number; disabled: boolean }) {
   const key = `${fileId}::${no}`;
   const byMode = useWorkspace((state) => state.variants[key]);
+  const variants = useWorkspace((state) => state.variants);
   const generateVariant = useWorkspace((state) => state.generateVariant);
   const [activeMode, setActiveMode] = useState<VariantMode>(VARIANT_MODES[0]);
 
@@ -73,10 +74,18 @@ function VariantTabs({ fileId, no, disabled }: { fileId: string; no: number; dis
     void generateVariant(fileId, no, activeMode);
   }, [disabled, fileId, no, activeMode, generateVariant]);
 
+  // 완료 수는 문항 행·상단과 같은 자리(variants 의 done)를 본다.
+  const doneCount = doneVariantModeCount(variants, fileId, no);
+
   return (
     <>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <span className="text-[12px] font-semibold text-slate-700">변형 문제 만들기</span>
+        {/* 풀이 탭의 "풀이 완료 N / M" 과 같은 형식으로 읽히게 둔다. */}
+        <span className="text-[11px] text-slate-500">
+          변형 완료 <span className="font-semibold text-slate-800">{doneCount}</span> /{' '}
+          {VARIANT_MODES.length}
+        </span>
         <p className="text-[11px] text-slate-400">탭을 눌러 유형별 변형 문제를 확인하세요.</p>
       </div>
 
@@ -105,6 +114,17 @@ function VariantTabs({ fileId, no, disabled }: { fileId: string; no: number; dis
                   aria-hidden
                   className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500"
                 />
+              ) : status === 'done' ? (
+                // 어느 유형을 이미 만들어 뒀는지 탭만 보고 알 수 있게 한다.
+                // 생성 중(깜빡이는 파란 점)과 색·모양으로 구분된다.
+                //
+                // aria-hidden 이다(생성 중 점과 같은 규칙). 여기에 이름을 붙이면 탭의
+                // 접근성 이름이 "숫자 변형 만들어 둠" 으로 바뀌어, 유형으로 탭을 찾는
+                // 쪽이 깨진다. 완료 여부는 헤더의 "변형 완료 N / 3" 과 본문의
+                // "변형 완료" 배지가 글자로 알려 주므로 정보가 사라지지는 않는다.
+                <span aria-hidden title="만들어 둠" className="text-[10px] text-emerald-600">
+                  ✓
+                </span>
               ) : null}
             </button>
           );
@@ -139,6 +159,9 @@ function VariantCard({
           <span className="inline-flex items-center gap-1 text-[11px] text-slate-500">
             <Spinner className="h-3 w-3" /> 생성 중…
           </span>
+        ) : status === 'done' ? (
+          // 풀이 탭의 "풀이 완료" 배지와 같은 자리·같은 색으로 둔다.
+          <InlineBadge tone="green">변형 완료</InlineBadge>
         ) : null}
         {/* 두 버튼 다 용도가 이름에 있다: AI 대화용=마크다운 원문, 한글·워드용=유니코드 평문. */}
         {status === 'done' && entry?.text ? (
