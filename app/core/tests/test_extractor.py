@@ -552,3 +552,232 @@ def test_type_workbook_pdf_goes_past_ninety_nine() -> None:
     assert max(numbers) >= 100, f"최대 번호가 100 미만이다: {max(numbers)}"
     # 실측 고정: 빠짐 없이 1..150 이 연속으로 나온다.
     assert numbers == list(range(1, 151))
+
+
+# ── 정석 계열 문항 번호 (`기본 문제 1-1` / `유제 1-1`) ────────────────────
+# 사용자 보고 + 지면 확인: `수학의 정석` PDF 는 업로드 결과가 **0문항**이었다.
+# 문항 번호가 `1.` 이 아니라 `기본 문제 1-1` / `유제 1-1` 형태라 ANCHOR_RE 에
+# 하나도 걸리지 않는다. 지면에는 `기본 문제` 사이에 공백이 있었다(노션 본문의
+# "기본문제" 는 붙여 쓴 것)므로 공백 유무를 모두 받는다.
+#
+# 같은 페이지 상단의 `12   1. 다항식의 연산`(페이지 번호 + 단원 제목)은 문항이
+# 아니다. 오탐으로 승격되면 안 된다.
+
+
+def _jeongseok_candidate(
+    label: str, *, y0: float = 50.0, page: int = 0
+) -> tuple[ex.Anchor, str]:
+    """라벨 문자열로 `(앵커, 계열)` 후보를 만든다 (파싱 결과를 그대로 쓴다)."""
+    parsed = ex._parse_anchor_line(label)
+    assert parsed is not None, f"정석 앵커로 파싱되어야 한다: {label!r}"
+    no, series, text = parsed
+    anchor = ex.Anchor(no=no, page=page, column="left", x0=40.0, y0=y0, label=text)
+    return anchor, series
+
+
+@pytest.mark.parametrize(
+    ("line", "expected_series", "expected_no", "expected_label"),
+    [
+        # 지면 실제 표기(공백 있음).
+        ("기본 문제 1-1 다음 식을 전개하여라", "기본문제", 1001, "기본 문제 1-1"),
+        # 노션 보고 표기(붙여 씀).
+        ("기본문제 1-2", "기본문제", 1002, "기본문제 1-2"),
+        # 한글 조판 자간 벌림.
+        ("기 본 문 제 2-10", "기본문제", 2010, "기 본 문 제 2-10"),
+        ("유제 1-1", "유제", 1001, "유제 1-1"),
+        ("유제1-1", "유제", 1001, "유제1-1"),
+        ("  유제 1 - 3 딸린 문제", "유제", 1003, "유제 1 - 3"),
+        ("유제 1\u20131", "유제", 1001, "유제 1\u20131"),  # en dash
+        ("유제 12-30", "유제", 12030, "유제 12-30"),
+    ],
+)
+def test_jeongseok_anchor_is_parsed(
+    line: str, expected_series: str, expected_no: int, expected_label: str
+) -> None:
+    """정석 계열 표기가 (정렬용 번호, 계열, 원문 라벨) 로 파싱된다."""
+    parsed = ex._parse_anchor_line(line)
+    assert parsed == (expected_no, expected_series, expected_label)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "12   1. 다항식의 연산",  # 페이지 번호 + 단원 제목
+        "유제 1",  # `N-M` 이 아니다
+        "유제 1-1234",  # 4자리 이상은 배제
+        "연습문제 1-1",  # 지원하지 않는 계열
+        "기본 1-1",  # "문제" 가 없다
+        "본문 중간의 유제 1-1 언급",  # 줄 맨 앞이 아니다
+    ],
+)
+def test_non_jeongseok_lines_are_not_jeongseok_anchors(line: str) -> None:
+    """정석 앵커로 잘못 승격되면 안 되는 줄들."""
+    assert ex.JEONGSEOK_ANCHOR_RE.match(line) is None
+
+
+def test_page_header_line_matches_neither_pattern() -> None:
+    """`12   1. 다항식의 연산` 은 두 패턴 모두에 걸리지 않는다.
+
+    `12` 는 페이지 번호, `1.` 은 단원 번호다. ANCHOR_RE 는 "12" 뒤에 구분자가
+    없어서(백트래킹해도 "1" 뒤가 "2") 실패한다. 이 성질을 고정해 둔다.
+    """
+    line = "12   1. 다항식의 연산"
+    assert ex.ANCHOR_RE.match(line) is None
+    assert ex._parse_anchor_line(line) is None
+
+
+def test_jeongseok_number_key_is_monotonic() -> None:
+    """`1-1, 1-2, 1-12, 2-1` 이 단조증가 키로 접혀 사슬 필터를 통과한다.
+
+    `N-M` 은 정수가 아니라 `_longest_increasing` 이 그대로 다룰 수 없다.
+    `N*1000+M` 로 평탄화한 키가 실제로 오름차순인지, 그리고 하나도 버려지지
+    않는지 확인한다.
+    """
+    keys = [
+        ex._parse_anchor_line(f"유제 {chapter}-{item}")[0]  # type: ignore[index]
+        for chapter, item in ((1, 1), (1, 2), (1, 12), (2, 1))
+    ]
+    assert keys == [1001, 1002, 1012, 2001]
+    assert keys == sorted(keys)
+    assert ex._longest_increasing(keys) == [0, 1, 2, 3]
+
+
+def test_jeongseok_chain_keeps_interleaved_series() -> None:
+    """`기본 문제`/`유제` 가 교대로 나와도 하나도 버리지 않는다.
+
+    정석 지면은 `기본 문제 1-1` 다음에 딸린 `유제 1-1`, `유제 1-2` 가 오고 다시
+    `기본 문제 1-2` 로 돌아간다. 읽는 순서의 번호는 1001, 1001, 1002, 1002, …
+    처럼 두 계열이 교대하므로 한 사슬로 단조증가를 요구하면 절반이 날아간다.
+    """
+    labels = ["기본 문제 1-1", "유제 1-1", "유제 1-2", "기본 문제 1-2", "유제 1-3"]
+    candidates = [
+        _jeongseok_candidate(label, y0=60.0 + index * 100)
+        for index, label in enumerate(labels)
+    ]
+
+    kept = ex._jeongseok_anchor_chain(candidates)
+    assert [anchor.label for anchor in kept] == labels
+
+    # 계열을 섞어 한 사슬로 보면 실제로 손실이 난다 — 계열 분리가 필요한 이유.
+    single = ex._pick_anchor_chain([anchor.no for anchor, _ in candidates])
+    assert len(single) < len(labels)
+
+
+def test_jeongseok_chain_still_drops_noise_within_series() -> None:
+    """계열 안에서는 번호가 튀는 오탐을 계속 버린다."""
+    labels = ["유제 1-1", "유제 9-9", "유제 1-2", "유제 1-3"]
+    candidates = [
+        _jeongseok_candidate(label, y0=60.0 + index * 100)
+        for index, label in enumerate(labels)
+    ]
+
+    kept = ex._jeongseok_anchor_chain(candidates)
+    assert [anchor.label for anchor in kept] == ["유제 1-1", "유제 1-2", "유제 1-3"]
+
+
+def _build_jeongseok_pdf(*, header: str = "12   1. 다항식의 연산") -> bytes:
+    """정석 지면을 흉내낸 1단 조판 PDF.
+
+    상단에 `페이지번호 + 단원 제목` 머리글을, 아래에 `기본 문제`/`유제` 가
+    교대로 나오는 문항을 둔다. 한글 글리프는 PyMuPDF 내장 CJK 폰트("korea")로
+    찍어 어느 PC 에서나 같은 결과가 나오게 한다.
+    """
+    layout = [
+        ["기본 문제 1-1", "유제 1-1", "유제 1-2", "기본 문제 1-2"],
+        ["유제 1-3", "유제 1-4", "기본 문제 1-3", "유제 1-5"],
+    ]
+    doc = fitz.open()
+    try:
+        for page_index, labels in enumerate(layout):
+            page = doc.new_page(width=595, height=841)
+            page.insert_text(
+                (40, 40), header.replace("12", str(12 + page_index)), fontsize=9,
+                fontname="korea",
+            )
+            for slot, label in enumerate(labels):
+                page.insert_text(
+                    (40, 100 + slot * 160),
+                    f"{label} 다음 식을 간단히 하여라",
+                    fontsize=11,
+                    fontname="korea",
+                )
+        data: bytes = doc.tobytes()
+        return data
+    finally:
+        doc.close()
+
+
+def test_jeongseok_pdf_is_extracted_with_original_labels() -> None:
+    """정석 PDF 가 0문항이 아니라 8문항으로 잡히고 원문 표기가 label 에 남는다."""
+    result = ex.extract_problems(pdf_bytes=_build_jeongseok_pdf(), render_images=False)
+
+    assert [problem.label for problem in result.problems] == [
+        "기본 문제 1-1",
+        "유제 1-1",
+        "유제 1-2",
+        "기본 문제 1-2",
+        "유제 1-3",
+        "유제 1-4",
+        "기본 문제 1-3",
+        "유제 1-5",
+    ]
+    # 저장용 번호는 정렬용 합성 키(1001…)가 아니라 통짜 순번이어야 한다.
+    assert [problem.no for problem in result.problems] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [problem.page for problem in result.problems] == [1, 1, 1, 1, 2, 2, 2, 2]
+
+
+def test_page_number_and_unit_title_are_not_extracted_as_problems() -> None:
+    """머리글이 `1. 다항식의 연산` 처럼 단독 줄이어도 문항으로 잡히지 않는다.
+
+    이 줄은 ANCHOR_RE 에 걸리는 진짜 후보다(칼럼 왼쪽 끝, 본문 밴드 안).
+    정석 사슬이 더 길어서 보통 경로가 밀려나는지 확인한다.
+    """
+    result = ex.extract_problems(
+        pdf_bytes=_build_jeongseok_pdf(header="1. 다항식의 연산"),
+        render_images=False,
+    )
+
+    labels = [problem.label for problem in result.problems]
+    assert len(labels) == 8
+    assert all("다항식" not in label for label in labels)
+
+
+def test_single_jeongseok_line_does_not_hijack_plain_exam() -> None:
+    """보통 시험지에 `유제 1-1` 한 줄이 섞여 있어도 기존 경로를 유지한다.
+
+    두 경로 중 **더 많이 살리는 쪽**을 고르므로, 정석 후보가 소수면 밀려난다.
+    """
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        for index, y in enumerate((60, 200, 340, 480), start=1):
+            page.insert_text((40, y), f"{index}. 문제 본문", fontsize=11)
+        page.insert_text((40, 620), "유제 1-1 참고", fontsize=11, fontname="korea")
+        pdf_bytes = doc.tobytes()
+    finally:
+        doc.close()
+
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+    assert [problem.no for problem in result.problems] == [1, 2, 3, 4]
+    assert [problem.label for problem in result.problems] == ["1", "2", "3", "4"]
+
+
+def test_renumber_force_reassigns_even_without_duplicates() -> None:
+    """`force=True` 면 번호가 겹치지 않아도 1..N 으로 다시 매긴다.
+
+    정석 계열의 `no` 는 정렬용 합성 키(`N*1000+M`)라 겹치지 않아도 그대로
+    저장할 수 없다("1001번 문항" 이 된다).
+    """
+    problems = [
+        ex.Problem(no=1001, page=1, bbox=[0, 0, 1, 1], text="", label="기본 문제 1-1"),
+        ex.Problem(no=1002, page=1, bbox=[0, 0, 1, 1], text="", label="유제 1-2"),
+    ]
+    ex._renumber_duplicates(problems, force=True)
+
+    assert [problem.no for problem in problems] == [1, 2]
+    assert [problem.label for problem in problems] == ["기본 문제 1-1", "유제 1-2"]
+
+    # force 를 안 주면 손대지 않는다(기존 동작).
+    untouched = [ex.Problem(no=7, page=1, bbox=[0, 0, 1, 1], text="", label="7")]
+    ex._renumber_duplicates(untouched)
+    assert untouched[0].no == 7

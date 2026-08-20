@@ -8,7 +8,8 @@
    수식이 `\\ue0fc\\ue035` 처럼 깨져 나온다. 이 경우 텍스트를 믿을 수 없으므로
    문제 영역을 잘라낸 이미지를 보낸다.
 3. 문제 번호(`^\\s*(\\d{1,3})\\s*[.)]`)를 앵커로 삼아 2단 조판을 좌/우 칼럼으로
-   나눠 분할한다.
+   나눠 분할한다. 정석 계열(`기본 문제 1-1` / `유제 1-1`)은 번호 형식이 달라
+   별도 패턴(`JEONGSEOK_ANCHOR_RE`)으로 잡고, 두 경로 중 더 많이 살리는 쪽을 쓴다.
 4. 크롭 이미지의 흰 여백을 잘라내 토큰을 아낀다.
 
 CLI:
@@ -51,6 +52,45 @@ Column = Literal["left", "right"]
 # 실측으로도 기존 시험지 8종의 문항 수·번호가 한 건도 바뀌지 않았다
 # (tests/test_extractor.py 의 회귀 테스트가 이를 고정한다).
 ANCHOR_RE: Final[re.Pattern[str]] = re.compile(r"^\s*(\d{1,3})\s*([.)])")
+
+# --- 정석 계열 문항 번호 ------------------------------------------------------
+# 실측 회귀: `수학의 정석` PDF 는 업로드 결과가 **0문항**이었다. 문항 번호가
+# `1.` 이 아니라 `기본 문제 1-1` / `유제 1-1` 처럼 **계열 이름 + 장-문항** 형태라
+# `ANCHOR_RE` 에 하나도 걸리지 않기 때문이다.
+#
+# 표기 흔들림을 모두 허용한다.
+#   * `기본 문제` / `기본문제` — 실제 지면에는 사이에 공백이 있다(노션 본문의
+#     "기본문제" 는 붙여 쓴 것). 한글 조판은 제목을 자간 벌림으로 찍는 일이
+#     잦아(같은 레포의 `< 기 본 >` 사례) 음절 사이 공백도 열어 둔다.
+#   * 하이픈은 폰트/조판에 따라 U+002D 외에 en dash·마이너스로 찍힐 수 있어
+#     함께 받는다. 어떤 글리프인지는 실물에서 확인하지 못했다(방어적 허용).
+#
+# 뒤에 `(?!\d)` 를 두어 4자리 이상은 배제한다(`ANCHOR_RE` 가 "2025." 를 거르는
+# 것과 같은 이유 — 백트래킹해도 전부 실패한다).
+#
+# `label` 그룹은 지면 원문 그대로다. 저장용 `no` 는 통짜로 다시 매기고
+# (`_renumber_duplicates`) 이 표기는 `Problem.label` 에 남긴다.
+JEONGSEOK_ANCHOR_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?P<label>(?P<series>기\s*본\s*문\s*제|유\s*제)"
+    # 하이픈류: U+002D, U+2010~U+2015(하이픈/대시류), U+2212(마이너스).
+    # 리터럴 글리프 대신 이스케이프로 적는다 — 눈으로 구분이 안 되고
+    # ruff RUF001(모호한 유니코드)에도 걸린다.
+    r"\s*(?P<chapter>\d{1,3})\s*[-\u2010-\u2015\u2212]\s*"
+    r"(?P<item>\d{1,3}))(?!\d)"
+)
+
+# 정석 계열의 번호 계열 이름(공백 제거 후 비교). 지면에서 `기본 문제 1-1` 뒤에
+# 그에 딸린 `유제 1-1`, `유제 1-2` 가 오는 식으로 **두 계열이 교대로** 나오므로,
+# 한 사슬로 묶어 단조증가를 요구하면 절반이 오탐으로 버려진다. 계열별로 따로
+# 사슬을 고른 뒤(`_jeongseok_anchor_chain`) 읽는 순서로 합친다.
+_JEONGSEOK_SERIES: Final[tuple[str, ...]] = ("기본문제", "유제")
+
+# `N-M` 을 단조증가 판정이 가능한 정수 하나로 평탄화하는 자리수.
+# `_pick_anchor_chain` / `_longest_increasing` 이 `list[int]` 를 받으므로 튜플
+# 비교를 새로 만들지 않고 `N*1000 + M` 로 접는다. 정규식이 M 을 3자리로
+# 제한하므로(<=999) 장이 넘어갈 때 자리올림이 겹치는 일이 없다
+# (예: 1-1 -> 1001, 1-12 -> 1012, 2-1 -> 2001 이 그대로 오름차순).
+_JEONGSEOK_CHAPTER_STRIDE: Final[int] = 1000
 
 PUA_START: Final[int] = 0xE000
 PUA_END: Final[int] = 0xF8FF
@@ -114,6 +154,11 @@ class Anchor:
     column: Column
     x0: float
     y0: float
+    #: 지면 원문 표기. 정석 계열(`기본 문제 1-1`)처럼 번호가 정수가 아닐 때만
+    #: 채운다. 비어 있으면 `str(no)` 가 곧 원문 표기다.
+    #: 이 값이 채워졌다는 것은 `no` 가 정렬용 합성 키(`N*1000+M`)라는 뜻이라,
+    #: 호출부는 저장용 번호를 반드시 다시 매긴다(`_renumber_duplicates`).
+    label: str = ""
 
 
 @dataclass
@@ -291,7 +336,7 @@ def _longest_increasing(numbers: list[int]) -> list[int]:
     return list(reversed(chain))
 
 
-def _renumber_duplicates(problems: list[Problem]) -> None:
+def _renumber_duplicates(problems: list[Problem], *, force: bool = False) -> None:
     """번호가 겹치면 읽는 순서대로 1..N 을 다시 매긴다 (제자리 수정).
 
     구획마다 번호를 되돌리는 교재(`< 기 본 >` 1~5, `< 심 화 >` 1~2)를 그대로
@@ -303,9 +348,12 @@ def _renumber_duplicates(problems: list[Problem]) -> None:
 
     Args:
         problems: 읽는 순서대로 정렬된 문제 목록.
+        force: 번호가 겹치지 않아도 다시 매긴다. 정석 계열(`기본 문제 1-1`)은
+            `no` 가 정렬용 합성 키(`N*1000+M`)여서 겹치지 않아도 그대로 쓸 수
+            없다(1001 번 문항으로 저장·표시된다).
     """
     numbers = [problem.no for problem in problems]
-    if len(numbers) == len(set(numbers)):
+    if not force and len(numbers) == len(set(numbers)):
         return
     for index, problem in enumerate(problems, start=1):
         problem.no = index
@@ -345,6 +393,77 @@ def _pick_anchor_chain(numbers: list[int]) -> list[int]:
     return reset_chain if len(reset_chain) >= len(increasing) else increasing
 
 
+def _parse_anchor_line(text: str) -> tuple[int, str, str] | None:
+    """줄 텍스트에서 (정렬용 번호, 계열, 원문 표기) 를 뽑는다.
+
+    계열은 뒤에서 "같은 번호 체계끼리만 비교" 하기 위한 꼬리표다. 보통 시험지는
+    구분자(`.` / `)`) 가, 정석 계열은 계열 이름(`기본문제` / `유제`) 이 계열이 된다.
+
+    정석 계열을 먼저 본다. `기본 문제 1-1` 은 `ANCHOR_RE` 에 아예 걸리지 않으므로
+    순서가 결과를 바꾸지는 않지만, 판정 의도를 코드 순서로 남긴다.
+
+    Args:
+        text: 라인 텍스트(원문).
+
+    Returns:
+        `(no, series, label)`. 앵커가 아니면 `None`.
+        `label` 은 정석 계열에서만 채운다(보통 시험지는 `str(no)` 와 같아 빈 문자열).
+    """
+    jeongseok = JEONGSEOK_ANCHOR_RE.match(text)
+    if jeongseok is not None:
+        chapter = int(jeongseok.group("chapter"))
+        item = int(jeongseok.group("item"))
+        series = re.sub(r"\s+", "", jeongseok.group("series"))
+        return (
+            chapter * _JEONGSEOK_CHAPTER_STRIDE + item,
+            series,
+            jeongseok.group("label").strip(),
+        )
+
+    match = ANCHOR_RE.match(text)
+    if match is None:
+        return None
+    return int(match.group(1)), match.group(2), ""
+
+
+def _plain_anchor_chain(candidates: Sequence[tuple[Anchor, str]]) -> list[Anchor]:
+    """보통 시험지 경로: 우세한 구분자 하나만 남기고 번호 사슬을 고른다."""
+    delimiter = _dominant_delimiter(candidates)
+    kept = [anchor for anchor, series in candidates if series == delimiter]
+
+    keep = _pick_anchor_chain([a.no for a in kept])
+    return [kept[i] for i in keep]
+
+
+def _jeongseok_anchor_chain(candidates: Sequence[tuple[Anchor, str]]) -> list[Anchor]:
+    """정석 계열 경로: 계열(`기본문제`/`유제`)마다 따로 사슬을 고른 뒤 합친다.
+
+    두 계열을 한 사슬로 보면 안 된다. 정석 지면은 `기본 문제 1-1` 다음에 그에
+    딸린 `유제 1-1`, `유제 1-2` 가 오고 다시 `기본 문제 1-2` 로 돌아가므로,
+    읽는 순서의 번호가 1001, 1001, 1002, 1002 … 처럼 계열끼리 교대한다.
+    단조증가를 통째로 요구하면 한 계열이 절반 넘게 오탐으로 버려진다.
+    (교대 순서는 지면 사진으로 확인한 정석 조판 기준이다. 계열별로 나눠 걸러 두면
+    교대하든 계열이 몰려 나오든 결과가 같아 어느 쪽이든 안전하다.)
+
+    계열 안에서는 `N*1000+M` 이 오름차순이므로 기존 사슬 필터를 그대로 쓴다.
+
+    Args:
+        candidates: `(앵커, 계열)` 후보 목록. 읽는 순서여야 한다.
+
+    Returns:
+        채택한 앵커 목록(읽는 순서로 재정렬).
+    """
+    kept: list[Anchor] = []
+    for series in _JEONGSEOK_SERIES:
+        group = [anchor for anchor, name in candidates if name == series]
+        keep = _pick_anchor_chain([anchor.no for anchor in group])
+        kept.extend(group[index] for index in keep)
+
+    # 계열별로 나눠 걸렀으니 읽는 순서(페이지 → 좌 칼럼 → 우 칼럼)를 다시 세운다.
+    kept.sort(key=lambda a: (a.page, 0 if a.column == "left" else 1, a.y0, a.x0))
+    return kept
+
+
 def find_anchors(
     doc: fitz.Document, *, indent_tol: float = DEFAULT_ANCHOR_INDENT_TOL
 ) -> list[Anchor]:
@@ -352,6 +471,12 @@ def find_anchors(
 
     읽는 순서는 페이지 → 좌측 칼럼 위에서 아래 → 우측 칼럼 위에서 아래.
     번호가 오름차순이 되도록 오탐 앵커는 버린다.
+
+    두 경로(보통 시험지 / 정석 계열)를 각각 계산해 **더 많이 살리는 쪽**을 고른다.
+    정석 지면에도 머리말성 `1. 다항식의 연산`(단원 제목) 같은 줄이 있어 보통 경로
+    후보가 몇 개 잡히는데, 그 사슬은 정석 사슬보다 훨씬 짧아 밀린다. 반대로 정석
+    표기가 없는 문서는 정석 후보가 0개라 항상 기존 경로가 그대로 선택된다
+    (동수일 때도 검증된 기존 경로를 고른다).
     """
     candidates: list[tuple[Anchor, str]] = []
     for page_no in range(doc.page_count):
@@ -359,9 +484,10 @@ def find_anchors(
         content = content_rect(page)
         page_candidates: list[tuple[Anchor, str]] = []
         for line in _page_lines(page):
-            match = ANCHOR_RE.match(line.text)
-            if match is None:
+            parsed = _parse_anchor_line(line.text)
+            if parsed is None:
                 continue
+            no, series, label = parsed
             x0, y0, _, y1 = line.bbox
             # 머리말/꼬리말 제외
             if y0 < content.y0 or y1 > content.y1:
@@ -376,13 +502,14 @@ def find_anchors(
             page_candidates.append(
                 (
                     Anchor(
-                        no=int(match.group(1)),
+                        no=no,
                         page=page_no,
                         column=column,
                         x0=x0,
                         y0=y0,
+                        label=label,
                     ),
-                    match.group(2),
+                    series,
                 )
             )
         page_candidates.sort(
@@ -394,11 +521,9 @@ def find_anchors(
         )
         candidates.extend(page_candidates)
 
-    delimiter = _dominant_delimiter(candidates)
-    kept = [anchor for anchor, delim in candidates if delim == delimiter]
-
-    keep = _pick_anchor_chain([a.no for a in kept])
-    return [kept[i] for i in keep]
+    plain = _plain_anchor_chain(candidates)
+    jeongseok = _jeongseok_anchor_chain(candidates)
+    return jeongseok if len(jeongseok) > len(plain) else plain
 
 
 def _dominant_delimiter(candidates: Sequence[tuple[Anchor, str]]) -> str:
@@ -417,7 +542,9 @@ def _dominant_delimiter(candidates: Sequence[tuple[Anchor, str]]) -> str:
     사슬 길이가 같거나 후보가 없으면 `.` 을 고른다. 마침표가 기존 검증된 경로다.
 
     Args:
-        candidates: (앵커, 구분자) 후보 목록. 읽는 순서여야 한다.
+        candidates: (앵커, 계열) 후보 목록. 읽는 순서여야 한다. 정석 계열
+            (`기본문제`/`유제`) 후보가 섞여 있어도 여기서는 무시된다 — 구분자
+            `.`/`)` 를 가진 후보만 세기 때문이다.
 
     Returns:
         `"."` 또는 `")"`.
@@ -682,11 +809,14 @@ def extract_problems(
                     image_b64=image_b64,
                     image_w=width,
                     image_h=height,
-                    label=str(anchor.no),
+                    label=anchor.label or str(anchor.no),
                 )
             )
 
-        _renumber_duplicates(problems)
+        # 정석 계열 앵커는 `no` 가 정렬용 합성 키(`N*1000+M`)라 겹치지 않아도
+        # 그대로 저장하면 "1001번 문항" 이 된다. 원문 표기(`label`)가 따로 있는
+        # 경로였으면 저장용 번호를 무조건 통짜로 다시 매긴다.
+        _renumber_duplicates(problems, force=any(a.label for a in anchors))
 
         return ExtractResult(
             page_count=doc.page_count,
