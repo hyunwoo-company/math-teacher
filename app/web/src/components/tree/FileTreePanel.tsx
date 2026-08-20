@@ -32,6 +32,7 @@ import { UPLOAD_NOTICE } from '@/lib/upload-notice';
 import { ContextMenu, type ContextMenuItem } from '@/components/tree/ContextMenu';
 import { MoveDialog } from '@/components/tree/MoveDialog';
 import { NODE_MIME, TreeRow, type DragState } from '@/components/tree/TreeRow';
+import { UploadTargetDialog } from '@/components/tree/UploadTargetDialog';
 import {
   deleteSummary,
   dragPayloadIds,
@@ -77,7 +78,9 @@ type DialogState =
   // 이동은 우클릭한 하나일 수도, 선택 전체일 수도 있다(드래그와 같은 규칙).
   | { kind: 'move'; ids: string[] }
   // 삭제는 항목 하나(컨텍스트 메뉴)일 수도, 선택 전체(드래그 삭제)일 수도 있다.
-  | { kind: 'delete'; ids: string[] };
+  | { kind: 'delete'; ids: string[] }
+  // 파일을 고른 뒤 어느 폴더로 넣을지 확인받는 단계. `defaultFolderId` 는 추론해 둔 대상.
+  | { kind: 'uploadTarget'; files: File[]; defaultFolderId: string | null };
 
 /** 좌측 패널: [시험지]/[오답노트] 2섹션 트리. 너비는 부모가 정하고 이 패널은 채운다. */
 export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
@@ -843,8 +846,11 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
         className="hidden"
         onChange={(event) => {
           const files = Array.from(event.target.files ?? []);
+          // 같은 파일을 연달아 고를 수 있게 즉시 비운다(취소해도 다음 선택이 먹는다).
           event.target.value = '';
-          if (files.length > 0) void uploadFiles(files, uploadTargetRef.current);
+          if (files.length === 0) return;
+          // 바로 올리지 않고 어느 폴더로 넣을지 확인받는다. 추론한 대상은 기본값으로 넘긴다.
+          setDialog({ kind: 'uploadTarget', files, defaultFolderId: uploadTargetRef.current });
         }}
       />
 
@@ -907,6 +913,22 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
             // 실패는 `moveNodes` 가 토스트로 알린다. 여기서 또 띄우지 않는다.
             // 선택은 유지한다(드래그 이동과 같다 — 옮긴 것들이 그대로 선택되어 있다).
             void moveNodes(ids, parentId);
+          }}
+        />
+      ) : null}
+
+      {dialog.kind === 'uploadTarget' ? (
+        <UploadTargetDialog
+          nodes={nodes}
+          section={section}
+          files={dialog.files}
+          defaultFolderId={dialog.defaultFolderId}
+          onCancel={() => setDialog({ kind: 'none' })}
+          onConfirm={(folderId) => {
+            const files = dialog.files;
+            setDialog({ kind: 'none' });
+            // 성공·실패 모두 `uploadFiles` 가 토스트로 알린다.
+            void uploadFiles(files, folderId);
           }}
         />
       ) : null}

@@ -279,6 +279,10 @@ describe('워크스페이스 화면 (목 모드)', () => {
     await user.click(screen.getByRole('button', { name: '+ 파일 업로드' }));
     await user.upload(input, new File(['%PDF-1.4'], '기말고사.pdf', { type: 'application/pdf' }));
 
+    // 이제 곧장 올리지 않고 위치를 확인받는다. 추론한 폴더가 미리 골라져 있으므로 그대로 확정한다.
+    await screen.findByText('"기말고사.pdf" 을(를) 어디에 올릴까요?');
+    await user.click(screen.getByRole('button', { name: '업로드' }));
+
     await waitFor(() => expect(useWorkspace.getState().pendingOp).toBeNull(), { timeout: 15_000 });
 
     const uploaded = useWorkspace
@@ -301,10 +305,54 @@ describe('워크스페이스 화면 (목 모드)', () => {
 
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     await user.upload(input, new File(['%PDF-1.4'], '6월모의.pdf', { type: 'application/pdf' }));
+
+    // 우클릭으로 폴더를 지정했어도 한 번 확인한다(그 폴더가 기본으로 골라져 있다).
+    await screen.findByText('"6월모의.pdf" 을(를) 어디에 올릴까요?');
+    await user.click(screen.getByRole('button', { name: '업로드' }));
+
     await waitFor(() => expect(useWorkspace.getState().pendingOp).toBeNull(), { timeout: 15_000 });
 
     const uploaded = useWorkspace.getState().nodes.find((node) => node.name === '6월모의.pdf');
     expect(uploaded?.parent_id).toBe('folder-mock-exam');
+  }, 30_000);
+
+  it('업로드 위치 확인 창에서 다른 폴더로 바꿔 올릴 수 있다', async () => {
+    const user = await openWorkspace();
+    // 추론 대상을 미적분으로 만들어 둔다.
+    await user.click(screen.getByRole('treeitem', { name: /미적분/ }));
+    await screen.findByText('→ 미적분');
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.click(screen.getByRole('button', { name: '+ 파일 업로드' }));
+    await user.upload(input, new File(['%PDF-1.4'], '옮겨담기.pdf', { type: 'application/pdf' }));
+
+    // 추론 결과(미적분)가 미리 골라져 있지만, 여기서 모의고사로 바꾼다.
+    await screen.findByText('"옮겨담기.pdf" 을(를) 어디에 올릴까요?');
+    expect(screen.getByRole('radio', { name: /미적분/ })).toBeChecked();
+    await user.click(screen.getByRole('radio', { name: /모의고사/ }));
+    await user.click(screen.getByRole('button', { name: '업로드' }));
+
+    await waitFor(() => expect(useWorkspace.getState().pendingOp).toBeNull(), { timeout: 15_000 });
+
+    const uploaded = useWorkspace.getState().nodes.find((node) => node.name === '옮겨담기.pdf');
+    expect(uploaded?.parent_id).toBe('folder-mock-exam');
+  }, 30_000);
+
+  it('업로드 위치 확인 창을 취소하면 올리지 않는다', async () => {
+    const user = await openWorkspace();
+    const before = useWorkspace.getState().nodes.length;
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.click(screen.getByRole('button', { name: '+ 파일 업로드' }));
+    await user.upload(input, new File(['%PDF-1.4'], '안올릴것.pdf', { type: 'application/pdf' }));
+
+    await screen.findByText('"안올릴것.pdf" 을(를) 어디에 올릴까요?');
+    await user.click(screen.getByRole('button', { name: '취소' }));
+
+    expect(useWorkspace.getState().nodes).toHaveLength(before);
+    expect(
+      useWorkspace.getState().nodes.find((node) => node.name === '안올릴것.pdf'),
+    ).toBeUndefined();
   }, 30_000);
 
   it('PDF 가 아닌 파일은 이유를 알려주고 거부한다', async () => {
