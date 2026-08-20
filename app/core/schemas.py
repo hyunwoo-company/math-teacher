@@ -221,6 +221,35 @@ class ApiKeyIn(BaseModel):
     key: Annotated[str, Field(min_length=8, max_length=500)]
 
 
+class DownloadTokenIn(BaseModel):
+    """`POST /api/download-tokens` 요청.
+
+    앞으로 받아갈 바이너리 GET 경로를 그대로 준다(예: `/api/files/ab12/raw`).
+    쿼리스트링이 붙어 있어도 되며 서버가 떼고 범위를 계산한다.
+    """
+
+    path: Annotated[str, Field(min_length=1, max_length=500, pattern=r"^/api/")]
+
+
+class DownloadTokenResponse(BaseModel):
+    """`POST /api/download-tokens` 응답.
+
+    `token` 을 바이너리 GET 의 `?token=` 쿼리에 붙이면 접속 비밀번호를 URL 에
+    싣지 않고도 통과한다. 같은 `scope`(노드 하나) 안의 다른 바이너리 경로에도
+    재사용할 수 있으니 화면 단위로 한 번만 받아 캐시하면 된다.
+
+    만료 시각 대신 `expires_in`(초)을 주는 이유: 클라이언트 시계가 서버와
+    어긋나 있어도 "받은 지 N초" 는 항상 맞기 때문이다.
+
+    인증이 꺼진 로컬(`auth_required=false`)에서는 `token`/`expires_in` 이 null
+    이다. 붙일 토큰이 없다는 뜻이며, 그 환경에서는 쿼리 없이도 통과한다.
+    """
+
+    token: str | None = None
+    scope: str
+    expires_in: int | None = None
+
+
 class SolveRequest(BaseModel):
     """`problem_numbers` 가 null 이면 전체 문항."""
 

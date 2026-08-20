@@ -44,6 +44,10 @@ ignore = [
 # PUA 오프셋 -> LaTeX 매핑표. 확정 근거 주석에 원본 글리프(α, ° 등)를 그대로
 # 적어야 대조가 가능하다 — 라틴 문자와 닮은 것이 오히려 요점이다.
 "pua_table.py" = ["RUF001", "RUF003"]
+# 다운로드 토큰에 ASCII 를 닮은 문자(전각 숫자·아랍-인도 숫자 등)가 섞여 와도
+# 500 이 아니라 401 이어야 한다는 회귀 테스트다. 헷갈리는 문자를 그대로 적는 것이
+# 이 목록의 존재 이유이므로 치환 제안을 끈다.
+"tests/test_download_token.py" = ["RUF001", "RUF003"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

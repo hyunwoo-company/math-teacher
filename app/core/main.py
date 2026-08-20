@@ -43,6 +43,7 @@ from fastapi.responses import (
 
 import ai_service
 import config
+import download_token
 import jobs
 import pricing
 import service
@@ -63,6 +64,8 @@ from schemas import (
     ConversationOut,
     ConversationRename,
     ConversationsResponse,
+    DownloadTokenIn,
+    DownloadTokenResponse,
     EnvResponse,
     ErrorBody,
     FileDetailResponse,
@@ -153,6 +156,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """
     config.ensure_dirs()
     await run_in_threadpool(storage.init_db)
+    # 다운로드 토큰 서명키는 PBKDF2 라 첫 파생이 수십 ms 걸린다(그 뒤로는 캐시).
+    # 미들웨어는 async 라 그 한 번이 이벤트 루프를 멈추므로 기동 때 미리 데운다.
+    await run_in_threadpool(download_token.warm_up)
     interrupted = await run_in_threadpool(_interrupt_stale_jobs)
     if interrupted:
         logger.info("이전 실행에서 남은 작업 %d건을 중단 처리했습니다.", interrupted)
@@ -205,7 +211,8 @@ def _is_binary_asset(path: str) -> bool:
     `/api/notes/{id}/items/{item_id}/crop`, 그리고 `.docx`/`.hwpx` 내보내기가
     해당한다. 내보내기는 시험지/변형/오답노트 3종이지만 모두 `/export.<확장자>`
     로 끝나므로 별도 분기가 필요 없다.
-    이 경로들만 `?access=<비번>` 쿼리 인증을 허용한다(그 외는 헤더 전용).
+    이 경로들만 쿼리 인증(`?token=` 서명 토큰 · 하위호환 `?access=<비번>`)을
+    허용한다(그 외는 헤더 전용).
     """
     return (
         path.endswith("/raw")
@@ -223,8 +230,17 @@ async def _access_password_gate(request: Request, call_next: Any) -> Any:
     `/api/*` 요청은 `X-Access-Password` 헤더가 비밀번호와 일치해야 한다.
 
     크롭 이미지(`<img>`)·원본 PDF(pdf.js)는 브라우저가 직접 GET 으로 로드해
-    커스텀 헤더를 못 붙인다. 이 GET 요청들만 예외로 `?access=<비번>` 쿼리
-    파라미터도 허용한다(그 외 경로·메서드는 헤더만 허용).
+    커스텀 헤더를 못 붙인다. 이 GET 요청들만 예외로 쿼리 인증을 허용한다
+    (그 외 경로·메서드는 헤더만 허용).
+
+    쿼리 인증은 두 가지를 받는다:
+      1. `?token=` — `POST /api/download-tokens` 로 받은 단기 서명 토큰(권장).
+         비밀번호가 URL 에 남지 않고, 만료·범위가 서명에 묶여 있다.
+      2. `?access=<비번>` — 기존 방식. 비밀번호가 URL(방문 기록·액세스 로그)에
+         평문으로 남는 문제 때문에 1번으로 대체할 예정이지만, 아직 프론트가
+         이 방식을 쓰므로 **지우면 배포된 앱이 즉시 깨진다.** 제거는 프론트
+         전환이 배포된 뒤 별도 작업으로 한다.
+
     비교는 `secrets.compare_digest` 로 타이밍 공격을 피한다.
     CORS preflight(OPTIONS)는 통과시킨다(브라우저가 헤더를 안 실음).
     """
@@ -240,6 +256,10 @@ async def _access_password_gate(request: Request, call_next: Any) -> Any:
     supplied = request.headers.get("X-Access-Password", "")
     # 헤더를 못 붙이는 바이너리 GET(raw/crop)만 쿼리 파라미터 허용.
     if not supplied and request.method == "GET" and _is_binary_asset(path):
+        token = request.query_params.get(download_token.QUERY_PARAM, "")
+        if token and download_token.verify(token, path, expected):
+            return await call_next(request)
+        # 토큰이 없거나 틀리면 기존 `?access=` 로 내려간다(하위호환).
         supplied = request.query_params.get("access", "")
     if not supplied or not secrets.compare_digest(supplied, expected):
         return JSONResponse(
@@ -1432,3 +1452,43 @@ def login(password: Annotated[str, Body(embed=True)]) -> OkResponse:
             "접속 비밀번호가 올바르지 않습니다.",
         )
     return OkResponse()
+
+
+@app.post(
+    "/api/download-tokens",
+    response_model=DownloadTokenResponse,
+    status_code=status.HTTP_200_OK,
+    responses=_ERRORS,
+)
+def create_download_token(payload: DownloadTokenIn) -> DownloadTokenResponse:
+    """바이너리 GET 용 단기 서명 토큰을 발급한다.
+
+    이 라우트는 `_AUTH_EXEMPT` 가 아니고 POST 라 게이트가 **헤더 인증만** 받는다.
+    즉 비밀번호를 아는 요청만 토큰을 받을 수 있다(토큰으로 토큰을 못 만든다).
+
+    토큰은 노드 하나(`/api/files/{id}` 또는 `/api/notes/{id}`) 범위로 묶이므로,
+    한 번 받아 그 노드의 원본 PDF·크롭·내보내기에 모두 쓰면 된다.
+
+    인증이 꺼진 로컬에서는 `token=null` 을 준다. 그 환경에는 서명할 비밀번호가
+    없고, 억지로 고정 키를 만들면 보호되는 척만 하는 가짜 경계가 된다. 프론트는
+    null 이면 쿼리를 붙이지 않으면 되고(어차피 게이트가 통과시킨다), 401/501 로
+    막는 것보다 분기가 단순하다.
+    """
+    scope = download_token.scope_for(payload.path)
+    # `?include=full` 같은 쿼리가 붙어 와도 되게 경로만 떼어 판정한다.
+    bare_path = payload.path.split("?", 1)[0].split("#", 1)[0]
+    if scope is None or not _is_binary_asset(bare_path):
+        raise bad_request(
+            "invalid_download_path",
+            "토큰을 발급할 수 있는 다운로드 경로가 아닙니다.",
+            "`/api/files/{id}/...` 또는 `/api/notes/{id}/...` 의 "
+            "raw·crop·export.docx·export.hwpx 경로만 가능합니다.",
+        )
+    expected = config.access_password()
+    if expected is None:
+        return DownloadTokenResponse(token=None, scope=scope, expires_in=None)
+    return DownloadTokenResponse(
+        token=download_token.sign(scope, expected),
+        scope=scope,
+        expires_in=download_token.TTL_SECONDS,
+    )
