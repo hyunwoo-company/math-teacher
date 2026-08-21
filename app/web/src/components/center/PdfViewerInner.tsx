@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/Feedback';
-import { authorizeBinaryUrl, stripDownloadToken } from '@/lib/download-token';
+import { accessHeaders } from '@/lib/access-gate';
+import { stripDownloadToken } from '@/lib/download-token';
 import { normalizeViewportRect, toPdfSpaceRect } from '@/lib/pdf-geometry';
 import type { Problem } from '@/types/api';
 
@@ -40,9 +41,10 @@ export default function PdfViewerInner({
   const [baseWidth, setBaseWidth] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 인증 토큰은 문서를 열 때 이 컴포넌트가 직접 받는다. 부모가 넘긴 URL 에 캐시된
-  // 토큰이 이미 붙어 있을 수 있는데, 그 토큰이 갱신될 때마다 prop 이 바뀌면 읽던
-  // 문서가 통째로 다시 로드된다. 그래서 토큰을 뗀 URL 을 기준으로 삼는다.
+  // 이 뷰어는 URL 에 토큰을 싣지 않고 pdf.js 의 `httpHeaders` 로 헤더 인증을 한다
+  // (아래 getDocument 주석 참고). 부모가 넘긴 URL 에는 캐시된 `?token=` 이 붙어 있을 수
+  // 있는데, 그게 갱신될 때마다 prop 이 바뀌면 읽던 문서가 통째로 다시 로드된다.
+  // 그래서 토큰을 떼어 낸 URL 을 기준으로 삼는다(문서를 여는 조건에서 토큰을 지운다).
   const documentUrl = stripDownloadToken(fileUrl);
 
   // 페이지별 문제 목록을 메모해 둔다. 매 렌더마다 새 배열을 넘기면
@@ -72,16 +74,17 @@ export default function PdfViewerInner({
         // 최신 엔진 전용 API 를 호출해서, 조금만 오래된 WebView(=Tauri 배포 대상)에서
         // "getOrInsertComputed is not a function" 으로 렌더가 통째로 실패한다.
         const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-        pdfjs.GlobalWorkerOptions.workerSrc = WORKER_SRC;
-        // pdf.js 도 브라우저가 직접 GET 하므로 헤더를 못 붙인다 → 단기 토큰을 URL 에 싣는다.
-        // 문서를 여는 이 시점에 받아 두면 열려 있는 동안 다시 발급할 일이 없다.
-        // (범위 요청이 토큰 수명(15분)을 넘겨 나가면 그 페이지 로드는 실패할 수 있다.
-        //  뒤에서 URL 을 갈아끼우면 문서가 통째로 다시 로드되어 읽던 자리를 잃으므로
-        //  자동 갱신은 하지 않는다 — 실패하면 사용자가 다시 열면 된다.)
-        const authorizedUrl = await authorizeBinaryUrl(documentUrl);
         if (cancelled) return;
+        pdfjs.GlobalWorkerOptions.workerSrc = WORKER_SRC;
+        // 인증은 URL 토큰이 아니라 **헤더**로 한다. pdf.js 는 자체 네트워크 계층
+        // (fetch/XHR)으로 문서를 읽으므로 `httpHeaders` 를 최초 요청과 이후 Range 요청에
+        // 모두 실어 준다(pdfjs-dist 5.7 `createHeaders` → PDFFetchStream/PDFNetworkStream).
+        // 그래서 이 뷰어만은 단기 토큰이 필요 없다 — 만료도, 만료를 피하려고 URL 을
+        // 갈아끼우다 문서를 통째로 다시 로드하는 문제도 애초에 생기지 않는다.
+        // (`<img src>` 크롭은 브라우저가 직접 GET 해 헤더를 못 붙이므로 여전히 토큰을 쓴다.)
         const task = pdfjs.getDocument({
-          url: authorizedUrl,
+          url: documentUrl,
+          httpHeaders: accessHeaders(),
           cMapUrl: CMAP_URL,
           cMapPacked: true,
           standardFontDataUrl: STANDARD_FONTS_URL,

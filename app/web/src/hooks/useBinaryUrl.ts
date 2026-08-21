@@ -15,13 +15,20 @@
  *
  * 토큰이 필요 없는 URL(비번 미저장 = 로컬, `data:` URI, 게이트 밖 정적 자산)은
  * 첫 렌더에서 그대로 통과한다 — 목 모드와 로컬 개발의 기존 동작이 그대로다.
+ *
+ * 이 훅은 마운트되어 있는 동안 해당 노드 범위를 "쓰는 중" 으로 등록해
+ * 백그라운드 자동갱신 대상으로 만든다(`retainDownloadToken`). 화면을 열어 둔 채
+ * 오래 두어도 토큰이 만료되지 않게 하려는 것이다. 갱신은 캐시만 조용히 바꾸므로
+ * **이미 돌려준 URL 문자열은 갱신 때문에 바뀌지 않는다**(자세한 이유는 download-token.ts).
  */
 
 import { useEffect, useSyncExternalStore } from 'react';
 import {
+  binaryTarget,
   downloadTokenVersion,
   ensureDownloadToken,
   isBinaryUrlReady,
+  retainDownloadToken,
   subscribeDownloadTokens,
 } from '@/lib/download-token';
 
@@ -33,12 +40,22 @@ export function useBinaryUrl(url: string): string | null {
 
   const ready = isBinaryUrlReady(url);
 
+  // 갱신 등록에 쓸 키. 쿼리를 뗀 경로라 토큰이 바뀌어도 같은 값이다 — url 을 그대로
+  // 의존성에 넣으면 토큰이 붙고 떨어질 때마다 등록이 풀렸다 다시 걸려 타이머가 초기화된다.
+  const retainKey = binaryTarget(url)?.path ?? null;
+
   useEffect(() => {
     // 발급은 렌더가 아니라 이펙트에서 시작한다(렌더는 순수해야 한다).
     // ensureDownloadToken 은 reject 하지 않고, 같은 노드의 동시 요청을 하나로 합친다.
     if (ready) return;
     void ensureDownloadToken(url);
   }, [url, ready]);
+
+  useEffect(() => {
+    // 언마운트하면 해제된다 → 화면에서 사라진 노드의 토큰은 더 갱신하지 않는다.
+    if (retainKey == null) return;
+    return retainDownloadToken(retainKey);
+  }, [retainKey]);
 
   return ready ? url : null;
 }
