@@ -19,12 +19,12 @@ from fastapi import status
 from fastapi.concurrency import run_in_threadpool
 
 import config
-import figure_ref
 import markdown_sections
 import pricing
 import prompts
 import pua_decode
 import service
+import solve_input
 import sse
 import storage
 from errors import ApiError, bad_request, not_found
@@ -274,6 +274,15 @@ def _read_crop_b64(problem: dict[str, Any]) -> str | None:
     return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
+def _crop_exists(problem: dict[str, Any]) -> bool:
+    """크롭 PNG 가 있는지만 본다 (블로킹, 파일을 읽지 않는다).
+
+    입력을 고르려면 크롭 유무를 먼저 알아야 하는데, 텍스트로 풀 문항에서 PNG 를
+    통째로 읽어 base64 로 만드는 것은 낭비다(`_read_crop_b64` 와 분리한 이유).
+    """
+    return (config.data_dir() / str(problem["crop_path"])).is_file()
+
+
 def _accumulate(total: dict[str, int], usage: dict[str, Any] | None) -> bool:
     """실측 usage 를 합산한다. 합산했으면 True."""
     if not usage:
@@ -294,29 +303,33 @@ async def solve_events(
     model: str,
     effort: Effort,
 ) -> AsyncIterator[Event]:
-    """문항들을 순차로 풀며 SSE 문자열을 흘린다.
+    """문항들을 순차로 풀며 진행 이벤트를 흘린다.
 
     캐시 히트를 노리려면 순차 호출이어야 한다(첫 호출이 캐시를 쓰고 이후가 읽는다).
 
-    **image 모드 문항에 판독본이 이미 있으면 크롭 이미지가 아니라 그 텍스트로 먼저
-    푼다.** 판독본을 실패 폴백이 아니라 1차 입력으로 올린 이유는 `omega 5회.pdf`
-    사례다 — 문항 인식·판독은 멀쩡한데 이미지 풀이가 **예외 없이** 모든 문항에
-    똑같은 엉터리 풀이를 내놨다. 형식도 길이도 정상이라 `ProviderError` 폴백에는
-    걸리지 않는다. 텍스트를 먼저 쓰면 이미지 토큰과 비전 처리 시간도 함께 아낀다.
+    **무엇으로 풀지는 `solve_input.pick_solve_input` 이 정한다.** 판독본이 있으면
+    크롭 이미지가 아니라 그 텍스트로 먼저 푼다 — 이미지 풀이가 **예외 없이** 모든
+    문항에 똑같은 엉터리 풀이를 내놓는 사례(`omega 5회.pdf`)가 있었고, 형식도
+    길이도 정상이라 `ProviderError` 폴백으로는 걸러지지 않는다. 텍스트를 먼저 쓰면
+    이미지 토큰과 비전 처리 시간도 함께 아낀다.
 
-    다만 판독본이 **그림을 가리키면**(`figure_ref.needs_figure`) 여전히 이미지로
-    푼다. 판독본은 글자·수식만 복원하고 그림은 복원하지 못하므로, 그 문항의
-    텍스트만 보내면 조건이 빠진 문제를 푸는 셈이 된다.
+    선택 기준에서 **파일 `mode` 게이트를 없앴다.** 같은 omega 파일의 `mode` 가
+    실제로는 `image` 가 아니라 **`text`** 였기 때문이다 — 수식·발문이 그래픽인데
+    PUA 가 없어 `text` 로 판정됐고, 텍스트 레이어에 남은 것은 번호뿐이라
+    `problems.text` 가 `"1."` 이었다. 판독본은 온전한데 `mode == "image"` 게이트가
+    그것을 막아 `"1."` 만 AI 에 갔다. 판독본은 파일 모드와 무관하게 **그 문항의
+    가장 좋은 텍스트**다. 대신 `mode == "text"` 이고 원문이 쓸 만하면 원문을
+    그대로 쓴다(정상 파일의 회귀 방지). 자세한 순서는 `solve_input` 참조.
 
     어느 방향이든 1차가 `ProviderError` 로 실패하면 **반대 방향으로 한 번만** 다시
-    푼다(텍스트→이미지, 또는 판독본이 그림을 가리켜 이미지로 시작한 경우
-    이미지→텍스트). 왕복은 하지 않는다. 판독본은 **이미 저장된 것만** 쓴다 —
-    여기서 판독(`transcribe_events`)을 새로 돌리지는 않는다. 언제 판독을 함께
-    돌릴지는 쿼터 정책 문제라 이 함수가 정할 일이 아니다.
+    푼다(텍스트→크롭 이미지, 이미지→저장된 판독본). 방향당 1회, 왕복은 없다.
+    판독본은 **이미 저장된 것만** 쓴다 — 여기서 판독(`transcribe_events`)을 새로
+    돌리지는 않는다. 언제 판독을 함께 돌릴지는 쿼터 정책 문제라 이 함수가 정할
+    일이 아니다.
 
-    image 모드 파일의 `problems.text` 는 PUA 가 깨진 문자열이므로
-    (`extractor.py` 의 mode 판정) 풀이 입력으로 쓰지 않는다. 텍스트 입력은
-    `problems.transcript` 뿐이다.
+    보낼 것이 아무것도 없으면(쓸 만한 텍스트도, 크롭도 없음) `ProviderError` 로
+    **명확히 실패시킨다.** 예전에는 `"1."` 같은 쓰레기를 그대로 보내 "그럴듯한
+    엉터리" 풀이가 저장됐다 — 그것이 omega 사고의 원인이었다.
 
     문항 하나가 내는 `done`/`error` 는 재시도를 해도 **정확히 한 번**이다
     (작업 진행률이 `total` 을 넘지 않아야 한다). 재시도에 들어가면 `problem`
@@ -337,28 +350,43 @@ async def solve_events(
         for problem in targets:
             no = int(problem["no"])
             yield ("problem", {"no": no, "status": "running"})
-            # 텍스트로 풀 때 쓸 문항 전문. **이미 저장돼 있는 판독본만** 쓴다 —
-            # 여기서 판독까지 새로 돌리면 문항 하나가 AI 호출을 세 번(이미지 풀이 +
-            # 판독 + 텍스트 풀이) 태운다. 판독 시점을 언제로 할지는 아직 정해지지
-            # 않은 비용 정책이라 여기서 결정하지 않는다.
-            # image 모드의 `problems.text` 는 PUA 가 깨진 문자열이라 쓸 수 없다.
-            transcript = (
-                str(problem.get("transcript") or "").strip() if mode == "image" else ""
+            # 판독본은 **이미 저장돼 있는 것만** 쓴다 — 여기서 판독까지 새로 돌리면
+            # 문항 하나가 AI 호출을 세 번(이미지 풀이 + 판독 + 텍스트 풀이) 태운다.
+            # 판독 시점을 언제로 할지는 아직 정해지지 않은 비용 정책이라 여기서
+            # 결정하지 않는다.
+            transcript = str(problem.get("transcript") or "").strip()
+            has_crop = await run_in_threadpool(_crop_exists, problem)
+            chosen = solve_input.pick_solve_input(
+                mode=mode,
+                text=problem.get("text"),
+                transcript=transcript,
+                transcript_source=problem.get("transcript_source"),
+                has_crop=has_crop,
             )
-            # 판독본이 있으면 **그것을 1차로** 쓴다. 이미지 풀이는 예외 없이 엉터리
-            # 풀이를 내놓는 경우가 있어(omega 사례) 실패 폴백으로는 못 걸러진다.
-            # 단, 그림을 가리키는 판독본은 글자만 보내면 조건이 빠지므로 제외한다.
-            transcript_first = bool(transcript) and not figure_ref.needs_figure(
-                transcript
+            # 프로덕션에서 이 선택이 왜 그렇게 됐는지 화면을 열어 봐야 알 수 있었다.
+            # 한 줄이라도 남겨 두면 다음엔 로그만 보고 안다.
+            logger.info(
+                "풀이 입력 선택 (no=%s): %s ← %s",
+                no,
+                chosen.mode or "없음",
+                chosen.reason,
             )
-            attempt_mode: Mode = "text" if transcript_first else mode
-            attempt_text = (
-                transcript if transcript_first else str(problem.get("text") or "")
-            )
+            attempt_mode: Mode | None = chosen.mode
+            attempt_text: str = chosen.text
             # 방향당 재시도는 1회. text→image→text 처럼 왕복하지 않는다.
             retried = False
             while True:
                 try:
+                    if attempt_mode is None:
+                        # 쓰레기 텍스트를 보내 "그럴듯한 엉터리" 를 저장하는 것보다
+                        # 못 풀었다고 말하는 쪽이 낫다(omega 사고의 교훈).
+                        raise ProviderError(
+                            "no_solve_input",
+                            f"{no}번 문항은 풀이에 보낼 내용이 없습니다."
+                            " (판독본도, 크롭 이미지도 없습니다)",
+                            "먼저 [문항 텍스트화] 를 실행하거나,"
+                            " 파일을 다시 업로드해 추출을 재실행하세요.",
+                        )
                     image_b64 = (
                         await run_in_threadpool(_read_crop_b64, problem)
                         if attempt_mode == "image"
@@ -403,35 +431,28 @@ async def solve_events(
                             },
                         )
                 except ProviderError as exc:
-                    if fallback_enabled and not retried and mode == "image":
-                        if attempt_mode == "text":
-                            # 판독본으로 안 풀리면 크롭 이미지로 한 번 더. 판독본이
-                            # 문항을 덜 복원했을 수 있으니 원본을 보여 준다.
+                    # 반대 방향으로 한 번만. 파일 `mode` 는 보지 않는다 — 1차 선택이
+                    # 이미 모드와 무관하게 결정됐으므로(omega: mode=text 인데 판독본
+                    # 으로 풀었다) 여기에 모드 조건을 걸면 폴백이 죽는다.
+                    if fallback_enabled and not retried and attempt_mode is not None:
+                        # 사용자가 손으로 하던 우회(한쪽으로 안 풀리면 다른 쪽으로
+                        # 옮겨 푼다)를 그대로 자동화한다. 판독본이 **이미** 있을 때만
+                        # 성립하므로 추가 판독 비용은 0 이다.
+                        retry = solve_input.fallback_input(
+                            attempt_mode, transcript=transcript, has_crop=has_crop
+                        )
+                        if retry.mode is not None:
                             logger.info(
-                                "판독본 풀이 실패 → 크롭 이미지로 재시도 (no=%s): %s",
+                                "풀이 재시도 (no=%s): %s (1차 실패: %s)",
                                 no,
+                                retry.reason,
                                 exc.message,
                             )
-                            attempt_mode = "image"
-                            attempt_text = str(problem.get("text") or "")
+                            attempt_mode = retry.mode
+                            attempt_text = retry.text
                             retried = True
                             # 같은 문항을 다시 시작한다는 신호. 실패한 부분 출력이
                             # 여기서 비워진다(`jobs.LiveJob` 의 `_apply`).
-                            yield ("problem", {"no": no, "status": "running"})
-                            continue
-                        if transcript:
-                            # 그림을 가리켜 이미지로 시작한 문항. 사용자가 손으로
-                            # 하던 우회(이미지로 안 풀리면 텍스트로 옮겨 푼다)를
-                            # 그대로 자동화한다. 판독본이 **이미** 있을 때만
-                            # 성립하므로 추가 판독 비용은 0 이다.
-                            logger.info(
-                                "이미지 풀이 실패 → 저장된 판독본으로 재시도 (no=%s): %s",
-                                no,
-                                exc.message,
-                            )
-                            attempt_mode = "text"
-                            attempt_text = transcript
-                            retried = True
                             yield ("problem", {"no": no, "status": "running"})
                             continue
                     if retried:

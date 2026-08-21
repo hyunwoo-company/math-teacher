@@ -1,9 +1,14 @@
-"""image 모드 문항의 판독본 우선 풀이와 방향 전환 폴백 (`ai_service.solve_events`).
+"""판독본 우선 풀이와 방향 전환 폴백 (`ai_service.solve_events`).
 
-image 모드 파일에 판독본이 **이미** 있으면 크롭 이미지가 아니라 그 텍스트로 먼저
-푼다(판독을 새로 돌리지 않는다 = 추가 판독 비용 0). 이미지 풀이가 예외 없이 엉터리
-풀이를 내놓는 사례(omega)가 있어 실패 폴백만으로는 걸러지지 않기 때문이고, 이미지
-토큰도 함께 아낀다.
+판독본이 **이미** 있으면 크롭 이미지가 아니라 그 텍스트로 먼저 푼다(판독을 새로
+돌리지 않는다 = 추가 판독 비용 0). 이미지 풀이가 예외 없이 엉터리 풀이를 내놓는
+사례(omega)가 있어 실패 폴백만으로는 걸러지지 않기 때문이고, 이미지 토큰도 함께
+아낀다.
+
+**파일 `mode` 는 게이트가 아니다.** 무엇으로 풀지는 `solve_input.pick_solve_input`
+이 그 문항의 텍스트가 실제로 쓸 만한지로 정한다(단위 테스트는
+`tests/test_solve_input.py`). 여기서는 그 선택이 이벤트 계약·호출 횟수·크롭 읽기와
+어떻게 맞물리는지를 본다.
 
 판독본이 **그림을 가리키면** 글자만 보내서는 조건이 빠지므로 예전처럼 이미지로
 푼다. 어느 방향이든 1차가 실패하면 반대 방향으로 한 번만 다시 푼다.
@@ -19,6 +24,7 @@ from conftest import StubProvider, create_job, upload_test_pdf, wait_job
 from fastapi.testclient import TestClient
 
 import ai_service
+import config
 import pricing
 import storage
 from providers.base import (
@@ -98,6 +104,19 @@ def _use(monkeypatch: pytest.MonkeyPatch, provider: StubProvider) -> None:
     monkeypatch.setattr(
         ai_service, "resolve_provider", lambda requested, api_key: provider
     )
+
+
+def _set_problem_text(node_id: str, no: int, text: str) -> None:
+    """`problems.text` 를 직접 갈아 끼운다 (omega 상황 재현용).
+
+    omega 는 텍스트 레이어에 문항 번호만 남은 PDF 라 `problems.text` 가 `"1."`
+    뿐이었다. 테스트 PDF 로 그 상태를 만들 방법이 없어 저장된 값을 바꾼다.
+    """
+    with storage.transaction() as conn:
+        conn.execute(
+            "UPDATE problems SET text = ? WHERE node_id = ? AND no = ?",
+            (text, node_id, no),
+        )
 
 
 def _set_transcript(node_id: str, no: int, text: str) -> None:
@@ -292,10 +311,14 @@ async def test_transcript_failure_retries_with_image_once(
     assert any(isinstance(part, ImagePart) for part in last)
 
 
-async def test_text_mode_file_ignores_transcript(
+async def test_text_mode_file_prefers_its_own_text(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """text 모드 파일은 동작이 바뀌지 않는다 — 크롭도, 판독본도 쓰지 않는다."""
+    """`problems.text` 가 쓸 만한 text 모드 파일은 동작이 바뀌지 않는다.
+
+    원문이 정상이면 판독본으로 갈아치우지 않는다(원문이 AI 복원본보다 정확하다).
+    크롭도 읽지 않는다.
+    """
     provider = ImageFailingProvider()
     reads = _spy_crop_reads(monkeypatch)
     node_id = upload_test_pdf(client)["node"]["id"]
@@ -333,3 +356,86 @@ async def test_image_mode_without_transcript_uses_crop(
     assert len(provider.calls) == 1
     parts = [part for turn in provider.calls[0]["turns"] for part in turn.parts]
     assert any(isinstance(part, ImagePart) for part in parts)
+
+
+async def test_text_mode_with_number_only_text_uses_transcript(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**omega 회귀 테스트 (이벤트 레벨).**
+
+    `mode` 는 `text` 인데 `problems.text` 가 `"1."` 뿐인 문항. 예전에는
+    `mode == "image"` 게이트 때문에 온전한 판독본을 무시하고 `"1."` 을 AI 에 보내
+    "그럴듯한 엉터리" 풀이를 저장했다. 이제 판독본으로 푼다.
+    """
+    provider = ImageFailingProvider()
+    reads = _spy_crop_reads(monkeypatch)
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _set_problem_text(node_id, 1, "1.")
+    _set_transcript(node_id, 1, TRANSCRIPT)
+
+    events = await _run_solve(
+        node_id=node_id, provider=provider, mode="text", numbers=[1]
+    )
+    names = [name for name, _ in events]
+
+    assert names.count("done") == 1
+    assert names.count("problem") == 1  # 재시도 없이 한 번에 풀렸다
+    assert reads == []  # 크롭 PNG 를 열지 않았다
+    assert len(provider.calls) == 1
+    parts = [part for turn in provider.calls[0]["turns"] for part in turn.parts]
+    prompt = "".join(getattr(part, "text", "") for part in parts)
+    assert not any(isinstance(part, ImagePart) for part in parts)
+    assert TRANSCRIPT in prompt
+    assert "1." not in prompt.replace(TRANSCRIPT, "")  # 번호뿐인 원문은 안 갔다
+
+
+async def test_text_mode_file_also_falls_back_to_image(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """방향 전환 폴백은 **text 모드 파일에서도** 돈다.
+
+    예전 폴백은 `mode == "image"` 조건에 묶여 있어 text 모드 파일은 텍스트로
+    실패하면 그대로 끝났다. 크롭이 있으면 한 번은 이미지로 시도해야 한다.
+    """
+    provider = TextFailingProvider()
+    node_id = upload_test_pdf(client)["node"]["id"]
+
+    events = await _run_solve(
+        node_id=node_id, provider=provider, mode="text", numbers=[1]
+    )
+    names = [name for name, _ in events]
+
+    assert names.count("done") == 1
+    assert names.count("error") == 0
+    assert names.count("problem") == 2  # 재시도 신호가 한 번 더
+    assert len(provider.calls) == 2  # 텍스트 1 + 이미지 1
+    last = [part for turn in provider.calls[-1]["turns"] for part in turn.parts]
+    assert any(isinstance(part, ImagePart) for part in last)
+
+
+async def test_nothing_to_send_fails_loudly(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """쓸 만한 텍스트도 크롭도 없으면 **AI 를 부르지 않고** 명확히 실패한다.
+
+    쓰레기(`"1."`)를 보내 그럴듯한 엉터리 풀이를 저장하는 것이 omega 사고의
+    원인이었다. 부르지 않았으므로 쿼터도 쓰지 않는다.
+    """
+    provider = StubProvider()
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _set_problem_text(node_id, 1, "1.")
+    with storage.transaction() as conn:
+        problem = storage.get_problem(conn, node_id, 1)
+    assert problem is not None
+    (config.data_dir() / str(problem["crop_path"])).unlink()
+
+    events = await _run_solve(
+        node_id=node_id, provider=provider, mode="text", numbers=[1]
+    )
+    errors = [data for name, data in events if name == "error"]
+
+    assert provider.calls == []  # AI 를 아예 부르지 않았다
+    assert len(errors) == 1
+    assert errors[0]["error_code"] == "no_solve_input"
+    assert [name for name, _ in events].count("done") == 0
+    assert client.get(f"/api/files/{node_id}/solutions").json()["solutions"] == []
