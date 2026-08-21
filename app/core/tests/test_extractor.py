@@ -781,3 +781,142 @@ def test_renumber_force_reassigns_even_without_duplicates() -> None:
     untouched = [ex.Problem(no=7, page=1, bbox=[0, 0, 1, 1], text="", label="7")]
     ex._renumber_duplicates(untouched)
     assert untouched[0].no == 7
+
+
+# ── 들여쓰기 판정: 절대 기준 OR 본문 정렬선 ─────────────────────────────
+# 실측 회귀: 28쪽짜리 시험지(a.pdf)가 0문항이었다. 문항 번호 68개가 정규식·칼럼
+# 검사까지 전부 통과했는데, `content_rect.x0` 이 23.8 로 잡힌 반면 실제 글자는
+# x0=85.0 부터 시작해 들여쓰기가 61.2pt(> 30pt)로 계산돼 마지막 관문에서 전멸했다.
+# `content_rect` 는 크롭 영역 계산에도 쓰여 고칠 수 없으므로, "그 칼럼에서 본문이
+# 실제로 정렬되는 x" 를 두 번째 기준으로 두고 OR 로 판정한다.
+
+
+def test_indent_ok_absolute_pass_never_depends_on_baseline() -> None:
+    """절대 기준을 통과하던 앵커는 정렬선이 어떻게 잡히든 그대로 통과한다.
+
+    OR 판정의 핵심 성질이다. 이것이 지켜지면 "기존에 잡히던 문항이 빠지는"
+    회귀가 구조적으로 불가능하다.
+    """
+    for baseline in (None, 40.0, 300.0, -100.0):
+        assert ex._is_anchor_indent_ok(45.0, 40.0, baseline, ex.DEFAULT_ANCHOR_INDENT_TOL)
+
+
+def test_indent_ok_accepts_when_only_baseline_passes() -> None:
+    """a.pdf 상황: 절대 기준은 탈락이지만 본문 정렬선 기준으로는 통과한다."""
+    # content_rect.x0=23.8, 정렬선 85.0, 앵커 85.0 → 절대 61.2pt / 상대 0.0pt.
+    absolute_indent = 85.0 - 23.8
+    assert absolute_indent > ex.DEFAULT_ANCHOR_INDENT_TOL
+    assert ex._is_anchor_indent_ok(85.0, 23.8, 85.0, ex.DEFAULT_ANCHOR_INDENT_TOL)
+
+
+def test_indent_ok_falls_back_to_absolute_without_baseline() -> None:
+    """정렬선을 못 구한 칼럼(표본 부족)은 기존 절대 기준만 쓴다."""
+    assert not ex._is_anchor_indent_ok(85.0, 23.8, None, ex.DEFAULT_ANCHOR_INDENT_TOL)
+
+
+def test_indent_ok_still_rejects_deeply_indented_line() -> None:
+    """정렬선 기준이 생겨도 정렬선에서 멀리 들어간 줄은 여전히 앵커가 아니다.
+
+    본문 한가운데의 `1)` 오탐이 이 기준으로 통과해 버리지 않도록 고정한다.
+    """
+    assert not ex._is_anchor_indent_ok(
+        85.0 + ex.DEFAULT_ANCHOR_INDENT_TOL + 0.1,
+        23.8,
+        85.0,
+        ex.DEFAULT_ANCHOR_INDENT_TOL,
+    )
+
+
+def test_leftmost_supported_x0_requires_minimum_samples() -> None:
+    """표본이 최소 개수에 못 미치는 정렬선은 근거가 없어 버린다."""
+    short = [100.0] * (ex._BODY_X0_MIN_SAMPLES - 1)
+    assert ex._leftmost_supported_x0(short) is None
+    assert ex._leftmost_supported_x0([]) is None
+
+    enough = [100.0] * ex._BODY_X0_MIN_SAMPLES
+    assert ex._leftmost_supported_x0(enough) == 100.0
+
+
+def test_leftmost_supported_x0_ignores_contaminating_minimum() -> None:
+    """칼럼 경계를 넘어온 요소 하나가 최솟값을 오염시켜도 흔들리지 않는다.
+
+    실측(a.pdf p0 우측 칼럼): 최솟값 298.9 가 칼럼 경계 300.5 보다 작았다.
+    `min` 만 쓰면 기준이 기존과 같아져 효과가 사라진다.
+    """
+    values = [30.0, 31.5, *[85.0, 85.2, 85.4, 85.1, 85.3, 85.0, 84.9]]
+    assert ex._leftmost_supported_x0(values) == 84.9
+
+
+def test_leftmost_supported_x0_prefers_left_over_mode() -> None:
+    """표본이 충분하면 최빈값이 아니라 **더 왼쪽** 정렬선을 쓴다(더 엄격한 쪽)."""
+    values = [200.0] * 20 + [120.0] * ex._BODY_X0_MIN_SAMPLES
+    assert ex._leftmost_supported_x0(values) == 120.0
+
+
+def test_column_body_x0_measures_per_column_and_skips_headers() -> None:
+    """정렬선은 칼럼별로, 머리말·꼬리말과 칼럼 밖 줄을 뺀 본문만으로 잰다."""
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        content = fitz.Rect(23.8, 30.0, 571.0, 800.0)
+        lines = [
+            # 머리말: 칼럼 왼쪽 끝에 붙어 있지만 본문 영역 위라 무시된다.
+            ex.TextLine(text="머리말", bbox=(24.0, 10.0, 400.0, 22.0)),
+            # 꼬리말: 본문 영역 아래.
+            ex.TextLine(text="- 1 -", bbox=(24.0, 810.0, 400.0, 822.0)),
+        ]
+        # 좌측 칼럼 본문 6줄(정렬선 85.0).
+        lines += [
+            ex.TextLine(text=f"{i}. 본문", bbox=(85.0, 100.0 + i * 20, 250.0, 112.0))
+            for i in range(6)
+        ]
+        # 우측 칼럼은 3줄뿐 → 표본 부족.
+        lines += [
+            ex.TextLine(text="본문", bbox=(353.1, 100.0 + i * 20, 500.0, 112.0))
+            for i in range(3)
+        ]
+        assert ex._column_body_x0(lines, content, page) == {
+            "left": 85.0,
+            "right": None,
+        }
+    finally:
+        doc.close()
+
+
+def _build_wide_content_rect_pdf() -> bytes:
+    """a.pdf 형태 재현: 괘선이 글자보다 훨씬 왼쪽까지 뻗은 2단 시험지.
+
+    괘선 폭 때문에 `content_rect.x0` 이 22pt 로 잡히지만, 본문 글자는 85pt
+    부터 시작한다(차이 63pt > `DEFAULT_ANCHOR_INDENT_TOL`).
+    """
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        for y in (30.0, 31.0, 810.0, 811.0):
+            page.draw_line(fitz.Point(20, y), fitz.Point(575, y), width=0.5)
+        for index, no in enumerate(range(1, 7)):
+            top = 60.0 + index * 120.0
+            page.insert_text((85, top), f"{no}. 문제 본문", fontsize=11)
+            page.insert_text((85, top + 20), "이어지는 본문 줄", fontsize=11)
+        data: bytes = doc.tobytes()
+        return data
+    finally:
+        doc.close()
+
+
+def test_anchors_survive_when_content_rect_is_far_left_of_text() -> None:
+    """본문 경계가 글자보다 훨씬 왼쪽으로 잡혀도 문항을 잃지 않는다(a.pdf 회귀)."""
+    pdf_bytes = _build_wide_content_rect_pdf()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[0]
+        content = ex.content_rect(page)
+        col_x0, _ = ex.column_bounds(content, "left")
+        # 재현 조건 확인: 절대 기준만으로는 전부 탈락하는 배치다.
+        assert 85.0 - col_x0 > ex.DEFAULT_ANCHOR_INDENT_TOL
+        assert [anchor.no for anchor in ex.find_anchors(doc)] == [1, 2, 3, 4, 5, 6]
+    finally:
+        doc.close()
+
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+    assert [problem.no for problem in result.problems] == [1, 2, 3, 4, 5, 6]

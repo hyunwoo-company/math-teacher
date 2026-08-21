@@ -46,7 +46,8 @@ Column = Literal["left", "right"]
 # ("202" 뒤에 구분자가 없어 백트래킹해도 전부 실패한다).
 #
 # 3자리로 넓히면 오탐 표면이 커지지만, 뒤따르는 세 장치가 그대로 걸러낸다.
-#   * `DEFAULT_ANCHOR_INDENT_TOL` — 칼럼 왼쪽 끝에 붙은 줄만 앵커로 본다.
+#   * `DEFAULT_ANCHOR_INDENT_TOL` — 칼럼(또는 본문 정렬선) 왼쪽 끝에 붙은 줄만
+#     앵커로 본다(`_is_anchor_indent_ok`).
 #   * `_dominant_delimiter` — 한 문서에서 우세한 구분자 하나만 인정한다.
 #   * `_pick_anchor_chain` / `_longest_increasing` — 번호가 증가하는 사슬만 남긴다.
 # 실측으로도 기존 시험지 8종의 문항 수·번호가 한 건도 바뀌지 않았다
@@ -101,6 +102,37 @@ DEFAULT_MAX_EDGE_PX: Final[int] = 1568  # Anthropic 이미지 장변 상한
 
 # 앵커는 칼럼 왼쪽 끝에 붙어 있다. 본문 속 "1." 오탐을 걸러내는 들여쓰기 허용치(pt).
 DEFAULT_ANCHOR_INDENT_TOL: Final[float] = 30.0
+
+# --- 칼럼 본문 정렬선(들여쓰기 판정의 두 번째 기준) ---------------------------
+# 들여쓰기를 `content_rect` 의 왼쪽 경계 하나로만 재면, 그 경계가 실제 글자보다
+# 훨씬 왼쪽으로 잡힌 문서에서 **모든 앵커가 통째로 탈락**한다.
+# 실측(a.pdf, 28쪽): content_rect.x0 = 23.8 인데 본문 글자는 x0 = 85.0 부터
+# 시작해 차이가 61.2pt → 68개 앵커(번호 1~68 순증가)가 전부 탈락, 0문항.
+# 페이지 곳곳에 흩어진 정체불명 문자열이 경계를 넓힌 것으로 보이나 확정하지
+# 못했다(추측). `content_rect` 는 크롭 영역 계산에도 쓰여 고칠 수 없다.
+#
+# 그래서 "그 페이지·그 칼럼에서 본문이 실제로 정렬되는 x" 를 두 번째 기준으로
+# 두고 **OR** 로 판정한다(`_is_anchor_indent_ok`). 기존에 통과하던 앵커는 절대
+# 기준만으로 그대로 통과하므로 회귀가 구조적으로 불가능하다.
+
+# 같은 정렬선으로 볼 x0 오차(pt). 같은 문단 스타일이라도 폰트/자간 때문에
+# 소수점 이하가 흔들려 정확히 일치하지 않는다.
+_BODY_X0_CLUSTER_TOL: Final[float] = 1.0
+
+# 정렬선으로 인정할 최소 표본 수. 이 개수 이상 모인 정렬선 중 **가장 왼쪽**을 쓴다.
+#
+#   * `min` 만 쓰면 안 된다 — 칼럼 경계를 넘어온 요소 하나가 최솟값을 오염시킨다
+#     (실측: a.pdf p0 우측 칼럼 col_x0=300.5 인데 최솟값 298.9).
+#   * 최빈값만 쓰면 안 된다 — 같은 칼럼의 최빈값 표본이 3개뿐이라 근거가 없다.
+#   * 그래서 "표본이 충분한 정렬선 중 가장 왼쪽" 으로 둘을 조합한다. 왼쪽을 고를수록
+#     기준이 엄격해져(차이가 커져) 오탐이 덜 늘어난다.
+#
+# 값 5 의 근거(실측): 정상 칼럼의 정렬선 표본은 10~25개로 넉넉하고, 버려야 하는
+# 오염 칼럼의 최대 표본은 3개였다. 양쪽에서 2 이상 떨어진 5 를 고른다.
+# a.pdf 로 4~6 모두 68개 전부 통과, 8 부터 누락이 생긴다(실측 스윕).
+# 표본이 부족하면 정렬선을 포기하고 기존 절대 기준만 쓴다 — 근거 없는 기준으로
+# 통과시키느니 못 잡는 편이 낫다.
+_BODY_X0_MIN_SAMPLES: Final[int] = 5
 
 # --- 유형 문제집 폴백 (additive) ---------------------------------------------
 # 유형 문제집은 문제 번호가 "1." 이 아니라 "001" "002" 처럼 3자리 zero-padded 로,
@@ -311,6 +343,91 @@ def _classify_column(x0: float, page: fitz.Page) -> Column:
     return "left" if x0 < (page.rect.x0 + page.rect.width / 2.0) else "right"
 
 
+def _leftmost_supported_x0(values: Sequence[float]) -> float | None:
+    """정렬선 후보 x0 들에서 '표본이 충분한 것 중 가장 왼쪽'을 고른다.
+
+    가까운 값끼리(`_BODY_X0_CLUSTER_TOL` 이내) 묶어 정렬선을 만들고, 표본이
+    `_BODY_X0_MIN_SAMPLES` 이상인 첫(=가장 왼쪽) 정렬선의 실제 최솟값을 쓴다.
+    묶음은 정렬 후 **직전 값과의 간격**으로 잇는다. 자간 때문에 0.2pt 씩 밀린
+    값들이 이어져도 한 정렬선으로 보는 게 지면 사실에 가깝다.
+
+    Args:
+        values: 같은 페이지·같은 칼럼 안 본문 줄들의 x0.
+
+    Returns:
+        정렬선 x0. 표본이 부족하면 `None`(호출부는 절대 기준만 쓴다).
+    """
+    if not values:
+        return None
+    start = 0
+    ordered = sorted(values)
+    for index in range(1, len(ordered) + 1):
+        # 묶음이 끊기는 지점(마지막 포함)마다 표본 수를 확인한다.
+        if index == len(ordered) or (
+            ordered[index] - ordered[index - 1] > _BODY_X0_CLUSTER_TOL
+        ):
+            if index - start >= _BODY_X0_MIN_SAMPLES:
+                return ordered[start]
+            start = index
+    return None
+
+
+def _column_body_x0(
+    lines: Sequence[TextLine], content: fitz.Rect, page: fitz.Page
+) -> dict[Column, float | None]:
+    """페이지의 칼럼별 본문 정렬선(실제로 글자가 시작하는 x)을 잰다.
+
+    앵커 판정과 **같은 조건**(머리말·꼬리말 제외, 칼럼 범위 안)으로 거른 줄만
+    쓴다. 머리말·꼬리말은 칼럼과 무관하게 페이지 폭에 걸쳐 있어 정렬선을 실제보다
+    왼쪽으로 끌어내리기 때문이다.
+
+    Args:
+        lines: 페이지의 텍스트 줄.
+        content: 머리말/꼬리말을 뺀 본문 영역.
+        page: 칼럼 판정용 페이지.
+
+    Returns:
+        칼럼별 정렬선 x0. 표본이 부족한 칼럼은 `None`.
+    """
+    buckets: dict[Column, list[float]] = {"left": [], "right": []}
+    for line in lines:
+        x0, y0, _, y1 = line.bbox
+        if y0 < content.y0 or y1 > content.y1:
+            continue
+        column = _classify_column(x0, page)
+        col_x0, col_x1 = column_bounds(content, column)
+        if not (col_x0 - 1.0 <= x0 <= col_x1):
+            continue
+        buckets[column].append(x0)
+    return {
+        "left": _leftmost_supported_x0(buckets["left"]),
+        "right": _leftmost_supported_x0(buckets["right"]),
+    }
+
+
+def _is_anchor_indent_ok(
+    x0: float, col_x0: float, body_x0: float | None, indent_tol: float
+) -> bool:
+    """앵커의 들여쓰기가 허용 범위인지 판정한다(절대 기준 OR 정렬선 기준).
+
+    OR 인 것이 핵심이다. 절대 기준(칼럼 왼쪽 경계)으로 통과하던 앵커는 정렬선이
+    어떻게 잡히든 그대로 통과하므로, 이 규칙으로 **기존에 잡히던 문항이 빠지는
+    회귀는 일어날 수 없다**. 늘어나는 것은 정렬선 기준으로만 통과하는 앵커뿐이다.
+
+    Args:
+        x0: 앵커 줄의 왼쪽 x.
+        col_x0: 칼럼 왼쪽 경계(`content_rect` 기반, 기존 절대 기준).
+        body_x0: 그 칼럼의 본문 정렬선. 표본 부족이면 `None`.
+        indent_tol: 허용 들여쓰기(pt).
+
+    Returns:
+        앵커로 인정할 수 있으면 True.
+    """
+    if x0 - col_x0 <= indent_tol:
+        return True
+    return body_x0 is not None and x0 - body_x0 <= indent_tol
+
+
 def _longest_increasing(numbers: list[int]) -> list[int]:
     """읽는 순서 리스트에서 가장 긴 '순증가' 부분수열의 인덱스를 돌려준다.
 
@@ -482,8 +599,11 @@ def find_anchors(
     for page_no in range(doc.page_count):
         page = doc[page_no]
         content = content_rect(page)
+        lines = _page_lines(page)
+        # 들여쓰기 판정의 두 번째 기준. 페이지마다 한 번만 잰다.
+        body_x0 = _column_body_x0(lines, content, page)
         page_candidates: list[tuple[Anchor, str]] = []
-        for line in _page_lines(page):
+        for line in lines:
             parsed = _parse_anchor_line(line.text)
             if parsed is None:
                 continue
@@ -497,7 +617,7 @@ def find_anchors(
             # 칼럼 밖이거나 지나치게 들여쓰기된 줄은 앵커가 아니다
             if not (col_x0 - 1.0 <= x0 <= col_x1):
                 continue
-            if x0 - col_x0 > indent_tol:
+            if not _is_anchor_indent_ok(x0, col_x0, body_x0[column], indent_tol):
                 continue
             page_candidates.append(
                 (
