@@ -6,7 +6,7 @@
  * 스토어의 `moveNodes` 로 그대로 넘어가는지.
  */
 
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Workspace } from '@/components/Workspace';
@@ -27,10 +27,24 @@ beforeEach(() => {
   window.localStorage.clear();
 });
 
+/**
+ * 폴더 기본값은 "접힘" 이라 하위 노드를 우클릭하려면 루트를 먼저 펴야 한다.
+ * 행을 클릭해 펴면 선택 상태까지 바뀌어 이동 대상이 흐려지므로 스토어를 직접 세운다.
+ */
+function expandRootFolders() {
+  const { nodes, setExpanded } = useWorkspace.getState();
+  for (const node of nodes) {
+    if (node.type === 'folder' && node.parent_id === null) setExpanded(node.id, true);
+  }
+}
+
 async function openWorkspace() {
   const user = userEvent.setup();
   render(<Workspace />);
   await screen.findByText('2026-1학기', {}, { timeout: 5000 });
+  await act(async () => {
+    expandRootFolders();
+  });
   return user;
 }
 

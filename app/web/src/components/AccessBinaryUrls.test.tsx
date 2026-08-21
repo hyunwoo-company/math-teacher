@@ -57,7 +57,8 @@ describe('web-auth 목에서 바이너리 URL 에 자격증명이 실리지 않�
     await user.click(screen.getByRole('button', { name: '들어가기' }));
     await waitFor(() => expect(useWorkspace.getState().accessOk).toBe(true), { timeout: 10_000 });
 
-    // 시험지를 연다.
+    // 시험지를 연다. 폴더는 접힌 채로 시작하므로 루트부터 한 단계씩 편다.
+    await user.click(await screen.findByRole('treeitem', { name: /2026-1학기/ }, { timeout: 5000 }));
     await user.click(await screen.findByRole('treeitem', { name: /공통수학1/ }, { timeout: 5000 }));
     await user.click(await screen.findByRole('treeitem', { name: /풍문고/ }, { timeout: 5000 }));
 

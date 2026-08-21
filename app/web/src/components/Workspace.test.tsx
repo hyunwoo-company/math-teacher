@@ -6,7 +6,7 @@
  * 나머지(트리/탭/문제 선택/스트리밍/사용량)는 실제 컴포넌트를 쓴다.
  */
 
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Workspace } from '@/components/Workspace';
@@ -36,8 +36,24 @@ async function openWorkspace() {
   return user;
 }
 
+/**
+ * 지금 섹션의 루트 폴더를 전부 펼친다.
+ * 폴더 기본값이 "접힘" 이라(요청: 닫힌 상태가 디폴트) 하위 노드를 다루는 테스트는
+ * 먼저 루트를 펴야 한다. 행을 클릭해 펴면 포커스(업로드 위치)까지 바뀌므로
+ * 스토어를 직접 세운다. 접힘 기본값 자체는 아래 "접기/펼치기" 테스트가 지킨다.
+ */
+async function expandRoots() {
+  await act(async () => {
+    const { nodes, setExpanded } = useWorkspace.getState();
+    for (const node of nodes) {
+      if (node.type === 'folder' && node.parent_id === null) setExpanded(node.id, true);
+    }
+  });
+}
+
 /** 폴더를 펼쳐 시험지를 열고, 파일 상세 로딩까지 기다린다. */
 async function openSampleFile(user: ReturnType<typeof userEvent.setup>) {
+  await expandRoots();
   await user.click(screen.getByRole('treeitem', { name: /공통수학1/ }));
   await user.click(await screen.findByRole('treeitem', { name: /풍문고/ }));
   // 문제 번호 목록이 뜨면 fileDetail 로딩이 끝난 것이다.
@@ -81,7 +97,9 @@ describe('좌측 2섹션 (시험지 / 오답노트)', () => {
   it('노트를 클릭하면 중앙에 항목 목록(비어 있음)이 뜬다', async () => {
     const user = await openWorkspace();
     await user.click(screen.getByRole('tab', { name: '오답노트' }));
-    // 루트 폴더(이현우)는 자동으로 펼쳐져 있어 노트가 바로 보인다.
+    // 학생 폴더(이현우)도 접힌 채로 시작하므로 펴야 그 안의 노트가 보인다.
+    await screen.findByRole('treeitem', { name: /이현우/ });
+    await expandRoots();
     await user.click(await screen.findByRole('treeitem', { name: /중간고사 오답/ }));
 
     expect(await screen.findByText('아직 담긴 오답이 없습니다')).toBeInTheDocument();
@@ -103,8 +121,10 @@ describe('좌측 2섹션 (시험지 / 오답노트)', () => {
     await user.click(await within(pickDialog).findByRole('checkbox', { name: /중간고사 오답/ }));
     await user.click(within(pickDialog).getByRole('button', { name: '담기' }));
 
-    // 오답노트 섹션에서 그 노트를 연다.
+    // 오답노트 섹션에서 그 노트를 연다(학생 폴더를 펴야 보인다).
     await user.click(screen.getByRole('tab', { name: '오답노트' }));
+    await screen.findByRole('treeitem', { name: /이현우/ });
+    await expandRoots();
     await user.click(await screen.findByRole('treeitem', { name: /중간고사 오답/ }));
 
     expect(await screen.findByText('3번')).toBeInTheDocument();
@@ -251,6 +271,7 @@ describe('워크스페이스 화면 (목 모드)', () => {
 
   it('폴더를 클릭하면 업로드 위치가 그 폴더로 바뀐다', async () => {
     const user = await openWorkspace();
+    await expandRoots();
 
     await user.click(screen.getByRole('treeitem', { name: /공통수학1/ }));
     expect(await screen.findByText('→ 공통수학1')).toBeInTheDocument();
@@ -270,6 +291,7 @@ describe('워크스페이스 화면 (목 모드)', () => {
 
   it('하단 [+ 파일 업로드] 는 표시된 폴더로 올린다', async () => {
     const user = await openWorkspace();
+    await expandRoots();
     await user.click(screen.getByRole('treeitem', { name: /미적분/ }));
     await screen.findByText('→ 미적분');
 
@@ -319,6 +341,7 @@ describe('워크스페이스 화면 (목 모드)', () => {
   it('업로드 위치 확인 창에서 다른 폴더로 바꿔 올릴 수 있다', async () => {
     const user = await openWorkspace();
     // 추론 대상을 미적분으로 만들어 둔다.
+    await expandRoots();
     await user.click(screen.getByRole('treeitem', { name: /미적분/ }));
     await screen.findByText('→ 미적분');
 
@@ -368,15 +391,20 @@ describe('워크스페이스 화면 (목 모드)', () => {
     expect(useWorkspace.getState().nodes.some((node) => node.name === '메모.txt')).toBe(false);
   }, 30_000);
 
-  it('폴더 트리를 중첩해 그리고 접기/펼치기가 동작한다', async () => {
+  // 예전에는 루트 폴더가 펼쳐진 채로 시작했지만, 지금은 전부 접힘이 기본이다(요청).
+  it('폴더는 접힌 채로 시작하고, 눌러 가며 한 단계씩 펼친다', async () => {
     const user = await openWorkspace();
 
     const root = screen.getByRole('treeitem', { name: /2026-1학기/ });
     expect(root).toHaveAttribute('aria-level', '1');
-    expect(root).toHaveAttribute('aria-expanded', 'true');
+    expect(root).toHaveAttribute('aria-expanded', 'false');
 
-    // 루트는 펼쳐져 있으므로 자식 폴더가 보인다.
-    const subject = screen.getByRole('treeitem', { name: /공통수학1/ });
+    // 루트가 접혀 있으므로 자식 폴더는 아직 보이지 않는다.
+    expect(screen.queryByRole('treeitem', { name: /공통수학1/ })).toBeNull();
+
+    // 루트 펼치기
+    await user.click(root);
+    const subject = await screen.findByRole('treeitem', { name: /공통수학1/ });
     expect(subject).toHaveAttribute('aria-level', '2');
     expect(subject).toHaveAttribute('aria-expanded', 'false');
 
@@ -397,8 +425,34 @@ describe('워크스페이스 화면 (목 모드)', () => {
     await waitFor(() => expect(screen.queryByRole('treeitem', { name: /공통수학1/ })).toBeNull());
   });
 
+  it('[모든 폴더 닫기] 는 펼쳐 둔 폴더를 한 번에 접는다', async () => {
+    const user = await openWorkspace();
+    const button = screen.getByRole('button', { name: '모든 폴더 닫기' });
+    // 펼친 폴더가 하나도 없으면 눌러도 할 일이 없으므로 비활성이다.
+    expect(button).toBeDisabled();
+
+    await user.click(screen.getByRole('treeitem', { name: /2026-1학기/ }));
+    await user.click(await screen.findByRole('treeitem', { name: /공통수학1/ }));
+    expect(await screen.findByRole('treeitem', { name: /풍문고/ })).toBeInTheDocument();
+    expect(button).toBeEnabled();
+
+    await user.click(button);
+
+    await waitFor(() => {
+      // 루트만 남고 하위는 전부 사라진다.
+      expect(screen.queryByRole('treeitem', { name: /공통수학1/ })).toBeNull();
+      expect(screen.queryByRole('treeitem', { name: /풍문고/ })).toBeNull();
+    });
+    expect(screen.getByRole('treeitem', { name: /2026-1학기/ })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(screen.getByRole('button', { name: '모든 폴더 닫기' })).toBeDisabled();
+  });
+
   it('빈 폴더에는 "비어 있음" 을 표시한다', async () => {
     const user = await openWorkspace();
+    await expandRoots();
     await user.click(screen.getByRole('treeitem', { name: /미적분/ }));
     expect(await screen.findByText('비어 있음')).toBeInTheDocument();
   });

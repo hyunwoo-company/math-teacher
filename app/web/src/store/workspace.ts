@@ -355,6 +355,8 @@ interface WorkspaceState {
   toggleExpanded: (id: string) => void;
   focusNode: (id: string | null) => void;
   setExpanded: (id: string, value: boolean) => void;
+  /** 펼쳐 둔 폴더를 전부 접는다(좌측 패널의 [모든 폴더 닫기]). */
+  collapseAll: () => void;
   createFolder: (name: string, parentId: string | null) => Promise<boolean>;
   createNote: (name: string, parentId: string | null) => Promise<boolean>;
   renameNode: (id: string, name: string) => Promise<boolean>;
@@ -1432,16 +1434,12 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
       const { nodes } = await api.getTree(target);
       // 그 사이 섹션이 바뀌었으면 버린다.
       if (get().section !== target) return;
-      set((state) => {
-        // 이 섹션의 루트 폴더는 펼쳐서 보여준다.
-        const expanded = { ...state.expanded };
-        for (const node of nodes) {
-          if (node.type === 'folder' && node.parent_id === null && expanded[node.id] === undefined) {
-            expanded[node.id] = true;
-          }
-        }
-        return { nodes, treeStatus: 'ready', expanded };
-      });
+      // 폴더는 접힌 채로 시작한다(요청: "닫혀 있는 상태가 디폴트").
+      // 예전에는 여기서 루트 폴더를 자동으로 펼쳤지만, 폴더가 늘수록 첫 화면이
+      // 길어져 오히려 찾기 어려웠다. 반대로 "방금 내가 만든 것" 은 보여야 하므로
+      // 생성·업로드·이동 액션의 부모 펼침(아래 createFolder 등)은 그대로 둔다.
+      // `expanded` 를 건드리지 않으므로 새로 고침해도 사용자가 펼쳐 둔 폴더는 유지된다.
+      set({ nodes, treeStatus: 'ready' });
       // 시험지 트리를 처음 그린 직후, 마지막으로 보던 파일/스레드를 자동 복원한다.
       if (target === 'exam') void get().restoreLastOpen();
     } catch (error) {
@@ -1477,6 +1475,13 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
 
   setExpanded(id: string, value: boolean) {
     set((state) => ({ expanded: { ...state.expanded, [id]: value } }));
+  },
+
+  collapseAll() {
+    // 값을 false 로 덮지 않고 통째로 비운다: TreeRow 는 `expanded[id] === true` 일 때만
+    // 펼치므로 "없음" 과 "false" 가 같은 뜻이고, 빈 객체가 초기 상태와도 일치한다.
+    // 섹션 구분 없이 비우지만 다른 섹션 트리는 어차피 다시 그릴 때 접힌 채로 시작한다.
+    set({ expanded: {} });
   },
 
   async createFolder(name: string, parentId: string | null) {

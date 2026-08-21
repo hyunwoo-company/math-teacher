@@ -37,7 +37,7 @@ async function openWorkspace() {
 describe('좌측 트리 이름 검색', () => {
   it('입력하면 비일치 노드가 사라지고, 일치한 곳까지 펼쳐 보여 준다', async () => {
     const user = await openWorkspace();
-    // 처음에는 루트만 펼쳐져 있어 파일 행이 보이지 않는다.
+    // 처음에는 폴더가 전부 접혀 있어 파일 행이 보이지 않는다.
     expect(screen.queryByRole('treeitem', { name: /풍문고/ })).toBeNull();
 
     await user.type(screen.getByRole('searchbox', { name: '시험지 이름 검색' }), '풍문');

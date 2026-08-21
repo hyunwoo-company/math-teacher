@@ -144,11 +144,50 @@ describe('워크스페이스 스토어 (목 API)', () => {
     expect(subject?.children[0]?.depth).toBe(2);
   });
 
-  it('루트 폴더는 처음에 펼쳐진 상태로 둔다', async () => {
+  // 예전에는 루트 폴더를 자동으로 펼쳤다. 폴더가 늘수록 첫 화면이 길어져
+  // "닫힌 상태가 디폴트" 로 바꿨다(요청). 이 테스트가 그 규칙을 지킨다.
+  it('목록을 불러와도 폴더는 접힌 채로 둔다', async () => {
     await useWorkspace.getState().loadTree();
-    const { expanded, nodes } = useWorkspace.getState();
-    const rootFolders = nodes.filter((node) => node.type === 'folder' && node.parent_id === null);
-    for (const folder of rootFolders) expect(expanded[folder.id]).toBe(true);
+    expect(useWorkspace.getState().expanded).toEqual({});
+  });
+
+  it('사용자가 펼쳐 둔 폴더는 목록을 다시 불러와도 그대로다', async () => {
+    await useWorkspace.getState().loadTree();
+    useWorkspace.getState().setExpanded('folder-2026-1', true);
+
+    await useWorkspace.getState().loadTree();
+    expect(useWorkspace.getState().expanded['folder-2026-1']).toBe(true);
+  });
+
+  it('새 폴더를 만들면 그 부모는 펼친다(방금 만든 것이 보이도록)', async () => {
+    await useWorkspace.getState().loadTree();
+    expect(useWorkspace.getState().expanded['folder-2026-1']).toBeUndefined();
+
+    const created = await useWorkspace.getState().createFolder('7월', 'folder-2026-1');
+    expect(created).toBe(true);
+    expect(useWorkspace.getState().expanded['folder-2026-1']).toBe(true);
+  });
+
+  it('파일을 올리면 올린 폴더는 펼친다(방금 올린 것이 보이도록)', async () => {
+    await useWorkspace.getState().loadTree();
+    expect(useWorkspace.getState().expanded['folder-calculus']).toBeUndefined();
+
+    await useWorkspace
+      .getState()
+      .uploadFiles([new File(['%PDF-'], '기말.pdf', { type: 'application/pdf' })], 'folder-calculus');
+
+    expect(useWorkspace.getState().expanded['folder-calculus']).toBe(true);
+  });
+
+  it('collapseAll 은 펼쳐 둔 폴더를 전부 접는다', async () => {
+    await useWorkspace.getState().loadTree();
+    useWorkspace.getState().setExpanded('folder-2026-1', true);
+    useWorkspace.getState().setExpanded('folder-common1', true);
+
+    useWorkspace.getState().collapseAll();
+
+    // TreeRow 는 `=== true` 로만 펼치므로 키를 통째로 비운다.
+    expect(useWorkspace.getState().expanded).toEqual({});
   });
 
   it('파일을 선택하면 문제 22개를 채운다', async () => {

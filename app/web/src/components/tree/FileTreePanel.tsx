@@ -97,6 +97,7 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
   const setSection = useWorkspace((state) => state.setSection);
   const loadTree = useWorkspace((state) => state.loadTree);
   const toggleExpanded = useWorkspace((state) => state.toggleExpanded);
+  const collapseAll = useWorkspace((state) => state.collapseAll);
   const openNode = useWorkspace((state) => state.openNode);
   const createFolder = useWorkspace((state) => state.createFolder);
   const createNote = useWorkspace((state) => state.createNote);
@@ -145,6 +146,12 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
     for (const id of matchedIds) opened[id] = true;
     return opened;
   }, [expanded, matchedIds]);
+  /**
+   * [모든 폴더 닫기] 를 켤지. 접기는 스토어의 `expanded` 만 건드리므로 판정도 그 값으로 한다
+   * (검색 때문에 임시로 펼쳐진 폴더는 이 버튼으로 닫히지 않는다 = 눌러도 소용없으니 제외).
+   * `toggleExpanded` 가 false 를 남길 수 있어 키 개수가 아니라 값이 true 인 것만 센다.
+   */
+  const hasExpanded = useMemo(() => Object.values(expanded).some(Boolean), [expanded]);
   const highlightedId = isNote ? selectedNoteId : selectedFileId;
   // 범위 선택은 "화면에 보이는 순서" 기준이다(접힌 폴더의 자식은 제외).
   const visibleIds = useMemo(
@@ -612,6 +619,19 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
             className="rounded px-1.5 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100"
           >
             새로 고침
+          </button>
+          {/* 트리 안의 폴더를 전부 접는다. 아래 [◂] (패널 자체 접기) 와는 다른 기능이다. */}
+          <button
+            type="button"
+            onClick={collapseAll}
+            disabled={!hasExpanded}
+            aria-label="모든 폴더 닫기"
+            title="모든 폴더 닫기"
+            className="rounded px-1.5 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            {/* 보이는 글자가 접근성 이름(`모든 폴더 닫기`)의 부분 문자열이어야 한다
+                (WCAG 2.5.3). 음성으로 "폴더 닫기" 라고 말했을 때 이 버튼이 잡힌다. */}
+            폴더 닫기
           </button>
           {onCollapse ? (
             <button

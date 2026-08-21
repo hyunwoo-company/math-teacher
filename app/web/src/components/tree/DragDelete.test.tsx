@@ -9,7 +9,7 @@
  * HTML5 DnD 는 jsdom 이 dataTransfer 를 만들어 주지 않으므로 대역을 넣어 준다.
  */
 
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Workspace } from '@/components/Workspace';
@@ -48,10 +48,25 @@ function fakeDataTransfer() {
   };
 }
 
+/**
+ * 폴더 기본값은 "접힘" 이라 하위 노드를 다루려면 루트를 먼저 펴야 한다.
+ * 행을 클릭해 펴면 포커스·선택까지 바뀌어 끌기 시나리오가 흐려지므로 스토어를 직접 세운다.
+ * (접힘 기본값 자체는 store/workspace.test.ts 와 Workspace.test.tsx 가 지킨다.)
+ */
+function expandRootFolders() {
+  const { nodes, setExpanded } = useWorkspace.getState();
+  for (const node of nodes) {
+    if (node.type === 'folder' && node.parent_id === null) setExpanded(node.id, true);
+  }
+}
+
 async function openWorkspace() {
   const user = userEvent.setup();
   render(<Workspace />);
   await screen.findByText('2026-1학기', {}, { timeout: 5000 });
+  await act(async () => {
+    expandRootFolders();
+  });
   return user;
 }
 
