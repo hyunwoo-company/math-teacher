@@ -1,8 +1,12 @@
-"""이미지 풀이 실패 → 저장된 판독본으로 재시도 (`ai_service.solve_events`).
+"""image 모드 문항의 판독본 우선 풀이와 방향 전환 폴백 (`ai_service.solve_events`).
 
-사용자가 손으로 하던 우회를 자동화한 경로다: 크롭 이미지로는 풀이가 실패하는
-시험지를 텍스트로 옮겨 붙이면 풀린다. 그래서 **이미 판독본이 있는 문항만**
-텍스트로 한 번 더 시도한다(판독을 새로 돌리지 않는다 = 추가 판독 비용 0).
+image 모드 파일에 판독본이 **이미** 있으면 크롭 이미지가 아니라 그 텍스트로 먼저
+푼다(판독을 새로 돌리지 않는다 = 추가 판독 비용 0). 이미지 풀이가 예외 없이 엉터리
+풀이를 내놓는 사례(omega)가 있어 실패 폴백만으로는 걸러지지 않기 때문이고, 이미지
+토큰도 함께 아낀다.
+
+판독본이 **그림을 가리키면** 글자만 보내서는 조건이 빠지므로 예전처럼 이미지로
+푼다. 어느 방향이든 1차가 실패하면 반대 방향으로 한 번만 다시 푼다.
 """
 
 from __future__ import annotations
@@ -15,10 +19,34 @@ from conftest import StubProvider, create_job, upload_test_pdf, wait_job
 from fastapi.testclient import TestClient
 
 import ai_service
+import pricing
 import storage
-from providers.base import DeltaEvent, DoneEvent, ImagePart, ProviderError, ProviderEvent
+from providers.base import (
+    DeltaEvent,
+    DoneEvent,
+    ImagePart,
+    Mode,
+    ProviderError,
+    ProviderEvent,
+)
 
 TRANSCRIPT = r"다음 식의 값을 구하시오. \(x^{2}+1\) [3점]"
+# 그림을 가리키는 판독본. 판독본은 글자·수식만 복원하므로 이 문항은 크롭이 필요하다.
+FIGURE_TRANSCRIPT = r"다음 그림과 같이 놓인 삼각형의 넓이를 구하시오. \(a>0\) [4점]"
+
+
+def _yield_done(text: str) -> list[ProviderEvent]:
+    return [
+        DeltaEvent(type="delta", text=text),
+        DoneEvent(
+            type="done",
+            text=text,
+            usage=None,
+            cost=None,
+            truncated=False,
+            stop_reason="end_turn",
+        ),
+    ]
 
 
 class ImageFailingProvider(StubProvider):
@@ -33,16 +61,37 @@ class ImageFailingProvider(StubProvider):
         parts = [part for turn in kwargs["turns"] for part in turn.parts]
         if any(isinstance(part, ImagePart) for part in parts):
             raise ProviderError(self.error_code, "이미지로는 풀지 못했습니다", None)
-        text = "텍스트로 푼 풀이"
-        yield DeltaEvent(type="delta", text=text)
-        yield DoneEvent(
-            type="done",
-            text=text,
-            usage=None,
-            cost=None,
-            truncated=False,
-            stop_reason="end_turn",
-        )
+        for event in _yield_done("텍스트로 푼 풀이"):
+            yield event
+
+
+class TextFailingProvider(StubProvider):
+    """텍스트만 오면 실패하고 이미지가 실리면 성공하는 스텁(판독본 → 이미지 폴백)."""
+
+    async def stream(self, **kwargs: Any) -> AsyncIterator[ProviderEvent]:
+        self.calls.append(kwargs)
+        parts = [part for turn in kwargs["turns"] for part in turn.parts]
+        if not any(isinstance(part, ImagePart) for part in parts):
+            raise ProviderError("empty_response", "텍스트로는 풀지 못했습니다", None)
+        for event in _yield_done("이미지로 푼 풀이"):
+            yield event
+
+
+def _spy_crop_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """크롭 PNG 를 읽은 문항 번호를 기록한다.
+
+    "이미지를 아예 읽지 않는다" 를 못박는 장치다 — 이미지 토큰·비전 처리 시간을
+    아끼는 것이 판독본 우선 풀이의 목적 절반이다.
+    """
+    reads: list[int] = []
+    original = ai_service._read_crop_b64
+
+    def _spy(problem: dict[str, Any]) -> str | None:
+        reads.append(int(problem["no"]))
+        return original(problem)
+
+    monkeypatch.setattr(ai_service, "_read_crop_b64", _spy)
+    return reads
 
 
 def _use(monkeypatch: pytest.MonkeyPatch, provider: StubProvider) -> None:
@@ -66,11 +115,15 @@ def _set_transcript(node_id: str, no: int, text: str) -> None:
 def test_image_failure_retries_with_saved_transcript(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """이미지로 실패해도 판독본이 있으면 텍스트로 다시 풀어 저장한다."""
+    """이미지로 실패해도 판독본이 있으면 텍스트로 다시 풀어 저장한다.
+
+    판독본이 **그림을 가리켜** 이미지로 시작하는 경로다(그림 참조가 없으면 애초에
+    텍스트로 먼저 푼다 — 아래 `test_transcript_is_used_first_...`).
+    """
     provider = ImageFailingProvider()
     _use(monkeypatch, provider)
     node_id = upload_test_pdf(client)["node"]["id"]
-    _set_transcript(node_id, 1, TRANSCRIPT)
+    _set_transcript(node_id, 1, FIGURE_TRANSCRIPT)
 
     job_id = create_job(client, kind="solve", node_id=node_id, problem_numbers=[1])[
         "job"
@@ -87,7 +140,9 @@ def test_image_failure_retries_with_saved_transcript(
     assert len(provider.calls) == 2
     last_parts = [part for turn in provider.calls[-1]["turns"] for part in turn.parts]
     assert not any(isinstance(part, ImagePart) for part in last_parts)
-    assert TRANSCRIPT in "".join(getattr(part, "text", "") for part in last_parts)
+    assert FIGURE_TRANSCRIPT in "".join(
+        getattr(part, "text", "") for part in last_parts
+    )
 
 
 def test_no_transcript_means_no_retry(
@@ -131,5 +186,150 @@ def test_fallback_stops_after_it_also_fails(
 
     assert final["status"] == "done"
     assert final["done_count"] == 3
-    # 1번만 두 번(이미지+텍스트), 2·3번은 한 번씩.
+    # 1번만 두 번(판독본+이미지), 2·3번은 한 번씩.
     assert len(provider.calls) == 4
+
+
+# ------------------------------------------------ 판독본 우선 (ERR-4 / omega)
+def test_transcript_is_used_first_without_reading_crop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """그림 참조가 없는 판독본이 있으면 **크롭을 읽지도 않고** 텍스트로 푼다.
+
+    이미지 풀이가 예외 없이 엉터리 풀이를 내놓던 사례(omega)의 재발 방지이자,
+    이미지 토큰·비전 처리 시간 절약이다. 그래서 호출 횟수만 보지 않고
+    `_read_crop_b64` 가 아예 불리지 않는 것까지 못박는다.
+    """
+    provider = ImageFailingProvider()
+    _use(monkeypatch, provider)
+    reads = _spy_crop_reads(monkeypatch)
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _set_transcript(node_id, 1, TRANSCRIPT)
+
+    job_id = create_job(client, kind="solve", node_id=node_id, problem_numbers=[1])[
+        "job"
+    ]["id"]
+    final = wait_job(client, job_id)
+
+    assert final["status"] == "done"
+    assert reads == []  # 크롭 PNG 를 열지 않았다
+    assert len(provider.calls) == 1  # 이미지 시도 없이 한 번에 끝났다
+    parts = [part for turn in provider.calls[0]["turns"] for part in turn.parts]
+    assert not any(isinstance(part, ImagePart) for part in parts)
+    assert TRANSCRIPT in "".join(getattr(part, "text", "") for part in parts)
+
+    saved = client.get(f"/api/files/{node_id}/solutions").json()["solutions"]
+    assert [item["solution"] for item in saved] == ["텍스트로 푼 풀이"]
+
+
+def test_figure_transcript_still_solves_with_image(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """판독본이 그림을 가리키면 예전처럼 크롭 이미지로 푼다.
+
+    판독본은 글자·수식만 복원한다. `다음 그림과 같이` 가 있는 문항을 텍스트만으로
+    보내면 조건이 빠진 문제를 푸는 셈이 된다.
+    """
+    provider = StubProvider()
+    _use(monkeypatch, provider)
+    reads = _spy_crop_reads(monkeypatch)
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _set_transcript(node_id, 1, FIGURE_TRANSCRIPT)
+
+    job_id = create_job(client, kind="solve", node_id=node_id, problem_numbers=[1])[
+        "job"
+    ]["id"]
+    final = wait_job(client, job_id)
+
+    assert final["status"] == "done"
+    assert reads == [1]
+    assert len(provider.calls) == 1
+    parts = [part for turn in provider.calls[0]["turns"] for part in turn.parts]
+    assert any(isinstance(part, ImagePart) for part in parts)
+
+
+async def _run_solve(
+    *,
+    node_id: str,
+    provider: StubProvider,
+    mode: Mode | None = None,
+    numbers: list[int],
+) -> list[tuple[str, dict[str, Any]]]:
+    """`solve_events` 를 직접 돌려 이벤트를 모은다(이벤트 횟수 검증용)."""
+    file_mode, targets = ai_service.load_solve_targets(node_id, numbers)
+    return [
+        event
+        async for event in ai_service.solve_events(
+            node_id=node_id,
+            provider=provider,
+            mode=mode or file_mode,
+            targets=targets,
+            model=pricing.DEFAULT_MODEL,
+            effort="medium",
+        )
+    ]
+
+
+async def test_transcript_failure_retries_with_image_once(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """판독본으로 실패하면 이미지로 한 번만 다시 풀고, `done` 은 정확히 한 번이다."""
+    provider = TextFailingProvider()
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _set_transcript(node_id, 1, TRANSCRIPT)
+
+    events = await _run_solve(node_id=node_id, provider=provider, numbers=[1])
+    names = [name for name, _ in events]
+
+    assert names.count("done") == 1  # 진행 단위는 문항 하나
+    assert names.count("error") == 0
+    # 재시도에 들어갈 때 `problem` 을 한 번 더 내서 부분 출력을 지운다.
+    assert names.count("problem") == 2
+    assert len(provider.calls) == 2  # 텍스트 1 + 이미지 1, 왕복은 없다
+    first = [part for turn in provider.calls[0]["turns"] for part in turn.parts]
+    last = [part for turn in provider.calls[-1]["turns"] for part in turn.parts]
+    assert not any(isinstance(part, ImagePart) for part in first)
+    assert any(isinstance(part, ImagePart) for part in last)
+
+
+async def test_text_mode_file_ignores_transcript(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """text 모드 파일은 동작이 바뀌지 않는다 — 크롭도, 판독본도 쓰지 않는다."""
+    provider = ImageFailingProvider()
+    reads = _spy_crop_reads(monkeypatch)
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _set_transcript(node_id, 1, TRANSCRIPT)
+
+    events = await _run_solve(
+        node_id=node_id, provider=provider, mode="text", numbers=[1]
+    )
+    names = [name for name, _ in events]
+
+    assert names.count("done") == 1
+    assert names.count("problem") == 1  # 재시도 없음
+    assert reads == []
+    assert len(provider.calls) == 1
+    parts = [part for turn in provider.calls[0]["turns"] for part in turn.parts]
+    prompt = "".join(getattr(part, "text", "") for part in parts)
+    assert not any(isinstance(part, ImagePart) for part in parts)
+    assert TRANSCRIPT not in prompt  # text 모드는 `problems.text` 를 쓴다
+
+
+async def test_image_mode_without_transcript_uses_crop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """판독본이 없으면 예전 그대로 크롭 이미지로 푼다(재시도 없음)."""
+    provider = StubProvider()
+    reads = _spy_crop_reads(monkeypatch)
+    node_id = upload_test_pdf(client)["node"]["id"]
+
+    events = await _run_solve(node_id=node_id, provider=provider, numbers=[1])
+    names = [name for name, _ in events]
+
+    assert names.count("done") == 1
+    assert names.count("problem") == 1
+    assert reads == [1]
+    assert len(provider.calls) == 1
+    parts = [part for turn in provider.calls[0]["turns"] for part in turn.parts]
+    assert any(isinstance(part, ImagePart) for part in parts)

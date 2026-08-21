@@ -19,6 +19,7 @@ from fastapi import status
 from fastapi.concurrency import run_in_threadpool
 
 import config
+import figure_ref
 import markdown_sections
 import pricing
 import prompts
@@ -297,11 +298,25 @@ async def solve_events(
 
     캐시 히트를 노리려면 순차 호출이어야 한다(첫 호출이 캐시를 쓰고 이후가 읽는다).
 
-    이미지 문항의 풀이가 **실패**(`ProviderError`)했고 그 문항에 **이미 저장된
-    판독본**이 있으면, 그 텍스트로 한 번만 다시 푼다. 사용자가 손으로 하던 우회
-    (이미지로 안 풀리면 텍스트로 옮겨 붙여 푼다)를 자동화한 것이다. 여기서
-    판독(`transcribe_events`)을 새로 돌리지는 않는다 — 언제 판독을 함께 돌릴지는
-    쿼터 정책 문제라 이 함수가 정할 일이 아니다.
+    **image 모드 문항에 판독본이 이미 있으면 크롭 이미지가 아니라 그 텍스트로 먼저
+    푼다.** 판독본을 실패 폴백이 아니라 1차 입력으로 올린 이유는 `omega 5회.pdf`
+    사례다 — 문항 인식·판독은 멀쩡한데 이미지 풀이가 **예외 없이** 모든 문항에
+    똑같은 엉터리 풀이를 내놨다. 형식도 길이도 정상이라 `ProviderError` 폴백에는
+    걸리지 않는다. 텍스트를 먼저 쓰면 이미지 토큰과 비전 처리 시간도 함께 아낀다.
+
+    다만 판독본이 **그림을 가리키면**(`figure_ref.needs_figure`) 여전히 이미지로
+    푼다. 판독본은 글자·수식만 복원하고 그림은 복원하지 못하므로, 그 문항의
+    텍스트만 보내면 조건이 빠진 문제를 푸는 셈이 된다.
+
+    어느 방향이든 1차가 `ProviderError` 로 실패하면 **반대 방향으로 한 번만** 다시
+    푼다(텍스트→이미지, 또는 판독본이 그림을 가리켜 이미지로 시작한 경우
+    이미지→텍스트). 왕복은 하지 않는다. 판독본은 **이미 저장된 것만** 쓴다 —
+    여기서 판독(`transcribe_events`)을 새로 돌리지는 않는다. 언제 판독을 함께
+    돌릴지는 쿼터 정책 문제라 이 함수가 정할 일이 아니다.
+
+    image 모드 파일의 `problems.text` 는 PUA 가 깨진 문자열이므로
+    (`extractor.py` 의 mode 판정) 풀이 입력으로 쓰지 않는다. 텍스트 입력은
+    `problems.transcript` 뿐이다.
 
     문항 하나가 내는 `done`/`error` 는 재시도를 해도 **정확히 한 번**이다
     (작업 진행률이 `total` 을 넘지 않아야 한다). 재시도에 들어가면 `problem`
@@ -312,8 +327,8 @@ async def solve_events(
     has_usage = False
     has_cost = False
 
-    # 판독본 폴백 스위치. 폴백까지 실패하면 이 작업에서는 더 시도하지 않는다
-    # (아래 `ProviderError` 처리 참고 — 쿼터 보호).
+    # 폴백 스위치. 반대 방향으로 다시 풀어도 실패하면 이 작업에서는 더 시도하지
+    # 않는다 (아래 `ProviderError` 처리 참고 — 쿼터 보호).
     fallback_enabled = True
 
     try:
@@ -322,15 +337,26 @@ async def solve_events(
         for problem in targets:
             no = int(problem["no"])
             yield ("problem", {"no": no, "status": "running"})
-            # 이미지 풀이가 실패했을 때 다시 시도할 텍스트. **이미 저장돼 있는
-            # 판독본만** 쓴다 — 여기서 판독까지 새로 돌리면 문항 하나가 AI 호출을
-            # 세 번(이미지 풀이 + 판독 + 텍스트 풀이) 태운다. 판독 시점을 언제로
-            # 할지는 아직 정해지지 않은 비용 정책이라 여기서 결정하지 않는다.
-            fallback_text = (
+            # 텍스트로 풀 때 쓸 문항 전문. **이미 저장돼 있는 판독본만** 쓴다 —
+            # 여기서 판독까지 새로 돌리면 문항 하나가 AI 호출을 세 번(이미지 풀이 +
+            # 판독 + 텍스트 풀이) 태운다. 판독 시점을 언제로 할지는 아직 정해지지
+            # 않은 비용 정책이라 여기서 결정하지 않는다.
+            # image 모드의 `problems.text` 는 PUA 가 깨진 문자열이라 쓸 수 없다.
+            transcript = (
                 str(problem.get("transcript") or "").strip() if mode == "image" else ""
             )
-            attempt_mode: Mode = mode
-            attempt_text = str(problem.get("text") or "")
+            # 판독본이 있으면 **그것을 1차로** 쓴다. 이미지 풀이는 예외 없이 엉터리
+            # 풀이를 내놓는 경우가 있어(omega 사례) 실패 폴백으로는 못 걸러진다.
+            # 단, 그림을 가리키는 판독본은 글자만 보내면 조건이 빠지므로 제외한다.
+            transcript_first = bool(transcript) and not figure_ref.needs_figure(
+                transcript
+            )
+            attempt_mode: Mode = "text" if transcript_first else mode
+            attempt_text = (
+                transcript if transcript_first else str(problem.get("text") or "")
+            )
+            # 방향당 재시도는 1회. text→image→text 처럼 왕복하지 않는다.
+            retried = False
             while True:
                 try:
                     image_b64 = (
@@ -377,25 +403,41 @@ async def solve_events(
                             },
                         )
                 except ProviderError as exc:
-                    if fallback_enabled and attempt_mode == "image" and fallback_text:
-                        # 사용자가 손으로 하던 우회(이미지로 안 풀리면 텍스트로
-                        # 옮겨 푼다)를 그대로 자동화한다. 판독본이 **이미** 있을
-                        # 때만 성립하므로 추가 판독 비용은 0 이다.
-                        logger.info(
-                            "이미지 풀이 실패 → 저장된 판독본으로 재시도 (no=%s): %s",
-                            no,
-                            exc.message,
-                        )
-                        attempt_mode = "text"
-                        attempt_text = fallback_text
-                        # 같은 문항을 다시 시작한다는 신호. 실패한 부분 출력이
-                        # 여기서 비워진다(`jobs.LiveJob` 의 `_apply`).
-                        yield ("problem", {"no": no, "status": "running"})
-                        continue
-                    if attempt_mode == "text" and mode == "image":
-                        # 판독본으로 바꿔도 실패했다면 원인이 문항이 아니라
-                        # 프로바이더 쪽(쿼터 소진·CLI 다운)일 가능성이 크다.
-                        # 남은 문항까지 두 배로 호출하지 않도록 폴백을 끈다.
+                    if fallback_enabled and not retried and mode == "image":
+                        if attempt_mode == "text":
+                            # 판독본으로 안 풀리면 크롭 이미지로 한 번 더. 판독본이
+                            # 문항을 덜 복원했을 수 있으니 원본을 보여 준다.
+                            logger.info(
+                                "판독본 풀이 실패 → 크롭 이미지로 재시도 (no=%s): %s",
+                                no,
+                                exc.message,
+                            )
+                            attempt_mode = "image"
+                            attempt_text = str(problem.get("text") or "")
+                            retried = True
+                            # 같은 문항을 다시 시작한다는 신호. 실패한 부분 출력이
+                            # 여기서 비워진다(`jobs.LiveJob` 의 `_apply`).
+                            yield ("problem", {"no": no, "status": "running"})
+                            continue
+                        if transcript:
+                            # 그림을 가리켜 이미지로 시작한 문항. 사용자가 손으로
+                            # 하던 우회(이미지로 안 풀리면 텍스트로 옮겨 푼다)를
+                            # 그대로 자동화한다. 판독본이 **이미** 있을 때만
+                            # 성립하므로 추가 판독 비용은 0 이다.
+                            logger.info(
+                                "이미지 풀이 실패 → 저장된 판독본으로 재시도 (no=%s): %s",
+                                no,
+                                exc.message,
+                            )
+                            attempt_mode = "text"
+                            attempt_text = transcript
+                            retried = True
+                            yield ("problem", {"no": no, "status": "running"})
+                            continue
+                    if retried:
+                        # 방향을 바꿔도 실패했다면 원인이 문항이 아니라 프로바이더
+                        # 쪽(쿼터 소진·CLI 다운)일 가능성이 크다. 남은 문항까지
+                        # 두 배로 호출하지 않도록 폴백을 끈다.
                         fallback_enabled = False
                     logger.warning("풀이 실패 (no=%s): %s", no, exc.message)
                     yield (

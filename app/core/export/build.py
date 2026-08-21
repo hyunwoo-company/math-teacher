@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
+import figure_ref
 import markdown_sections
 from export.model import Block, ExportDoc, Heading, Image, MathRun, Run, Text, TextRun
 from to_plain_text import PlainSegment, to_plain_segments, to_plain_text
@@ -280,29 +281,10 @@ def _transcript_blocks(transcript: str, no: int) -> list[Block]:
     return [] if body is None else [body]
 
 
-# 판독본이 그림을 가리키는 표현. 공백 변형(`그림 과 같이`)에 관대하게 잡는다.
-# 판정을 텍스트로만 하는 이유: 스키마를 늘리지 않고 **이미 저장된 판독본에도**
-# 그대로 동작해야 하기 때문이다(재판독 없이).
-_FIGURE_REF_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?:다음|아래|위)\s*(?:[와과]\s*같은\s*)?그림"
-    r"|그림\s*(?:[과와]\s*같이|에서|의)"
-    r"|(?:그래프|도형)\s*(?:[와과]\s*같이|에서)"
-)
-
-
-def _needs_figure(transcript: str) -> bool:
-    """판독본이 그림을 가리키고 있는지 판정한다.
-
-    판독본은 글자·수식만 복원하고 그림은 복원하지 못하므로, 이런 표현이 있으면
-    크롭을 함께 실어야 한다.
-
-    Args:
-        transcript: 복원한 문항 전문.
-
-    Returns:
-        도형 참조 표현이 있으면 True.
-    """
-    return _FIGURE_REF_RE.search(transcript) is not None
+# 판독본이 그림을 가리키는지의 판정은 `figure_ref` 한 곳에 둔다 — 내보내기(여기)와
+# 풀이(`ai_service.solve_events`)가 같은 기준으로 판단해야 하기 때문이다.
+# 이 이름은 기존 호출부·테스트가 쓰고 있으므로 별칭으로 남긴다.
+_needs_figure = figure_ref.needs_figure
 
 
 def _item_body_blocks(
