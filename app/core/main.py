@@ -45,6 +45,7 @@ import ai_service
 import config
 import download_token
 import jobs
+import ocr
 import pricing
 import service
 import sse
@@ -471,6 +472,9 @@ async def upload_file(
     """PDF 를 업로드하고 즉시 추출한다 (AI 호출 0회).
 
     추출이 실패해도 파일은 등록되고 `extract_error` 에 사유가 담긴다.
+
+    글자 정보가 없는 스캔본이면 **OCR 작업을 큐에 자동 등록**하고 즉시 응답한다
+    (요청 안에서 OCR 을 돌리지 않는다 — `_autoqueue_ocr` 참고).
     """
     raw = await file.read()
     filename = file.filename or "upload.pdf"
@@ -478,6 +482,8 @@ async def upload_file(
     node, extract_error = await run_in_threadpool(
         service.register_pdf, filename, raw, parent_id or None
     )
+    # 트랜잭션 밖 · 응답 직전. 실패해도 업로드는 성공으로 응답한다.
+    await _autoqueue_ocr(str(node["id"]), extract_error)
     return NodeResponse(node=NodeOut.model_validate(node), extract_error=extract_error)
 
 
@@ -512,6 +518,8 @@ async def reextract_file(node_id: NodeId) -> ReextractResponse:
     detail, extract_error, deleted = await run_in_threadpool(
         service.reextract_pdf, node_id
     )
+    # 스캔본을 다시 추출하면 또 0문항이다. 업로드와 같게 OCR 작업을 걸어 준다.
+    await _autoqueue_ocr(node_id, extract_error)
     return ReextractResponse.model_validate(
         {**detail, "extract_error": extract_error, "deleted_solutions": deleted}
     )
@@ -798,8 +806,13 @@ async def create_job(
     #   solve / variant : AI 없이는 할 일이 없다 -> 지금 해석하고 없으면 409.
     #   transcribe      : 1차(PDF 디코딩)만으로도 유효하다 -> 지연 해석. 여기서
     #                     막으면 AI 호출 0회로 끝나는 시험지도 시작조차 못 한다.
+    #   ocr             : AI 를 **아예** 쓰지 않는다(로컬 CPU 계산). 지연 해석조차
+    #                     하지 않는다 — 해석하면 AI 연결이 없는 환경에서 작업이
+    #                     시작조차 못 한다.
     resolver = ai_service.make_provider_resolver(payload.provider, _api_key(x_api_key))
-    if payload.kind == "transcribe":
+    if payload.kind == "ocr":
+        model = ""
+    elif payload.kind == "transcribe":
         model = ai_service.resolve_model_optional(payload.model, resolver)
     else:
         model = ai_service.resolve_model(payload.model, resolver().name)
@@ -814,7 +827,9 @@ async def create_job(
         "effort": payload.effort,
     }
 
-    if payload.kind == "solve":
+    if payload.kind == "ocr":
+        record = await _queue_ocr_job(payload.node_id)
+    elif payload.kind == "solve":
         mode, targets, node_name = await run_in_threadpool(
             ai_service.plan_solve_job,
             payload.node_id,
@@ -930,6 +945,77 @@ async def create_job(
     )
 
 
+async def _queue_ocr_job(node_id: str) -> dict[str, Any]:
+    """스캔본 OCR 작업을 만들어 큐에 넣고 그 행을 돌려준다.
+
+    프로바이더를 해석하지 않는다 — OCR 은 로컬 CPU 계산이라 AI 연결이 없는
+    환경에서도 돌아야 한다.
+
+    Args:
+        node_id: 시험지 파일 노드 id.
+
+    Returns:
+        만들어진 작업 행.
+
+    Raises:
+        ApiError: 시험지 파일 노드가 아니거나 원본 PDF 가 없을 때.
+    """
+    page_count, node_name = await run_in_threadpool(ocr.plan_ocr_job, node_id)
+    record = await run_in_threadpool(
+        _insert_job,
+        kind=jobs.JOB_KIND_OCR,
+        node_id=node_id,
+        node_name=node_name,
+        # 대상이 문항이 아니라 파일 전체다. 겹침 판정은 노드 + kind 로만 한다
+        # (`_find_overlapping_job`) 므로 targets 에 담을 것이 없다.
+        targets=[],
+        params={"engine": ocr.ENGINE_NAME, "render_scale": ocr.RENDER_SCALE},
+        total=page_count,
+    )
+    jobs.runner.submit(
+        job_id=record["id"],
+        total=page_count,
+        factory=jobs.ocr_factory(node_id=node_id),
+    )
+    return record
+
+
+async def _autoqueue_ocr(node_id: str, extract_error: str | None) -> None:
+    """스캔본이면 OCR 작업을 자동 등록한다 (업로드·재추출 응답 직전).
+
+    **업로드 요청 안에서 OCR 을 돌리지 않는다.** 실측 1.6초/쪽(20쪽 32초,
+    54쪽 3분)이라 HTTP 응답이 타임아웃·프록시 절단에 걸린다. 대신 작업 큐에
+    넣고 즉시 응답한다 — 사용자는 버튼을 누르지 않으므로 "업로드하면 자동" 이고,
+    대기는 기존 진행률 배너로 보인다.
+
+    **등록 실패가 업로드를 깨뜨리지 않는다.** 파일은 이미 저장됐고 사유도 남았다.
+    여기서 예외를 올리면 성공한 업로드가 500 으로 보인다.
+
+    Args:
+        node_id: 방금 등록·재추출한 시험지 노드 id.
+        extract_error: 그 추출의 사유(None 이면 성공 — 아무것도 하지 않는다).
+    """
+    if not service.is_scanned_pdf_error(extract_error):
+        return
+    try:
+        if await run_in_threadpool(_has_active_ocr_job, node_id):
+            # 같은 스캔본을 두 번 읽을 이유가 없다(진행 중인 것을 그대로 쓴다).
+            return
+        record = await _queue_ocr_job(node_id)
+        logger.info(
+            "스캔본 OCR 작업을 자동 등록했습니다 (node_id=%s, job_id=%s)",
+            node_id,
+            record["id"],
+        )
+    except Exception:
+        logger.exception("스캔본 OCR 작업 자동 등록에 실패했습니다 (node_id=%s)", node_id)
+
+
+def _has_active_ocr_job(node_id: str) -> bool:
+    with storage.transaction() as conn:
+        return bool(storage.find_active_job_for(conn, node_id, jobs.JOB_KIND_OCR))
+
+
 def _variant_numbers(payload: JobCreate) -> list[int]:
     """변형 작업의 대상 문항 번호들(중복 제거, 요청 순서 유지).
 
@@ -964,6 +1050,11 @@ def _find_overlapping_job(payload: JobCreate) -> dict[str, Any] | None:
         active = storage.find_active_job_for(conn, payload.node_id, payload.kind)
     if not active:
         return None
+
+    if payload.kind == "ocr":
+        # OCR 은 대상이 문항이 아니라 **파일 전체**다. 같은 시험지에 진행 중인
+        # OCR 이 있으면 그것을 쓴다(같은 스캔본을 두 번 읽을 이유가 없다).
+        return active[0]
 
     if payload.kind in ("solve", "transcribe"):
         # 둘 다 targets 가 문항 번호 배열이라 겹침 판정이 같다.

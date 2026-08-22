@@ -875,7 +875,7 @@ def test_column_body_x0_measures_per_column_and_skips_headers() -> None:
             ex.TextLine(text="본문", bbox=(353.1, 100.0 + i * 20, 500.0, 112.0))
             for i in range(3)
         ]
-        assert ex._column_body_x0(lines, content, page) == {
+        assert ex._column_body_x0(lines, ex.layout_from(content, page)) == {
             "left": 85.0,
             "right": None,
         }
@@ -965,9 +965,9 @@ def test_page_with_too_few_samples_has_no_page_baseline() -> None:
         col_x0, _ = ex.column_bounds(content, "left")
         # 절대 기준만으로는 탈락하는 배치다(실측 61.2pt 를 재현한 63pt).
         assert 85.0 - col_x0 > ex.DEFAULT_ANCHOR_INDENT_TOL
-        buckets = ex._body_x0_buckets(lines, content, sparse)
+        buckets = ex._body_x0_buckets(lines, ex.page_layout(sparse))
         assert len(buckets["left"]) < ex._BODY_X0_MIN_SAMPLES
-        assert ex._column_body_x0(lines, content, sparse)["left"] is None
+        assert ex._column_body_x0(lines, ex.page_layout(sparse))["left"] is None
     finally:
         doc.close()
 
@@ -1033,7 +1033,7 @@ def test_document_baseline_is_not_dragged_left_by_stray_elements() -> None:
             page = doc[page_no]
             content = ex.content_rect(page)
             lines = ex._page_lines(page)
-            assert ex._column_body_x0(lines, content, page) == {
+            assert ex._column_body_x0(lines, ex.layout_from(content, page)) == {
                 "left": None,
                 "right": None,
             }

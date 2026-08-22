@@ -282,7 +282,7 @@ class VariantRequest(BaseModel):
     effort: Effort = DEFAULT_EFFORT
 
 
-JobKind = Literal["solve", "variant", "transcribe"]
+JobKind = Literal["solve", "variant", "transcribe", "ocr"]
 JobStatus = Literal["queued", "running", "done", "error", "canceled", "interrupted"]
 
 
@@ -300,6 +300,12 @@ class JobCreate(BaseModel):
     `problem_numbers`(null = 전체)이고, `force` 가 아니면 이미 판독본이 있는
     문항은 건너뛴다. 1차 경로(PDF 텍스트 레이어 디코딩)로 끝나는 문항은 AI 를
     호출하지 않으므로 대상 수가 곧 AI 호출 수는 아니다.
+
+    `kind="ocr"` 는 글자 정보가 없는 스캔본을 OCR 로 읽어 문항을 만든다. 대상은
+    **파일 전체**라 `problem_numbers` 를 쓰지 않고, `provider`/`model`/`effort` 도
+    무시한다(AI 를 부르지 않는 로컬 계산이다). 스캔본을 업로드하거나 다시
+    추출하면 서버가 이 작업을 자동으로 등록하므로 보통은 직접 만들 필요가 없다.
+    진행 단위가 문항이 아니라 **페이지**다(문항 수를 미리 알 수 없다).
     """
 
     kind: JobKind

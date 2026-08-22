@@ -24,7 +24,7 @@ import io
 import json
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
@@ -392,8 +392,77 @@ def column_bounds(
 
 
 def _classify_column(x0: float, page: fitz.Page) -> Column:
-    """스팬 x0 가 페이지 폭 절반보다 작으면 좌측 칼럼."""
+    """스팬 x0 가 페이지 폭 절반보다 작으면 좌측 칼럼.
+
+    유형 문제집 폴백(`find_type_workbook_anchors`) 전용으로 남아 있다. 시험지
+    경로는 `PageLayout.column_of` 를 쓴다(기본값은 이 함수와 같은 계산이다).
+    """
     return "left" if x0 < (page.rect.x0 + page.rect.width / 2.0) else "right"
+
+
+# --- 페이지 기하 (본문 영역 + 2단 칼럼) --------------------------------------
+# 앵커 판정과 크롭은 지금까지 세 가지를 각자 계산했다: `content_rect`(본문 영역),
+# `column_bounds`(칼럼 x 경계), 페이지 중앙(좌/우 분류). 이 셋을 한 덩어리로 묶은
+# 것이 `PageLayout` 이고, 기본값 `page_layout()` 은 **예전 계산 그대로**다.
+#
+# 묶는 이유는 스캔본 OCR 경로 하나다. 스캔본은 종이를 스캐너에 올린 결과라 PDF
+# 페이지 상자가 인쇄 지면과 어긋나고, 그 어긋남이 페이지마다 다르다. 실측
+# (`2027 강대X 시즌2 6회 문제.pdf`, 595x841pt, 20쪽): 페이지 중앙은 297.5pt 인데
+# 우측 칼럼 문항 번호가 290.0~322.5pt 에서 시작하고, 같은 페이지 좌측 칼럼 번호와
+# 항상 약 257pt 차이가 난다(= 페이지별 스캔 오프셋). 페이지 중앙으로 좌/우를
+# 가르면 290.0~294.5pt 에서 시작한 우측 칼럼 앵커 4개(3·4·28·28번)가 좌측으로
+# 분류돼 들여쓰기 필터에서 통째로 탈락했다.
+#
+# 그래서 OCR 경로는 **OCR 로 읽은 글자의 x 범위**로 본문 가로 범위를 잡고 그
+# 중앙을 분기선으로 쓴다(`ocr.page_layout`). 실측 20쪽 전부에서 좌/우 분류가
+# 맞았다. 기존 경로는 `page_layout()` 을 쓰므로 결과가 바뀌지 않는다.
+
+
+@dataclass(frozen=True)
+class PageLayout:
+    """한 페이지의 본문 영역과 2단 칼럼 기하."""
+
+    content: fitz.Rect
+    #: 좌측 칼럼의 (x0, x1).
+    left: tuple[float, float]
+    #: 우측 칼럼의 (x0, x1).
+    right: tuple[float, float]
+    #: 좌/우 칼럼을 가르는 x. 기본은 페이지 중앙(`_classify_column` 과 같은 값).
+    split_x: float
+
+    def bounds(self, column: Column) -> tuple[float, float]:
+        """그 칼럼의 (x0, x1)."""
+        return self.left if column == "left" else self.right
+
+    def column_of(self, x0: float) -> Column:
+        """x0 가 속한 칼럼."""
+        return "left" if x0 < self.split_x else "right"
+
+
+def layout_from(content: fitz.Rect, page: fitz.Page) -> PageLayout:
+    """본문 영역 + 페이지에서 **기존 규칙 그대로**의 기하를 만든다.
+
+    분기선은 페이지 중앙이다(`_classify_column` 과 같은 값). 본문 영역만 따로
+    계산해 둔 호출부(테스트 포함)를 위해 `page_layout` 에서 떼어 놓았다.
+    """
+    return PageLayout(
+        content=content,
+        left=column_bounds(content, "left"),
+        right=column_bounds(content, "right"),
+        split_x=float(page.rect.x0) + float(page.rect.width) / 2.0,
+    )
+
+
+def page_layout(page: fitz.Page) -> PageLayout:
+    """기존 규칙 그대로의 페이지 기하(`content_rect` + `column_bounds` + 페이지 중앙)."""
+    return layout_from(content_rect(page), page)
+
+
+#: 페이지의 텍스트 줄을 주는 함수. 기본은 `_page_lines`(PDF 텍스트 레이어).
+#: 스캔본 OCR 경로가 여기에 OCR 로 읽은 줄을 넣는다. 인자는 (페이지, 0부터 센 쪽번호).
+LinesProvider = Callable[[fitz.Page, int], list[TextLine]]
+#: 페이지 기하를 주는 함수. 기본은 `page_layout`.
+LayoutProvider = Callable[[fitz.Page, int], PageLayout]
 
 
 def _leftmost_supported_x0(values: Sequence[float]) -> float | None:
@@ -426,7 +495,7 @@ def _leftmost_supported_x0(values: Sequence[float]) -> float | None:
 
 
 def _body_x0_buckets(
-    lines: Sequence[TextLine], content: fitz.Rect, page: fitz.Page
+    lines: Sequence[TextLine], layout: PageLayout
 ) -> dict[Column, list[float]]:
     """정렬선 표본(칼럼별 본문 줄의 x0)을 모은다.
 
@@ -441,19 +510,19 @@ def _body_x0_buckets(
 
     Args:
         lines: 페이지의 텍스트 줄.
-        content: 머리말/꼬리말을 뺀 본문 영역.
-        page: 칼럼 판정용 페이지.
+        layout: 그 페이지의 본문 영역 + 칼럼 기하.
 
     Returns:
         칼럼별 x0 표본 목록.
     """
     buckets: dict[Column, list[float]] = {"left": [], "right": []}
+    content = layout.content
     for line in lines:
         x0, y0, _, y1 = line.bbox
         if y0 < content.y0 or y1 > content.y1:
             continue
-        column = _classify_column(x0, page)
-        col_x0, col_x1 = column_bounds(content, column)
+        column = layout.column_of(x0)
+        col_x0, col_x1 = layout.bounds(column)
         if not (col_x0 - 1.0 <= x0 <= col_x1):
             continue
         buckets[column].append(x0)
@@ -469,19 +538,18 @@ def _resolve_body_x0(buckets: dict[Column, list[float]]) -> dict[Column, float |
 
 
 def _column_body_x0(
-    lines: Sequence[TextLine], content: fitz.Rect, page: fitz.Page
+    lines: Sequence[TextLine], layout: PageLayout
 ) -> dict[Column, float | None]:
     """페이지의 칼럼별 본문 정렬선(실제로 글자가 시작하는 x)을 잰다.
 
     Args:
         lines: 페이지의 텍스트 줄.
-        content: 머리말/꼬리말을 뺀 본문 영역.
-        page: 칼럼 판정용 페이지.
+        layout: 그 페이지의 본문 영역 + 칼럼 기하.
 
     Returns:
         칼럼별 정렬선 x0. 표본이 부족한 칼럼은 `None`.
     """
-    return _resolve_body_x0(_body_x0_buckets(lines, content, page))
+    return _resolve_body_x0(_body_x0_buckets(lines, layout))
 
 
 def _is_anchor_indent_ok(
@@ -696,6 +764,9 @@ class _AnchorCandidate(NamedTuple):
 
 def _scan_anchor_candidates(
     doc: fitz.Document,
+    *,
+    lines_provider: LinesProvider | None = None,
+    layout_provider: LayoutProvider | None = None,
 ) -> tuple[list[_AnchorCandidate], dict[Column, float | None]]:
     """페이지를 한 번 훑어 앵커 후보와 **문서 전역 정렬선**을 함께 구한다.
 
@@ -705,6 +776,9 @@ def _scan_anchor_candidates(
 
     Args:
         doc: 열려 있는 PDF 문서.
+        lines_provider: 페이지의 텍스트 줄을 대신 주는 함수. 기본(None)은 PDF
+            텍스트 레이어(`_page_lines`). 스캔본 OCR 경로가 여기에 OCR 줄을 넣는다.
+        layout_provider: 페이지 기하를 대신 주는 함수. 기본(None)은 `page_layout`.
 
     Returns:
         (앵커 후보 목록, 칼럼별 문서 전역 정렬선).
@@ -713,10 +787,19 @@ def _scan_anchor_candidates(
     doc_buckets: dict[Column, list[float]] = {"left": [], "right": []}
     for page_no in range(doc.page_count):
         page = doc[page_no]
-        content = content_rect(page)
-        lines = _page_lines(page)
+        layout = (
+            page_layout(page)
+            if layout_provider is None
+            else layout_provider(page, page_no)
+        )
+        content = layout.content
+        lines = (
+            _page_lines(page)
+            if lines_provider is None
+            else lines_provider(page, page_no)
+        )
         # 들여쓰기 판정의 두 번째 기준. 페이지마다 한 번만 잰다.
-        page_buckets = _body_x0_buckets(lines, content, page)
+        page_buckets = _body_x0_buckets(lines, layout)
         doc_buckets["left"].extend(page_buckets["left"])
         doc_buckets["right"].extend(page_buckets["right"])
         body_x0 = _resolve_body_x0(page_buckets)
@@ -730,8 +813,8 @@ def _scan_anchor_candidates(
             # 머리말/꼬리말 제외 (줄 중심 기준 — `_is_inside_content` 참고)
             if not _is_inside_content(y0, y1, content):
                 continue
-            column = _classify_column(x0, page)
-            col_x0, col_x1 = column_bounds(content, column)
+            column = layout.column_of(x0)
+            col_x0, col_x1 = layout.bounds(column)
             # 칼럼 밖인 줄은 앵커가 아니다(들여쓰기는 전역 정렬선까지 모은 뒤 본다)
             if not (col_x0 - 1.0 <= x0 <= col_x1):
                 continue
@@ -762,7 +845,11 @@ def _scan_anchor_candidates(
 
 
 def find_anchors(
-    doc: fitz.Document, *, indent_tol: float = DEFAULT_ANCHOR_INDENT_TOL
+    doc: fitz.Document,
+    *,
+    indent_tol: float = DEFAULT_ANCHOR_INDENT_TOL,
+    lines_provider: LinesProvider | None = None,
+    layout_provider: LayoutProvider | None = None,
 ) -> list[Anchor]:
     """문서 전체에서 문제 번호 앵커를 읽는 순서대로 찾는다.
 
@@ -777,8 +864,22 @@ def find_anchors(
 
     들여쓰기 판정은 페이지를 한 번 훑어 후보와 전역 정렬선 표본을 함께 모은 뒤
     마지막에 적용한다(`_AnchorCandidate` 참고).
+
+    `lines_provider` / `layout_provider` 는 스캔본 OCR 경로가 쓰는 주입 지점이다
+    (기본값은 지금까지와 같은 계산이라 기존 결과가 바뀌지 않는다).
+
+    Args:
+        doc: 열려 있는 PDF 문서.
+        indent_tol: 앵커로 인정할 최대 들여쓰기(pt).
+        lines_provider: 텍스트 줄을 대신 주는 함수(기본은 PDF 텍스트 레이어).
+        layout_provider: 페이지 기하를 대신 주는 함수(기본은 `page_layout`).
+
+    Returns:
+        읽는 순서로 정렬된 앵커 목록.
     """
-    raw, doc_body_x0 = _scan_anchor_candidates(doc)
+    raw, doc_body_x0 = _scan_anchor_candidates(
+        doc, lines_provider=lines_provider, layout_provider=layout_provider
+    )
     candidates: list[tuple[Anchor, str]] = [
         (item.anchor, item.series)
         for item in raw
@@ -986,6 +1087,8 @@ def extract_problems(
     render_images: bool = True,
     max_edge_px: int = DEFAULT_MAX_EDGE_PX,
     indent_tol: float = DEFAULT_ANCHOR_INDENT_TOL,
+    anchor_lines_provider: LinesProvider | None = None,
+    layout_provider: LayoutProvider | None = None,
 ) -> ExtractResult:
     """PDF 를 문제 단위로 분리한다. AI 호출 없음.
 
@@ -998,6 +1101,12 @@ def extract_problems(
         render_images: False 면 크롭 이미지를 만들지 않는다(분할만 확인할 때).
         max_edge_px: 크롭 이미지 장변 상한.
         indent_tol: 앵커로 인정할 최대 들여쓰기(pt).
+        anchor_lines_provider: **앵커 탐지에만** 쓸 텍스트 줄을 주는 함수(기본은
+            PDF 텍스트 레이어). 스캔본 OCR 경로의 주입 지점이다. 이름이 `anchor_`
+            로 시작하는 것이 요점이다 — `Problem.text` 는 이 값을 쓰지 않고 계속
+            PDF 텍스트 레이어에서만 만든다. OCR 텍스트를 본문으로 저장하면 수식이
+            깨진 글자가 그대로 프롬프트·내보내기에 섞여 들어간다.
+        layout_provider: 페이지 기하를 주는 함수(기본은 `page_layout`).
 
     Returns:
         추출 결과.
@@ -1025,10 +1134,20 @@ def extract_problems(
             ("image" if ratio >= pua_threshold else "text") if mode == "auto" else mode
         )
 
-        anchors = find_anchors(doc, indent_tol=indent_tol)
+        anchors = find_anchors(
+            doc,
+            indent_tol=indent_tol,
+            lines_provider=anchor_lines_provider,
+            layout_provider=layout_provider,
+        )
         # 시험지 경로에서 앵커를 사실상 못 찾았을 때만 유형 문제집 폴백을 시도한다
         # (additive: 시험지 결과가 충분하면 이 블록은 아무것도 하지 않는다).
-        if len(anchors) < TYPE_FALLBACK_MIN_ANCHORS:
+        #
+        # 줄을 주입받은 경로(스캔본 OCR)에서는 시도하지 않는다. 이 폴백은 스팬의
+        # **글꼴 이름과 글자 크기**로 번호 글리프를 가려내는데, OCR 결과에는 글꼴
+        # 정보가 아예 없다. 주입된 줄을 무시하고 텍스트 레이어를 직접 읽으므로
+        # 스캔본에서는 항상 0개가 나오고, 판정 근거만 흐려진다.
+        if anchor_lines_provider is None and len(anchors) < TYPE_FALLBACK_MIN_ANCHORS:
             type_anchors = find_type_workbook_anchors(doc)
             if len(type_anchors) > len(anchors):
                 anchors = type_anchors
@@ -1037,17 +1156,24 @@ def extract_problems(
                 if mode == "auto":
                     resolved_mode = "image"
         lines_cache: dict[int, list[TextLine]] = {}
-        content_cache: dict[int, fitz.Rect] = {}
+        layout_cache: dict[int, PageLayout] = {}
 
         problems: list[Problem] = []
         for index, anchor in enumerate(anchors):
             page = doc[anchor.page]
-            if anchor.page not in content_cache:
-                content_cache[anchor.page] = content_rect(page)
+            if anchor.page not in layout_cache:
+                layout_cache[anchor.page] = (
+                    page_layout(page)
+                    if layout_provider is None
+                    else layout_provider(page, anchor.page)
+                )
+                # 본문 텍스트는 **항상** PDF 텍스트 레이어에서 만든다
+                # (`anchor_lines_provider` 를 쓰지 않는다 — 위 Args 참고).
                 lines_cache[anchor.page] = _page_lines(page)
-            content = content_cache[anchor.page]
+            layout = layout_cache[anchor.page]
+            content = layout.content
 
-            col_x0, col_x1 = column_bounds(content, anchor.column)
+            col_x0, col_x1 = layout.bounds(anchor.column)
 
             # 같은 페이지·같은 칼럼의 다음 앵커까지가 이 문제의 세로 범위
             y1 = content.y1

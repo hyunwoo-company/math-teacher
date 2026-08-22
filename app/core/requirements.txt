@@ -9,3 +9,16 @@ python-hwpx
 anthropic
 # 구독 모드(데스크톱 전용). 웹 배포에서는 없어도 동작한다.
 claude-agent-sdk
+
+# --- 스캔본(사진) PDF 문항 추출 ------------------------------------------------
+# 문항 번호 앵커만 읽는 로컬 OCR. AI 를 부르지 않는다(`ocr.py` 참고).
+# onnx 모델 3개(16.2MB)가 휠에 들어 있어 런타임에 네트워크를 타지 않는다.
+rapidocr-onnxruntime
+# rapidocr 가 끌어오지만, `ocr.py` 가 직접 import 하므로 명시한다.
+# (pymupdf 도 numpy 를 끌어오는데 지금까지 명시가 없었다 — 그 상태를 굳히지 않는다.)
+numpy
+# cv2 는 **여기에 적지 않는다.** rapidocr 가 `opencv-python`(GUI 빌드)을 끌어오는데,
+# 그 휠은 Qt5 를 담고 있어 slim 이미지에서 `import cv2` 가 깨진다. 컨테이너에서는
+# Dockerfile 이 그것을 지우고 `opencv-python-headless` 로 바꿔 넣는다 — 여기에
+# 함께 적으면 한 번의 pip 실행 안에서 둘이 같은 `cv2/` 를 두고 덮어써 결과가
+# 설치 순서에 좌우된다. 이유는 Dockerfile 주석에 자세히 적어 두었다.

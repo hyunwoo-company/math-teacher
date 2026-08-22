@@ -71,9 +71,11 @@ def test_scanned_pdf_reason_differs_from_missing_anchor_reason(
     assert isinstance(no_anchor_reason, str)
     assert scanned_reason != no_anchor_reason
 
-    # 스캔본: 원인 + "다시 추출해도 같다" + 다음에 할 일.
+    # 스캔본: 원인 + 지금 서버가 무엇을 하는지(OCR 예약) + 그래도 안 되면 할 일.
+    # 예전에는 "다시 추출해도 결과는 같다" 고 안내했다. 이제 스캔본은 업로드·재추출
+    # 시 OCR 작업이 자동으로 걸리므로(main._autoqueue_ocr) 그 안내가 거짓이 된다.
     assert "스캔본" in scanned_reason
-    assert "다시 추출" in scanned_reason
+    assert "OCR" in scanned_reason
     # 앵커 없음: 기존 문구를 그대로 유지한다.
     assert no_anchor_reason.startswith("문제 번호 앵커를 찾지 못했습니다.")
     assert "스캔본" not in no_anchor_reason

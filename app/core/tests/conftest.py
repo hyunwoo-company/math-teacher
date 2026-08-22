@@ -12,9 +12,15 @@ from fastapi.testclient import TestClient
 import ai_service
 import config
 import main
+import ocr
 import storage
 from providers import agy as agy_provider
 from providers.base import DeltaEvent, DoneEvent, Effort, Provider, ProviderEvent, Turn
+
+#: `main._autoqueue_ocr` 의 원본. 아래 autouse 픽스처가 이것을 끄기 **전에**
+#: 붙잡아 둔다. OCR 자동 등록을 실제로 검증하는 테스트는 `ocr_autoqueue` 픽스처로
+#: 되살린다(test_ocr.py).
+_REAL_AUTOQUEUE_OCR = main._autoqueue_ocr
 
 TEST_PDF = (
     Path(__file__).resolve().parents[3] / "[2026-1-1-M][공수1][풍문고].pdf"
@@ -78,10 +84,25 @@ def _isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     agy 는 실행파일이 개발 PC 에 실제로 있어 테스트가 기기 상태에 좌우되므로,
     기본적으로 "미설치" 로 고정한다. agy 동작 테스트는 test_agy.py 에서 명시적으로
     `find_agy` 를 덮어써 활성화한다.
+
+    스캔본 OCR 도 같은 이유로 기본 차단이다. 이유가 둘이다.
+      1. 실제 엔진은 onnx 모델 16MB 를 올리고 1.6초/쪽이 걸린다 — 스캔본을 올리는
+         테스트가 전부 느려지고 기기 상태에 좌우된다.
+      2. 자동 등록된 작업이 **백그라운드에서** 파일 메타(`extract_error`,
+         `problem_count`)를 덮어쓴다. TestClient 는 동기라 그 시점이 요청 사이에
+         끼어들어 기존 테스트가 간헐 실패한다.
+    그래서 리더는 "아무것도 읽지 못하는" 것으로, 자동 등록은 no-op 으로 고정한다.
+    OCR 경로 테스트는 `ocr_autoqueue` 픽스처와 자체 가짜 리더를 쓴다.
     """
     monkeypatch.delenv(config.API_KEY_ENV, raising=False)
     monkeypatch.delenv(config.DEPLOY_MODE_ENV, raising=False)
     monkeypatch.setattr(agy_provider, "find_agy", lambda: None)
+    monkeypatch.setattr(ocr, "default_page_reader", lambda: (lambda _page: []))
+
+    async def _no_autoqueue(node_id: str, extract_error: str | None) -> None:
+        return None
+
+    monkeypatch.setattr(main, "_autoqueue_ocr", _no_autoqueue)
     original = config.data_dir()
     config.use_data_dir(tmp_path / "data")
     storage.init_db()
@@ -93,6 +114,21 @@ def _isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
 def client() -> Iterator[TestClient]:
     with TestClient(main.app) as test_client:
         yield test_client
+
+
+def enable_ocr_autoqueue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """업로드·재추출 시 OCR 작업 자동 등록을 되살린다(기본은 autouse 가 끈다).
+
+    "업로드까지는 끈 채로 하고 그 다음부터 켜고 싶다" 는 테스트가 있어 픽스처가
+    아니라 함수로도 열어 둔다.
+    """
+    monkeypatch.setattr(main, "_autoqueue_ocr", _REAL_AUTOQUEUE_OCR)
+
+
+@pytest.fixture
+def ocr_autoqueue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """테스트 시작부터 OCR 자동 등록을 켠다."""
+    enable_ocr_autoqueue(monkeypatch)
 
 
 @pytest.fixture

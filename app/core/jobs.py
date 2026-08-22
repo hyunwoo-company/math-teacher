@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 
 import ai_service
+import ocr
 import storage
 from ai_service import Event
 
@@ -44,6 +45,9 @@ _SUBSCRIBER_MAXSIZE: Final[int] = 1000
 JOB_KIND_SOLVE: Final[str] = "solve"
 JOB_KIND_VARIANT: Final[str] = "variant"
 JOB_KIND_TRANSCRIBE: Final[str] = "transcribe"
+#: 스캔본(사진) PDF 를 OCR 로 읽어 문항을 만드는 작업. **AI 를 부르지 않는다**
+#: (로컬 CPU 계산). 다른 종류와 달리 진행 단위가 문항이 아니라 **페이지**다.
+JOB_KIND_OCR: Final[str] = "ocr"
 
 STATUS_QUEUED: Final[str] = "queued"
 STATUS_RUNNING: Final[str] = "running"
@@ -343,5 +347,14 @@ def transcribe_factory(**kwargs: Any) -> Callable[[], AsyncIterator[Event]]:
 
     def make() -> AsyncIterator[Event]:
         return ai_service.transcribe_events(**kwargs)
+
+    return make
+
+
+def ocr_factory(**kwargs: Any) -> Callable[[], AsyncIterator[Event]]:
+    """스캔본 OCR 이벤트 팩토리(페이지 단위 진행, AI 호출 0회)."""
+
+    def make() -> AsyncIterator[Event]:
+        return ocr.ocr_events(**kwargs)
 
     return make

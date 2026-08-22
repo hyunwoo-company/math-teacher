@@ -13,6 +13,10 @@ dependencies = [
     "python-hwpx",
     "anthropic",
     "claude-agent-sdk",
+    # 스캔본(사진) PDF 의 문항 번호 앵커를 읽는 로컬 OCR. 자세한 배경은
+    # requirements.txt 의 같은 항목 주석 참고(GUI/headless cv2 문제 포함).
+    "rapidocr-onnxruntime",
+    "numpy",
 ]
 
 [project.optional-dependencies]
@@ -60,7 +64,16 @@ mypy_path = "."
 exclude = "(^|/)data/"
 
 [[tool.mypy.overrides]]
-module = ["fitz", "extractor", "pricing", "docx", "docx.shared"]
+# rapidocr_onnxruntime 는 py.typed 가 없다. 호출 규약은 `ocr.OcrEngine`
+# (Protocol)으로 우리 쪽에서 좁혀 두었다.
+module = [
+    "fitz",
+    "extractor",
+    "pricing",
+    "docx",
+    "docx.shared",
+    "rapidocr_onnxruntime",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

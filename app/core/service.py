@@ -40,11 +40,35 @@ _NO_ANCHOR_ERROR: Final[str] = (
     "'1.' '2.' 형태의 문항 번호가 있는 시험지인지 확인하세요."
 )
 _SCANNED_PDF_ERROR: Final[str] = (
-    "글자 정보가 없는 스캔본(사진) PDF 입니다. 문항 번호를 읽을 수 없어 "
-    "0문항으로 등록했습니다. [문제 다시 추출] 을 눌러도 결과는 같습니다. "
-    "한글·워드에서 PDF 로 내보낸 파일(글자를 선택·복사할 수 있는 PDF)을 "
-    "올려 주세요."
+    "글자 정보가 없는 스캔본(사진) PDF 입니다. 문항 번호를 읽기 위해 "
+    "OCR 작업을 예약했습니다. 진행률 배너가 끝나면 새로고침해 주세요. "
+    "OCR 로도 번호를 찾지 못하면 한글·워드에서 PDF 로 내보낸 파일"
+    "(글자를 선택·복사할 수 있는 PDF)을 올려 주세요."
 )
+# OCR 까지 돌렸는데도 번호를 못 찾은 경우. 위 문구를 그대로 쓰면 "OCR 을
+# 예약했다" 고 안내한 뒤 아무 일도 안 일어난 것처럼 보인다.
+_OCR_NO_ANCHOR_ERROR: Final[str] = (
+    "스캔본을 OCR 로 읽었지만 '1.' '2.' 형태의 문항 번호를 찾지 못했습니다. "
+    "번호가 흐리거나 페이지가 기울어졌을 수 있습니다. "
+    "한글·워드에서 PDF 로 내보낸 파일(글자를 선택·복사할 수 있는 PDF)을 "
+    "올리면 확실합니다."
+)
+
+
+def is_scanned_pdf_error(message: str | None) -> bool:
+    """그 추출 사유가 **스캔본이라 0문항** 인 경우인지.
+
+    업로드·재추출 라우트가 OCR 작업을 자동 등록할지 판단하는 유일한 근거다.
+    스캔본 판정 자체는 `_no_problem_error` 한 곳에만 두고, 호출부는 그 결과를
+    되묻기만 한다(판정 기준이 두 곳으로 갈라지지 않게).
+
+    Args:
+        message: `register_pdf` / `reextract_pdf` 가 돌려준 추출 사유.
+
+    Returns:
+        스캔본 사유면 True.
+    """
+    return message == _SCANNED_PDF_ERROR
 
 
 def _no_problem_error(result: extractor.ExtractResult) -> str:
@@ -415,6 +439,51 @@ def reextract_pdf(node_id: str) -> tuple[dict[str, Any], str | None, int]:
         storage.replace_problems(conn, node_id, problem_rows)
 
     return file_detail(node_id), extract_error, deleted_solutions
+
+
+def apply_ocr_problems(node_id: str, result: extractor.ExtractResult) -> int:
+    """OCR 로 찾은 문항을 그 시험지에 반영한다 (블로킹, AI 호출 0회).
+
+    스캔본은 텍스트 레이어가 없어 일반 추출이 0문항으로 끝난다. 그 뒤 작업 큐의
+    `ocr` 작업이 페이지를 OCR 로 읽어 앵커를 만들고(`ocr.extract_with_ocr`), 그
+    결과를 여기서 저장한다.
+
+    **풀이·변형은 건드리지 않는다.** 이 함수가 불리는 시점의 문항 수는 0 이다 —
+    업로드 직후이거나 재추출 직후(재추출이 이미 풀이를 지웠다)이기 때문에 지울
+    것이 없다. 여기서 또 지우면 "OCR 이 풀이를 날렸다" 는 경로가 생긴다.
+
+    Args:
+        node_id: 시험지 파일 노드 id.
+        result: OCR 앵커로 추출한 결과(`mode='image'`).
+
+    Returns:
+        저장한 문항 수.
+
+    Raises:
+        ApiError: 시험지 파일 노드가 아니거나 없을 때.
+    """
+    with storage.transaction() as conn:
+        require_file_node(conn, node_id)
+
+    # 문항 수가 줄면 예전 크롭이 남아 다음 결과와 섞인다(재추출과 같은 이유).
+    _clear_crops(node_id)
+    problem_rows = _write_crops(node_id, result)
+
+    with storage.transaction() as conn:
+        storage.upsert_file(
+            conn,
+            node_id=node_id,
+            stored_path=f"files/{node_id}.pdf",
+            pages=result.page_count,
+            mode=result.mode,
+            pua_ratio=result.pua_ratio,
+            problem_count=len(problem_rows),
+            # 성공이면 None. 실패면 "스캔본이라 0문항" 이 아니라 "OCR 도 못 찾았다"
+            # 로 바꾼다 — 앞 문구는 OCR 을 예약했다고 안내하기 때문이다.
+            extract_error=None if problem_rows else _OCR_NO_ANCHOR_ERROR,
+        )
+        storage.replace_problems(conn, node_id, problem_rows)
+    return len(problem_rows)
 
 
 def _clear_crops(node_id: str) -> None:
