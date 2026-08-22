@@ -80,8 +80,9 @@ _SKIPPED_SECTIONS: Final[frozenset[str]] = frozenset(
     {markdown_sections.PROBLEM_CHECK_TITLE, markdown_sections.VERIFY_TITLE}
 )
 
-# 시험지 뒤에 모으는 해설부의 표제. 종이 시험지가 뒷장 머리에 찍는 말을 그대로
+# 문서 뒤에 모으는 해설부의 표제. 종이 시험지가 뒷장 머리에 찍는 말을 그대로
 # 쓴다 — 앞장만 떼어 학생에게 주고 이 장은 교사가 갖는 관행이 문구에 이미 있다.
+# 시험지·변형·오답노트 세 문서가 같은 표제를 쓴다.
 _ANSWER_SECTION_TITLE: Final[str] = "정답 및 해설"
 
 # 변형 응답의 문제 본문 섹션 제목. 문항 제목이 이미 있어 소제목을 붙이지 않는다.
@@ -405,6 +406,30 @@ def _footer(source: str | None) -> str | None:
     return (source or "").strip() or None
 
 
+def _with_answer_section(
+    problems: Sequence[Block], answers: Sequence[Block]
+) -> list[Block]:
+    """문항부 뒤에 지면을 끊고 해설부를 붙인다(세 문서가 공유하는 규칙).
+
+    시험지·변형·오답노트가 같은 구성을 쓰므로 조립 규칙을 한 곳에 둔다. 표제
+    수준(1)과 문구(`_ANSWER_SECTION_TITLE`)가 문서마다 어긋나면 안 된다.
+
+    표제는 문항 제목(2수준)보다 한 단 위다 — 문서를 문항부/해설부로 가르는
+    구분이라 문항과 동급이면 어느 쪽이 상위인지 읽히지 않는다.
+
+    Args:
+        problems: 문항부 블록 목록.
+        answers: 해설부 블록 목록. 비면 아무것도 덧붙이지 않는다.
+
+    Returns:
+        합친 블록 목록. `answers` 가 비면 `problems` 와 같은 내용이다 —
+        페이지 나눔도 표제도 넣지 않는다(빈 페이지 방지).
+    """
+    if not answers:
+        return list(problems)
+    return [*problems, PageBreak(), Heading(_ANSWER_SECTION_TITLE, 1), *answers]
+
+
 def build_exam_doc(
     *,
     title: str,
@@ -421,13 +446,16 @@ def build_exam_doc(
     나열한다. 앞장만 떼어 학생에게 나눠 줄 수 있어야 한다는 요구다(ERR-12).
     해설부의 문항 제목은 문항부와 **같은 문자열**(`_display_no`)이라 대조된다.
 
-    **뒤로 모으는 것은 시험지뿐이다.** 오답노트(`build_note_doc`)는 틀린 문제를
-    바로 다시 보는 용도라 해설이 문항 옆에 있어야 하고, 변형(`build_variants_doc`)은
-    요구에 없다. 그래서 두 함수는 예전 구성을 그대로 쓴다.
+    변형(`build_variants_doc`)·오답노트(`build_note_doc`)도 같은 구성이다
+    (`_with_answer_section`). 세 문서 모두 "항상" 뒤로 모으며 설정은 없다.
 
     `include_full=False`(문제만 내보내기)는 애초에 풀이를 넣지 않으므로 나눌
-    것이 없다 — 페이지 나눔도 표제도 생기지 않고 예전 문서와 완전히 같다.
+    것이 없다 — 페이지 나눔도 표제도 생기지 않고 블록 목록은 예전과 완전히 같다.
     `include_full=True` 인데 풀이가 하나도 없을 때도 같다(빈 페이지 방지).
+
+    **시험지는 항상 좌우 2단이다**(`two_column=True`). 종이 시험지가 그렇게
+    생겼기 때문이고 설정도 쿼리 파라미터도 없다. 블록 목록에는 영향이 없다 —
+    2단 조판은 렌더러가 지면에 앉힐 때의 일이다(`docx.py` / `hwpx.py`).
 
     제목은 항목의 지면 표기(`ExamItem.label`)가 `no` 와 다를 때만 그 표기로
     바뀐다(`_display_no`). 표기가 없거나 같은 보통 시험지는 예전 문서와 한 글자도
@@ -473,18 +501,13 @@ def build_exam_doc(
             continue
         answers.append(heading)
         answers.extend(item_answers)
-    if answers:
-        # 넣을 해설이 하나라도 있을 때만 지면을 끊는다. 비면 빈 페이지가 생긴다.
-        blocks.append(PageBreak())
-        # 표제는 문항 제목(2수준)보다 한 단 위다. 문서를 문제부/해설부로 가르는
-        # 구분이라 문항과 동급이면 어느 쪽이 상위인지 읽히지 않는다.
-        blocks.append(Heading(_ANSWER_SECTION_TITLE, 1))
-        blocks.extend(answers)
     return ExportDoc(
         title=title,
-        blocks=blocks,
+        blocks=_with_answer_section(blocks, answers),
         footer=_footer(source),
         notice=_notice(used_sources),
+        # 시험지는 종이 시험지처럼 좌우 2단으로 조판한다(`model.ExportDoc.two_column`).
+        two_column=True,
     )
 
 
@@ -500,25 +523,41 @@ def build_variants_doc(
     원본 크롭은 넣지 않는다 — 변형 문제만 깔끔하게 배포할 수 있어야 한다.
     한 문항에 여러 mode 가 저장돼 있으면 모두 넣는다(호출자가 정렬해 넘긴다).
 
+    `include_full` 이면 **정답·풀이를 조합 옆에 붙이지 않고 문서 끝에 모은다** —
+    시험지와 같은 규칙이다(`_with_answer_section`). 문항부 전체 뒤에 페이지를
+    끊고 `정답 및 해설` 표제를 세운 다음, 넣을 섹션이 남은 조합만 같은 제목으로
+    다시 나열한다. 변형도 앞장만 떼어 배포할 수 있어야 한다는 요구다.
+
     제목은 `{번호 표기} · {변형 종류}` 다. 번호 표기 규칙은 시험지와 같다
     (`_display_no`) — `variants` 에는 표기가 없으므로 호출자가 원본
-    `problems.label` 을 조회해 항목에 실어 준다.
+    `problems.label` 을 조회해 항목에 실어 준다. **문항부와 해설부가 같은 제목
+    문자열을 쓴다**(같은 `Heading` 객체를 공유한다) — 어긋나면 대조가 안 된다.
+
+    `include_full=False`(문제만 내보내기)는 애초에 정답·풀이를 넣지 않으므로
+    나눌 것이 없다 — 페이지 나눔도 표제도 생기지 않고 블록 목록은 예전과 완전히
+    같다. `## 문제` 외에 넣을 섹션이 하나도 없는 조합도 해설부에 나오지 않는다.
+
+    **변형도 시험지와 같이 항상 좌우 2단이다**(`two_column=True`) — 그대로
+    배포할 문제지이기 때문이다.
 
     Args:
         title: 문서 제목(예: `<시험지명> 변형 문제`).
         items: (번호, mode) 순으로 정렬된 변형 목록.
-        include_full: True 면 `## 정답` / `## 풀이` 까지 넣는다.
+        include_full: True 면 `## 정답` / `## 풀이` 까지 넣는다(해설부로 모인다).
         source: 문서 끝에 넣을 출처. None/빈 문자열이면 넣지 않는다.
 
     Returns:
         조립된 문서.
     """
     blocks: list[Block] = []
+    answers: list[Block] = []
     for item in items:
         mode_label = VARIANT_MODE_LABEL.get(item.mode, item.mode)
-        blocks.append(
-            Heading(f"{_display_no(item.no, item.label)} · {mode_label}", 2)
-        )
+        # 문항부와 해설부가 같은 Heading 객체를 쓴다(시험지와 같은 이유 —
+        # 표기 규칙을 두 번 적용하지 않고 결과를 공유한다).
+        heading = Heading(f"{_display_no(item.no, item.label)} · {mode_label}", 2)
+        blocks.append(heading)
+        item_answers: list[Block] = []
         for section_title, raw in markdown_sections.split_sections(item.text).items():
             if section_title in _SKIPPED_SECTIONS:
                 continue
@@ -530,9 +569,21 @@ def build_variants_doc(
                 continue
             if not include_full:
                 continue
-            blocks.append(Heading(_heading_text(section_title), 3))
-            blocks.append(body)
-    return ExportDoc(title=title, blocks=blocks, footer=_footer(source))
+            item_answers.append(Heading(_heading_text(section_title), 3))
+            item_answers.append(body)
+        if not item_answers:
+            # 넣을 정답·풀이가 없는 조합. 제목만 남기면 해설이 있는 척하는 빈
+            # 항목이 되므로 해설부에 넣지 않는다(시험지와 같은 규칙).
+            continue
+        answers.append(heading)
+        answers.extend(item_answers)
+    return ExportDoc(
+        title=title,
+        blocks=_with_answer_section(blocks, answers),
+        footer=_footer(source),
+        # 변형도 시험지와 같은 2단 조판이다 — 그대로 배포할 문제지이기 때문이다.
+        two_column=True,
+    )
 
 
 def build_note_doc(
@@ -552,10 +603,24 @@ def build_note_doc(
     스냅샷을 텍스트로, 없으면 크롭 스냅샷으로 낸다. 판독본이 그림을 가리키면
     크롭 스냅샷을 함께 넣는 것도 같다.
 
+    `include_full` 이면 **풀이를 문항 옆에 붙이지 않고 문서 끝에 모은다** —
+    시험지와 같은 규칙이다(`_with_answer_section`). 풀이가 있는 항목만 문항부와
+    같은 제목(`{시험지명} {표기}`)으로 해설부에 다시 나열한다.
+
+    **메모는 문항부에 남는다.** 메모는 "이 문제를 왜 담았나" 를 적은 것이라
+    문항 옆에 있어야 한다 — 해설이 아니므로 뒤로 보내지 않는다.
+
+    `include_full=False` 는 애초에 풀이를 넣지 않으므로 나눌 것이 없다 —
+    페이지 나눔도 표제도 생기지 않고 예전 문서와 완전히 같다.
+
+    **오답노트만 1단이다**(`two_column` 을 켜지 않는다). 시험지·변형은 좌우
+    2단으로 나가지만 오답노트는 복습용이라 문항을 크게 보는 것이 목적이다 —
+    문서 전체가 예전과 한 글자도 다르지 않다.
+
     Args:
         title: 문서 제목(노트 이름).
         items: 담은 순서의 항목 목록.
-        include_full: True 면 원본 문항의 저장된 풀이까지 넣는다.
+        include_full: True 면 원본 문항의 저장된 풀이까지 넣는다(해설부로 모인다).
         source: 문서 끝에 넣을 출처. None/빈 문자열이면 넣지 않는다.
         body: `image`(기본) 또는 `text`.
 
@@ -563,13 +628,14 @@ def build_note_doc(
         조립된 문서. `body="text"` 로 텍스트가 하나라도 들어갔으면 `notice` 가 찬다.
     """
     blocks: list[Block] = []
+    answers: list[Block] = []
     used_sources: list[str | None] = []
     for item in items:
-        blocks.append(
-            Heading(
-                f"{item.source_name} {_display_no(item.problem_no, item.label)}", 2
-            )
+        # 문항부와 해설부가 같은 Heading 객체를 쓴다(시험지와 같은 이유).
+        heading = Heading(
+            f"{item.source_name} {_display_no(item.problem_no, item.label)}", 2
         )
+        blocks.append(heading)
         item_blocks, used_text = _item_body_blocks(
             transcript=item.transcript,
             no=item.problem_no,
@@ -581,11 +647,17 @@ def build_note_doc(
             used_sources.append(item.transcript_source)
         if item.memo:
             blocks.append(_prefixed(_MEMO_PREFIX, _body(item.memo)))
-        if include_full and item.solution:
-            blocks.extend(_solution_blocks(item.solution))
+        if not include_full or not item.solution:
+            continue
+        item_answers = _solution_blocks(item.solution)
+        if not item_answers:
+            # 섹션이 전부 `_SKIPPED_SECTIONS` 였거나 평문화 결과가 빈 풀이.
+            continue
+        answers.append(heading)
+        answers.extend(item_answers)
     return ExportDoc(
         title=title,
-        blocks=blocks,
+        blocks=_with_answer_section(blocks, answers),
         footer=_footer(source),
         notice=_notice(used_sources),
     )

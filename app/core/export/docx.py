@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import io
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -29,7 +29,16 @@ from docx.text.paragraph import Paragraph
 from PIL import Image as PilImage
 
 from export import layout
-from export.model import ExportDoc, Heading, Image, MathRun, PageBreak, Text, TextRun
+from export.model import (
+    Block,
+    ExportDoc,
+    Heading,
+    Image,
+    MathRun,
+    Text,
+    TextRun,
+    item_spans,
+)
 from export.omml import UnsupportedLatexError, latex_to_omml
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
@@ -42,7 +51,28 @@ _CROP_RENDER_DPI: Final[int] = 150
 # 어긋나므로 여기서 A4 로 덮어쓴다.
 # 이미지 폭 상한. 본문 폭을 넘으면 크롭이 여백을 침범하므로 본문 폭이 곧 상한이다.
 # 세로 비율은 python-docx 가 유지한다. 예전 값 6.0in 은 Letter 본문 폭이었다.
+# 1단 문서(오답노트)가 쓰는 값이다.
 _MAX_IMAGE_WIDTH_INCHES: Final[float] = layout.BODY_WIDTH_MM / layout.MM_PER_INCH
+# 2단 문서(시험지·변형)의 이미지 폭 상한. 이때 지면의 폭 제한은 본문 폭이 아니라
+# **단 폭**(71mm)이다 — 본문 폭을 쓰면 크롭이 옆 단과 오른쪽 여백을 덮는다.
+_MAX_COLUMN_IMAGE_WIDTH_INCHES: Final[float] = (
+    layout.COLUMN_WIDTH_MM / layout.MM_PER_INCH
+)
+# `w:cols` 뒤에 올 수 있는 형제 요소들(ECMA-376 CT_SectPr 순서). 기본 템플릿에는
+# `w:cols` 가 이미 있어 보통 쓰이지 않지만, 없을 때 아무 데나 끼우면 워드가 문서를
+# 복구 대상으로 본다.
+_COLS_SUCCESSORS: Final[tuple[str, ...]] = (
+    "w:formProt",
+    "w:vAlign",
+    "w:noEndnote",
+    "w:titlePg",
+    "w:textDirection",
+    "w:bidi",
+    "w:rtlGutter",
+    "w:docGrid",
+    "w:printerSettings",
+    "w:sectPrChange",
+)
 
 # 본문 폰트. python-docx 기본 템플릿은 테마 폰트(Calibri)를 쓰는데, Calibri 에는
 # 위·아래첨자(ᵐ ⁿ ⁻ ₁ ₂)와 ⇒ ∘ ∠ ⋯ ≡ ✔ 글리프가 없어 평문화한 수식이 □ 로 깨진다.
@@ -162,23 +192,47 @@ def _set_page(document: DocxDocument) -> None:
     section.bottom_margin = Mm(layout.MARGIN_BOTTOM_MM)
 
 
-def _fit_width(path: Path) -> Length:
-    """이미지 폭을 본문 폭(A4 기준 150mm = 5.91in)에 맞춘다(원본보다 키우지 않음).
+def _set_columns(document: DocxDocument) -> None:
+    """구역을 좌우 2단으로 만들고 단 사이에 세로 구분선을 세운다.
+
+    워드는 단 설정을 구역 속성(`w:sectPr/w:cols`)으로 갖는다 — 문단마다 거는
+    것이 아니라 구역 전체에 걸린다. python-docx 에 고수준 API 가 없어 요소를
+    직접 만진다(기본 템플릿에는 `<w:cols w:space="720"/>` 가 이미 있다).
+
+    `w:sep="1"` 이 **중앙 세로선**이고, `w:space` 는 단 사이 간격(twip)이다.
+    제목과 고지도 같은 구역에 있으므로 함께 2단 안에 들어간다(hwpx 렌더러와
+    같은 모양이 되도록 일부러 구역을 나누지 않는다).
+
+    Args:
+        document: 방금 만든 빈 문서.
+    """
+    sect_pr = document.sections[0]._sectPr
+    cols = sect_pr.find(qn("w:cols"))
+    if cols is None:
+        cols = OxmlElement("w:cols")
+        sect_pr.insert_element_before(cols, *_COLS_SUCCESSORS)
+    cols.set(qn("w:num"), str(layout.COLUMN_COUNT))
+    cols.set(qn("w:space"), str(Mm(layout.COLUMN_GAP_MM).twips))
+    cols.set(qn("w:sep"), "1")
+
+
+def _fit_width(path: Path, max_inches: float) -> Length:
+    """이미지 폭을 지면이 허용하는 폭에 맞춘다(원본보다 키우지 않음).
 
     python-docx 는 `width` 만 주면 세로를 원본 비율대로 맞춘다.
 
     Args:
         path: 크롭 PNG 경로.
+        max_inches: 폭 상한(인치). 1단은 본문 폭(150mm = 5.91in), 2단은 단 폭
+            (71mm = 2.80in)이다.
 
     Returns:
         문서에 넣을 이미지 폭(EMU).
     """
     with PilImage.open(path) as image:
         width_px = image.width
-    native_inches = (
-        width_px / _CROP_RENDER_DPI if width_px > 0 else _MAX_IMAGE_WIDTH_INCHES
-    )
-    return Inches(min(native_inches, _MAX_IMAGE_WIDTH_INCHES))
+    native_inches = width_px / _CROP_RENDER_DPI if width_px > 0 else max_inches
+    return Inches(min(native_inches, max_inches))
 
 
 def _add_math(paragraph: Paragraph, run: MathRun) -> None:
@@ -212,7 +266,7 @@ def _add_aside(document: DocxDocument, text: str) -> None:
     run.font.color.rgb = _ASIDE_FONT_COLOR
 
 
-def _add_text(document: DocxDocument, block: Text) -> None:
+def _add_text(document: DocxDocument, block: Text) -> list[Paragraph]:
     """본문 블록을 문단들로 넣는다.
 
     한 문단에 개행을 그대로 넣으면 워드가 줄바꿈으로 표시하지 않으므로 줄마다
@@ -221,19 +275,94 @@ def _add_text(document: DocxDocument, block: Text) -> None:
     Args:
         document: 대상 문서.
         block: 본문 블록.
+
+    Returns:
+        만든 문단들(호출자가 문항 단위 조판 속성을 걸 수 있게 돌려준다).
     """
     if block.lines is None:
         # 수식이 없는 블록. 예전 경로 그대로다.
-        for line in block.text.split("\n"):
-            document.add_paragraph(line)
-        return
+        return [document.add_paragraph(line) for line in block.text.split("\n")]
+    paragraphs: list[Paragraph] = []
     for runs in block.lines:
         paragraph = document.add_paragraph()
+        paragraphs.append(paragraph)
         for run in runs:
             if isinstance(run, TextRun):
                 paragraph.add_run(run.text)
             else:
                 _add_math(paragraph, run)
+    return paragraphs
+
+
+def _add_block(
+    document: DocxDocument, block: Block, *, max_image_inches: float
+) -> list[Paragraph]:
+    """블록 하나를 렌더하고 그때 만든 문단들을 돌려준다.
+
+    문단을 돌려주는 이유는 문항 단위로 조판 속성을 걸어야 하기 때문이다
+    (`_apply_item_layout`). 문서를 다 만든 뒤 `document.paragraphs` 를 훑어
+    되찾는 방법도 있지만, 434문항 문서에서는 문항마다 전체 문단 목록을 새로
+    만들어 O(문항수 x 문단수) 가 된다.
+
+    이미지는 `Document.add_picture` 와 **같은 XML** 을 만든다(그 메서드가
+    `add_paragraph().add_run()` 뒤에 `run.add_picture` 를 부르는 것과 같다).
+    문단 객체를 직접 잡으려고 두 줄로 편 것뿐이다.
+
+    Args:
+        document: 대상 문서.
+        block: 렌더할 블록.
+        max_image_inches: 이미지 폭 상한(인치).
+
+    Returns:
+        만든 문단들. 페이지 나눔은 문항 구간 밖이므로 빈 목록을 준다.
+    """
+    if isinstance(block, Heading):
+        return [document.add_heading(block.text, level=block.level)]
+    if isinstance(block, Image):
+        paragraph = document.add_paragraph()
+        paragraph.add_run().add_picture(
+            str(block.path), width=_fit_width(block.path, max_image_inches)
+        )
+        return [paragraph]
+    if isinstance(block, Text):
+        return _add_text(document, block)
+    # 남은 것은 `PageBreak` 뿐이다(`Block` 유니온 4종 중 셋을 위에서 처리했다).
+    # `w:br w:type="page"` 를 담은 문단 하나를 만든다(python-docx 내장).
+    # python-docx 가 이 메서드에만 주석을 달지 않아 strict mypy 가 막는다.
+    document.add_page_break()  # type: ignore[no-untyped-call]
+    return []
+
+
+def _apply_item_layout(paragraphs: Sequence[Paragraph]) -> None:
+    """문항 하나를 이루는 문단들이 단·페이지를 넘어 쪼개지지 않게 한다.
+
+    높이를 우리가 계산하지 않는다. 크롭 높이는 알아도 텍스트가 몇 줄로 접힐지는
+    폰트·단 폭에 따라 달라져 예측이 어긋나고, 워드와 한글이 다르게 조판한다.
+    대신 조판 엔진에 "이 문단들은 쪼개지 마라"(`w:keepLines`)와 "다음 문단과
+    붙어라"(`w:keepNext`)를 걸어 두면, 남은 공간에 안 들어갈 때 워드가 문항을
+    **통째로** 다음 단이나 다음 페이지로 넘긴다.
+
+    마지막 문단만 `keepNext` 를 끈다. 켜 두면 다음 문항까지 끌려와 문서 전체가
+    한 덩이가 된다. 워드 기본 제목 스타일이 `keepNext` 를 켜 두는 경우가 있어
+    상속에 맡기지 않고 **명시적으로 끈다**.
+
+    첫 문단(= 문항 제목)에는 문항 간 간격을 준다. 문항 안 문단 사이는 그대로
+    촘촘하게 둔다 — 그래야 한 문항이 한 덩이로 보인다.
+
+    **한계**: 문항 하나가 한 단 높이보다 크면 어떤 설정으로도 넘길 곳이 없다.
+    그런 문항은 결국 단 사이에서 쪼개지거나 한 단을 통째로 차지한다.
+
+    Args:
+        paragraphs: 한 문항이 만든 문단들(제목부터 순서대로). 비면 아무 일도 없다.
+    """
+    if not paragraphs:
+        return
+    last = len(paragraphs) - 1
+    for index, paragraph in enumerate(paragraphs):
+        paragraph_format = paragraph.paragraph_format
+        paragraph_format.keep_together = True
+        paragraph_format.keep_with_next = index != last
+    paragraphs[0].paragraph_format.space_before = Pt(layout.ITEM_GAP_PT)
 
 
 def build_docx(doc: ExportDoc) -> bytes:
@@ -247,6 +376,10 @@ def build_docx(doc: ExportDoc) -> bytes:
     `doc.notice` 가 있으면 제목 바로 아래(첫 페이지)에, `doc.footer` 는 문서 맨
     끝에 작은 회색 한 줄로 넣는다. 둘 다 없으면 예전과 똑같은 문서다.
 
+    `doc.two_column` 이면 구역을 좌우 2단(중앙 세로선)으로 세우고, 문항마다
+    쪼개짐 방지와 문항 간 간격을 건다(`_set_columns` / `_apply_item_layout`).
+    1단 문서(오답노트)는 예전과 똑같이 나간다 — 문단 속성도 붙지 않는다.
+
     Args:
         doc: 렌더할 문서.
 
@@ -255,22 +388,36 @@ def build_docx(doc: ExportDoc) -> bytes:
     """
     document = Document()
     _set_page(document)
+    if doc.two_column:
+        _set_columns(document)
     _tighten(document)
+    max_image_inches = (
+        _MAX_COLUMN_IMAGE_WIDTH_INCHES if doc.two_column else _MAX_IMAGE_WIDTH_INCHES
+    )
     document.add_heading(doc.title, level=0)
     if doc.notice:
         # 고지는 **제목 바로 아래**(= 첫 페이지)다. 읽기 전에 보여야 의미가 있다.
         _add_aside(document, doc.notice)
-    for block in doc.blocks:
-        if isinstance(block, Heading):
-            document.add_heading(block.text, level=block.level)
-        elif isinstance(block, Image):
-            document.add_picture(str(block.path), width=_fit_width(block.path))
-        elif isinstance(block, Text):
-            _add_text(document, block)
-        elif isinstance(block, PageBreak):
-            # `w:br w:type="page"` 를 담은 문단 하나를 만든다(python-docx 내장).
-            # python-docx 가 이 메서드에만 주석을 달지 않아 strict mypy 가 막는다.
-            document.add_page_break()  # type: ignore[no-untyped-call]
+    blocks = list(doc.blocks)
+    # 1단 문서는 문항 구간을 찾지 않는다 — 걸 속성이 없으므로 예전 경로 그대로다.
+    spans = item_spans(blocks) if doc.two_column else {}
+    index = 0
+    while index < len(blocks):
+        stop = spans.get(index)
+        if stop is None:
+            _add_block(document, blocks[index], max_image_inches=max_image_inches)
+            index += 1
+            continue
+        _apply_item_layout(
+            [
+                paragraph
+                for block in blocks[index:stop]
+                for paragraph in _add_block(
+                    document, block, max_image_inches=max_image_inches
+                )
+            ]
+        )
+        index = stop
     if doc.footer:
         # 출처는 문서 맨 끝 한 줄. 본문과 섞이지 않게 작은 회색 글씨로 낸다.
         _add_aside(document, doc.footer)

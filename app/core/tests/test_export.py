@@ -5,6 +5,7 @@
 - `.hwpx` 안에 `BinData/` 이미지가 문항 수만큼 있다.
 - `include=full` 이 `include=problems` 보다 크다(해설이 실제로 들어갔다).
 - `include=full` 은 해설을 **문서 끝으로 모은다**(페이지 나눔 + `정답 및 해설`).
+  시험지·변형·오답노트 셋 다 같다(오답노트 메모만 문항부에 남는다).
 - 내보낼 것이 없으면 400 + 한국어 메시지.
 - Content-Disposition 의 한글 파일명이 RFC5987 로 인코딩된다.
 - 접속 비밀번호가 설정된 상태에서 `?access=` 로 `.hwpx` 가 200 (미들웨어 회귀 방지).
@@ -20,6 +21,7 @@ from urllib.parse import quote
 
 import pytest
 from conftest import make_note, upload_test_pdf
+from docx.shared import Mm, Pt
 from fastapi.testclient import TestClient
 from PIL import Image as PilImage
 
@@ -28,6 +30,7 @@ import storage
 from export import build as export_build
 from export import docx as export_docx
 from export import hwpx as export_hwpx
+from export import layout as export_layout
 from export import model as export_model
 
 DOCX_MEDIA_TYPE = (
@@ -1166,11 +1169,14 @@ def _split_at_page_break(
 
 
 def test_problems_only_export_is_exactly_the_old_document(tmp_path: Path) -> None:
-    """`include_full=False` 는 예전과 **완전히 동일**하다(회귀 방지선).
+    """`include_full=False` 의 **블록 목록**은 예전과 완전히 동일하다(회귀 방지선).
 
     풀이를 애초에 넣지 않으므로 나눌 것이 없다 — 페이지 나눔도 `정답 및 해설`
     표제도 생기면 안 된다. 이미 배포한 문제지와 대조가 깨지지 않게 조립 결과를
     통째로 비교한다.
+
+    2단 조판(`two_column=True`)만 새로 붙는다. 문항 내용이 아니라 지면에 앉히는
+    방식이므로 블록에는 영향이 없다.
     """
     crop = _crop(tmp_path)
     doc = export_build.build_exam_doc(
@@ -1191,6 +1197,7 @@ def test_problems_only_export_is_exactly_the_old_document(tmp_path: Path) -> Non
         ],
         footer=None,
         notice=None,
+        two_column=True,
     )
 
 
@@ -1287,39 +1294,324 @@ def test_answer_heading_matches_the_problem_heading(tmp_path: Path) -> None:
     assert _headings_2(answers) == [PRINTED_LABEL]
 
 
-def test_variants_and_note_docs_keep_solutions_inline(tmp_path: Path) -> None:
-    """변형·오답노트는 **바뀌지 않는다** — 해설이 문항 옆에 그대로 있다.
+# --------------------------------- 해설 미주: 변형·오답노트에도 같은 규칙 적용
+# 요구: "해설을 문서 끝으로 모으는 것을 변형·오답노트에도 적용". 시험지와 똑같이
+# `include_full=True` 면 항상 뒤로 모인다 — 설정은 만들지 않는다.
 
-    오답노트는 틀린 문제를 바로 다시 보는 용도라 해설이 옆에 있어야 하고,
-    변형은 이번 요구 범위가 아니다.
+# 수식이 없는 변형 응답. 조립 결과를 통째로 비교할 때 쓴다(수식이 있으면
+# `Text.lines` 를 손으로 적어야 해서 회귀 방지선이 흐려진다).
+VARIANT_TEXT_PLAIN = """## 문제
+넓이를 구하시오.
+
+## 정답
+12
+
+## 풀이
+1단계: 계산한다.
+"""
+
+# `## 문제` 만 있는 변형 응답. 해설부에 넣을 것이 하나도 없는 경우다.
+VARIANT_TEXT_PROBLEM_ONLY = """## 문제
+넓이를 구하시오.
+"""
+
+MEMO = "계산 실수"
+
+
+def _headings_3(blocks: list[export_model.Block]) -> list[str]:
+    """블록 목록의 3수준 제목(풀이 소제목)만."""
+    return [
+        block.text
+        for block in blocks
+        if isinstance(block, export_model.Heading) and block.level == 3
+    ]
+
+
+def _texts(blocks: list[export_model.Block]) -> list[export_model.Text]:
+    """블록 목록의 본문 블록만."""
+    return [block for block in blocks if isinstance(block, export_model.Text)]
+
+
+def test_variants_problems_only_export_is_exactly_the_old_document() -> None:
+    """변형 `include_full=False` 의 **블록 목록**은 예전과 완전히 동일하다.
+
+    정답·풀이를 애초에 넣지 않으므로 나눌 것이 없다 — 페이지 나눔도 표제도
+    생기면 안 된다. 2단 조판(`two_column=True`)만 새로 붙는다.
     """
-    crop = _crop(tmp_path)
-    variants = export_build.build_variants_doc(
+    doc = export_build.build_variants_doc(
         title="변형",
-        items=[export_build.VariantItem(no=1, mode="number", text=VARIANT_TEXT)],
+        items=[
+            export_build.VariantItem(no=1, mode="number", text=VARIANT_TEXT_PLAIN),
+            export_build.VariantItem(no=2, mode="condition", text=VARIANT_TEXT_PLAIN),
+        ],
+        include_full=False,
+    )
+    assert doc == export_model.ExportDoc(
+        title="변형",
+        blocks=[
+            export_model.Heading("1번 · 숫자 변형", 2),
+            export_model.Text("넓이를 구하시오."),
+            export_model.Heading("2번 · 조건 변형", 2),
+            export_model.Text("넓이를 구하시오."),
+        ],
+        footer=None,
+        notice=None,
+        two_column=True,
+    )
+
+
+def test_variants_full_export_puts_every_answer_behind_a_page_break() -> None:
+    """변형도 문항부 → 페이지 나눔 → 표제 → 해설부 순서다.
+
+    문항부에는 3수준 제목(`정답`/`풀이`)이 **0개**여야 하고, 해설부에는 문제
+    본문이 **없어야** 한다 — 섞여 있으면 앞장만 떼어 배포할 수 없다.
+    """
+    doc = export_build.build_variants_doc(
+        title="변형",
+        items=[
+            export_build.VariantItem(no=1, mode="number", text=VARIANT_TEXT),
+            export_build.VariantItem(no=2, mode="condition", text=VARIANT_TEXT),
+        ],
         include_full=True,
     )
-    note = export_build.build_note_doc(
+    problems, answers = _split_at_page_break(doc)
+
+    assert _headings_2(problems) == ["1번 · 숫자 변형", "2번 · 조건 변형"]
+    assert _headings_3(problems) == []
+    # `## 문제` 는 소제목 없이 본문만 들어간다(기존 규칙).
+    problem_bodies = _texts(problems)
+    assert len(problem_bodies) == 2
+    for body in problem_bodies:
+        assert body not in answers
+    assert _headings_2(answers) == ["1번 · 숫자 변형", "2번 · 조건 변형"]
+    assert [
+        block.text for block in answers if isinstance(block, export_model.Heading)
+    ] == [
+        "1번 · 숫자 변형",
+        "정답",
+        "풀이",
+        "2번 · 조건 변형",
+        "정답",
+        "풀이",
+    ]
+
+
+def test_variants_answer_heading_matches_the_problem_heading() -> None:
+    """지면 표기가 다른 변형도 문항부와 해설부의 제목이 **같다**."""
+    doc = export_build.build_variants_doc(
+        title="변형",
+        items=[
+            export_build.VariantItem(
+                no=1, mode="number_condition", text=VARIANT_TEXT, label=PRINTED_LABEL
+            )
+        ],
+        include_full=True,
+    )
+    problems, answers = _split_at_page_break(doc)
+    expected = f"{PRINTED_LABEL} · 숫자·조건 변형"
+    assert _headings_2(problems) == [expected]
+    assert _headings_2(answers) == [expected]
+
+
+def test_variants_answer_section_skips_combinations_without_anything_to_show() -> None:
+    """`## 문제` 외에 넣을 섹션이 없는 조합은 해설부에 나오지 않는다.
+
+    `## 검산` 만 남은 조합도 같다(`_SKIPPED_SECTIONS` 는 해설부에도 적용된다).
+    """
+    doc = export_build.build_variants_doc(
+        title="변형",
+        items=[
+            export_build.VariantItem(
+                no=1, mode="number", text=VARIANT_TEXT_PROBLEM_ONLY
+            ),
+            export_build.VariantItem(no=2, mode="number", text=VARIANT_TEXT_PLAIN),
+        ],
+        include_full=True,
+    )
+    problems, answers = _split_at_page_break(doc)
+    assert _headings_2(problems) == ["1번 · 숫자 변형", "2번 · 숫자 변형"]
+    assert _headings_2(answers) == ["2번 · 숫자 변형"]
+
+
+def test_variants_full_export_without_any_answer_has_no_answer_section() -> None:
+    """넣을 해설이 하나도 없으면 페이지 나눔도 표제도 없다(빈 페이지 방지).
+
+    결과가 `include_full=False` 와 **완전히 같아야** 한다.
+    """
+    items = [
+        export_build.VariantItem(no=1, mode="number", text=VARIANT_TEXT_PROBLEM_ONLY)
+    ]
+    full = export_build.build_variants_doc(
+        title="변형", items=items, include_full=True
+    )
+    problems_only = export_build.build_variants_doc(
+        title="변형", items=items, include_full=False
+    )
+    assert full == problems_only
+    assert not any(isinstance(block, export_model.PageBreak) for block in full.blocks)
+    assert ANSWER_SECTION_HEADING not in list(full.blocks)
+
+
+def test_note_problems_only_export_is_exactly_the_old_document(tmp_path: Path) -> None:
+    """오답노트 `include_full=False` 는 예전과 **완전히 동일**하다(회귀 방지선)."""
+    crop = _crop(tmp_path)
+    doc = export_build.build_note_doc(
         title="오답노트",
         items=[
             export_build.NoteItem(
                 source_name="풍문고",
                 problem_no=1,
                 image=crop,
+                memo=MEMO,
+                solution=SOLUTION_TEXT,
+            ),
+            export_build.NoteItem(
+                source_name="풍문고",
+                problem_no=2,
+                image=crop,
+                solution=SOLUTION_TEXT,
+            ),
+        ],
+        include_full=False,
+    )
+    assert doc == export_model.ExportDoc(
+        title="오답노트",
+        blocks=[
+            export_model.Heading("풍문고 1번", 2),
+            export_model.Image(crop),
+            export_model.Text(f"메모: {MEMO}"),
+            export_model.Heading("풍문고 2번", 2),
+            export_model.Image(crop),
+        ],
+        footer=None,
+        notice=None,
+    )
+
+
+def test_note_full_export_keeps_the_memo_with_the_problem(tmp_path: Path) -> None:
+    """메모는 **문항부에 남는다** — 해설부에 넘어가지 않는다.
+
+    메모는 "이 문제를 왜 담았나" 를 적은 것이라 문항 옆에 있어야 한다. 해설이
+    아니므로 뒤로 모으는 대상이 아니다.
+    """
+    crop = _crop(tmp_path)
+    doc = export_build.build_note_doc(
+        title="오답노트",
+        items=[
+            export_build.NoteItem(
+                source_name="풍문고",
+                problem_no=1,
+                label=PRINTED_LABEL,
+                image=crop,
+                memo=MEMO,
                 solution=SOLUTION_TEXT,
             )
         ],
         include_full=True,
     )
-    for doc in (variants, note):
-        assert not any(isinstance(block, export_model.PageBreak) for block in doc.blocks)
-        assert ANSWER_SECTION_HEADING not in list(doc.blocks)
-    # 오답노트는 문항 제목 → 크롭 → 풀이 소제목이 이어진다(예전 구성).
-    assert [type(block).__name__ for block in note.blocks][:3] == [
-        "Heading",
-        "Image",
-        "Heading",
+    problems, answers = _split_at_page_break(doc)
+
+    assert problems == [
+        export_model.Heading(f"풍문고 {PRINTED_LABEL}", 2),
+        export_model.Image(crop),
+        export_model.Text(f"메모: {MEMO}"),
     ]
+    assert _headings_3(problems) == []
+    assert not any(MEMO in block.text for block in _texts(answers))
+    assert not any(isinstance(block, export_model.Image) for block in answers)
+    # 해설부 제목은 문항부와 같은 문자열이다(지면 표기 스냅샷 포함).
+    assert _headings_2(answers) == [f"풍문고 {PRINTED_LABEL}"]
+    assert _headings_3(answers) == ["풀이", "정답"]
+
+
+def test_note_answer_section_lists_only_items_that_have_a_solution(
+    tmp_path: Path,
+) -> None:
+    """풀이가 있는 항목만 해설부에 나온다(원본이 지워진 항목은 풀이가 없다)."""
+    crop = _crop(tmp_path)
+    doc = export_build.build_note_doc(
+        title="오답노트",
+        items=[
+            export_build.NoteItem(source_name="풍문고", problem_no=1, image=crop),
+            export_build.NoteItem(
+                source_name="풍문고",
+                problem_no=2,
+                image=crop,
+                solution=SOLUTION_TEXT,
+            ),
+            # 섹션이 전부 `_SKIPPED_SECTIONS` 라 넣을 블록이 남지 않는 풀이.
+            export_build.NoteItem(
+                source_name="풍문고",
+                problem_no=3,
+                image=crop,
+                solution=SOLUTION_ONLY_SKIPPED,
+            ),
+        ],
+        include_full=True,
+    )
+    problems, answers = _split_at_page_break(doc)
+    assert _headings_2(problems) == ["풍문고 1번", "풍문고 2번", "풍문고 3번"]
+    assert _headings_2(answers) == ["풍문고 2번"]
+
+
+def test_note_full_export_without_any_solution_has_no_answer_section(
+    tmp_path: Path,
+) -> None:
+    """풀이가 하나도 없으면 페이지 나눔도 표제도 없다(빈 페이지 방지)."""
+    crop = _crop(tmp_path)
+    items = [
+        export_build.NoteItem(
+            source_name="풍문고", problem_no=1, image=crop, memo=MEMO
+        )
+    ]
+    full = export_build.build_note_doc(
+        title="오답노트", items=items, include_full=True
+    )
+    problems_only = export_build.build_note_doc(
+        title="오답노트", items=items, include_full=False
+    )
+    assert full == problems_only
+    assert not any(isinstance(block, export_model.PageBreak) for block in full.blocks)
+    assert ANSWER_SECTION_HEADING not in list(full.blocks)
+
+
+def test_variants_and_note_page_breaks_reach_both_renderers(tmp_path: Path) -> None:
+    """변형·오답노트의 페이지 나눔이 docx·hwpx XML 에 실제로 들어간다.
+
+    조립만 맞고 렌더러에서 사라지면 종이에서는 앞장/뒷장이 갈리지 않는다.
+    """
+    crop = _crop(tmp_path)
+    docs = [
+        export_build.build_variants_doc(
+            title="변형",
+            items=[
+                export_build.VariantItem(no=1, mode="number", text=VARIANT_TEXT_PLAIN)
+            ],
+            include_full=True,
+        ),
+        export_build.build_note_doc(
+            title="오답노트",
+            items=[
+                export_build.NoteItem(
+                    source_name="풍문고",
+                    problem_no=1,
+                    image=crop,
+                    solution=SOLUTION_TEXT,
+                )
+            ],
+            include_full=True,
+        ),
+    ]
+    for doc in docs:
+        payload = export_docx.build_docx(doc)
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            document = archive.read("word/document.xml").decode("utf-8")
+        assert '<w:br w:type="page"/>' in document
+        assert document.count('w:type="page"') == 1
+
+        section = _section_text(export_hwpx.build_hwpx(doc))
+        assert 'pageBreak="1"' in section
+        assert section.count('pageBreak="1"') == 1
 
 
 PAGE_BREAK_DOC = export_model.ExportDoc(
@@ -1352,3 +1644,318 @@ def test_hwpx_renders_a_hard_page_break() -> None:
     section = _section_text(payload)
     assert 'pageBreak="1"' in section
     assert section.count('pageBreak="1"') == 1
+
+
+# --------------------------------------------------- 2단 조판(시험지·변형)
+# 시험지·변형은 종이 시험지처럼 좌우 2단으로 나가고, 오답노트만 1단이다.
+# 설정도 쿼리 파라미터도 없다(사용자 결정).
+
+# 문항 두 개짜리 최소 문서. 1번은 문단 3개(제목+본문 2줄), 2번은 2개다 —
+# 문항 안의 "중간 문단" 과 "마지막 문단" 이 다르게 취급되는지 보려면 둘이 필요하다.
+TWO_COLUMN_BLOCKS: list[export_model.Block] = [
+    export_model.Heading("1번", 2),
+    export_model.Text("가\n나"),
+    export_model.Heading("2번", 2),
+    export_model.Text("다"),
+]
+TWO_COLUMN_DOC = export_model.ExportDoc(
+    title="시험지", blocks=TWO_COLUMN_BLOCKS, two_column=True
+)
+ONE_COLUMN_DOC = export_model.ExportDoc(title="오답노트", blocks=TWO_COLUMN_BLOCKS)
+
+
+def _docx_document_xml(payload: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        return archive.read("word/document.xml").decode("utf-8")
+
+
+def _docx_cols(payload: bytes) -> dict[str, str]:
+    """`sectPr/w:cols` 의 속성들. 단 설정이 없으면 기본값(`w:space` 만) 그대로다."""
+    found = re.search(r"<w:cols[^>]*/?>", _docx_document_xml(payload))
+    assert found is not None, "w:cols 가 없다"
+    return dict(re.findall(r'w:(\w+)="([^"]*)"', found.group(0)))
+
+
+def _docx_paragraph_props(payload: bytes) -> list[str]:
+    """문단마다의 `w:pPr` 조각(없으면 빈 문자열). 본문 문단 순서 그대로다."""
+    props: list[str] = []
+    for paragraph in re.findall(r"<w:p\b.*?</w:p>", _docx_document_xml(payload), re.S):
+        found = re.search(r"<w:pPr>.*?</w:pPr>", paragraph, re.S)
+        props.append(found.group(0) if found is not None else "")
+    return props
+
+
+def _hwpx_part(payload: bytes, name: str) -> str:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        return archive.read(name).decode("utf-8")
+
+
+def _hwpx_columns(payload: bytes) -> list[dict[str, str]]:
+    """본문에 실린 단 정의(`hp:colPr`)들. 새 문서 템플릿에 1단짜리가 하나 있다."""
+    return [
+        dict(re.findall(r'(\w+)="([^"]*)"', found))
+        for found in re.findall(r"<hp:colPr[^>]*>", _section_text(payload))
+    ]
+
+
+def _hwpx_para_pr_refs(payload: bytes) -> list[str]:
+    """본문 문단들이 가리키는 문단 서식 id(문단 순서 그대로)."""
+    return re.findall(r'<hp:p [^>]*paraPrIDRef="(\d+)"', _section_text(payload))
+
+
+def _hwpx_break_settings(payload: bytes) -> list[dict[str, str]]:
+    """문단마다의 `hh:breakSetting` 속성(문단 서식 참조를 header 에서 되짚는다)."""
+    header = _hwpx_part(payload, "Contents/header.xml")
+    settings: dict[str, dict[str, str]] = {}
+    for para_pr in re.findall(r"<hh:paraPr\b.*?</hh:paraPr>", header, re.S):
+        # `\s` 가 없으면 `snapToGrid="1"` 의 뒤쪽(`id="1"`)에 걸린다.
+        para_pr_id = re.search(r'\sid="(\d+)"', para_pr)
+        break_setting = re.search(r"<hh:breakSetting[^>]*/>", para_pr)
+        if para_pr_id is None or break_setting is None:
+            continue
+        settings[para_pr_id.group(1)] = dict(
+            re.findall(r'(\w+)="([^"]*)"', break_setting.group(0))
+        )
+    return [settings[ref] for ref in _hwpx_para_pr_refs(payload)]
+
+
+def _hwpx_space_before(payload: bytes) -> list[int]:
+    """문단마다의 위 여백(HWPUNIT). 문항 사이 간격이 첫 문단에만 붙는지 본다."""
+    header = _hwpx_part(payload, "Contents/header.xml")
+    margins: dict[str, int] = {}
+    for para_pr in re.findall(r"<hh:paraPr\b.*?</hh:paraPr>", header, re.S):
+        # `\s` 가 없으면 `snapToGrid="1"` 의 뒤쪽(`id="1"`)에 걸린다.
+        para_pr_id = re.search(r'\sid="(\d+)"', para_pr)
+        previous = re.search(r'<hc:prev value="(-?\d+)"', para_pr)
+        if para_pr_id is None:
+            continue
+        margins[para_pr_id.group(1)] = int(previous.group(1)) if previous else 0
+    return [margins[ref] for ref in _hwpx_para_pr_refs(payload)]
+
+
+def test_item_spans_reads_the_problem_boundary_from_the_heading_level() -> None:
+    """문항 경계는 `Heading.level == 2`(모델의 계약)로 읽는다.
+
+    문항 안 소제목(3수준 `풀이`/`정답`)은 경계가 아니라 같은 덩이에 남고,
+    다음 문항 제목·해설부 표제(1수준)·페이지 나눔은 경계다.
+    """
+    blocks: list[export_model.Block] = [
+        export_model.Text("표지"),  # 0 문항 밖
+        export_model.Heading("1번", 2),  # 1 문항 시작
+        export_model.Image(Path("a.png")),  # 2
+        export_model.Heading("풀이", 3),  # 3 소제목은 경계가 아니다
+        export_model.Text("본문"),  # 4
+        export_model.Heading("2번", 2),  # 5 다음 문항
+        export_model.Text("본문"),  # 6
+        export_model.PageBreak(),  # 7 경계
+        export_model.Heading("정답 및 해설", 1),  # 8 표제는 문항이 아니다
+        export_model.Heading("1번", 2),  # 9 해설부의 문항
+        export_model.Text("해설"),  # 10
+    ]
+    assert export_model.item_spans(blocks) == {1: 5, 5: 7, 9: 11}
+
+
+def test_exam_and_variant_docs_are_two_column_and_the_note_is_not(
+    tmp_path: Path,
+) -> None:
+    """시험지·변형은 2단, 오답노트는 1단이다(복습용이라 문항을 크게 본다)."""
+    crop = _crop(tmp_path)
+    exam = export_build.build_exam_doc(
+        title="시험지",
+        items=[export_build.ExamItem(no=1, image=crop)],
+        include_full=False,
+    )
+    variants = export_build.build_variants_doc(
+        title="변형",
+        items=[export_build.VariantItem(no=1, mode="number", text=VARIANT_TEXT_PLAIN)],
+        include_full=False,
+    )
+    note = export_build.build_note_doc(
+        title="오답노트",
+        items=[export_build.NoteItem(source_name="풍문고", problem_no=1, image=crop)],
+        include_full=False,
+    )
+    assert exam.two_column is True
+    assert variants.two_column is True
+    assert note.two_column is False
+
+
+def test_docx_two_column_has_a_center_separator_and_a_gap() -> None:
+    """docx 는 구역 속성(`w:cols`)으로 2단을 낸다. `w:sep="1"` 이 중앙 세로선이다."""
+    cols = _docx_cols(export_docx.build_docx(TWO_COLUMN_DOC))
+    assert cols["num"] == "2"
+    assert cols["sep"] == "1"
+    # 단 간격은 `export.layout` 이 단일 소스다(8mm = 454 twip).
+    assert int(cols["space"]) == Mm(export_layout.COLUMN_GAP_MM).twips
+
+
+def test_docx_one_column_doc_has_no_column_settings() -> None:
+    """오답노트(1단)에는 단 수도 구분선도 붙지 않는다(템플릿 기본값 그대로)."""
+    cols = _docx_cols(export_docx.build_docx(ONE_COLUMN_DOC))
+    assert "num" not in cols
+    assert "sep" not in cols
+
+
+def test_hwpx_two_column_has_a_center_separator_and_a_gap() -> None:
+    """hwpx 는 문단 제어 문자(`hp:colPr`)로 2단을 낸다. `hp:colLine` 이 세로선이다."""
+    payload = export_hwpx.build_hwpx(TWO_COLUMN_DOC)
+    columns = [column for column in _hwpx_columns(payload) if column["colCount"] == "2"]
+    assert len(columns) == 1, _hwpx_columns(payload)
+    # 단 간격은 `export.layout` 이 단일 소스다(8mm = 2268 HWPUNIT).
+    expected_gap = round(
+        export_layout.COLUMN_GAP_MM
+        / export_layout.MM_PER_INCH
+        * export_layout.HWPUNIT_PER_INCH
+    )
+    assert int(columns[0]["sameGap"]) == expected_gap
+    assert re.search(r"<hp:colLine[^>]*/>", _section_text(payload)) is not None
+
+
+def test_hwpx_one_column_doc_has_no_column_settings() -> None:
+    """오답노트(1단)에는 2단 정의가 실리지 않는다(새 문서 기본 1단짜리만 남는다)."""
+    payload = export_hwpx.build_hwpx(ONE_COLUMN_DOC)
+    assert all(column["colCount"] == "1" for column in _hwpx_columns(payload))
+    assert "<hp:colLine" not in _section_text(payload)
+
+
+def test_docx_keeps_a_problem_together_and_frees_its_last_paragraph() -> None:
+    """문항 문단은 모두 `keepLines`, 마지막 문단만 `keepNext` 가 꺼진다.
+
+    마지막 문단까지 `keepNext` 를 켜면 다음 문항이 끌려와 문서 전체가 한 덩이가
+    된다. 워드 기본 제목 스타일이 `keepNext` 를 켜는 경우가 있어 상속에 맡기지
+    않고 `w:val="0"` 으로 명시해 끈다.
+    """
+    props = _docx_paragraph_props(export_docx.build_docx(TWO_COLUMN_DOC))
+    # 문서 제목(0) 뒤로 1번 문항 3문단, 2번 문항 2문단이다.
+    item_props = props[1:]
+    assert len(item_props) == 5, props
+    assert all("<w:keepLines/>" in prop for prop in item_props)
+    assert ["<w:keepNext/>" in prop for prop in item_props] == [
+        True,
+        True,
+        False,
+        True,
+        False,
+    ]
+    assert ['<w:keepNext w:val="0"/>' in prop for prop in item_props] == [
+        False,
+        False,
+        True,
+        False,
+        True,
+    ]
+    # 문서 제목 문단에는 아무 것도 걸지 않는다(문항 구간이 아니다).
+    assert "keepNext" not in props[0]
+
+
+def test_docx_one_column_doc_gets_no_keep_attributes() -> None:
+    """오답노트(1단)는 예전과 똑같이 나간다 — 문단에 조판 속성이 붙지 않는다."""
+    document = _docx_document_xml(export_docx.build_docx(ONE_COLUMN_DOC))
+    assert "keepNext" not in document
+    assert "keepLines" not in document
+
+
+def test_docx_puts_the_problem_gap_only_before_the_first_paragraph() -> None:
+    """문항 간 간격은 **문항 첫 문단 앞에만** 넣는다(문항 안은 촘촘하게).
+
+    간격이 문항 안에도 들어가면 한 문항이 여러 덩이로 보인다.
+    """
+    props = _docx_paragraph_props(export_docx.build_docx(TWO_COLUMN_DOC))
+    gap = f'<w:spacing w:before="{Pt(export_layout.ITEM_GAP_PT).twips}"/>'
+    assert [prop.count(gap) for prop in props[1:]] == [1, 0, 0, 1, 0]
+
+
+def test_hwpx_keeps_a_problem_together_and_frees_its_last_paragraph() -> None:
+    """hwpx 도 같은 규칙이다(`hh:breakSetting` 의 keepLines/keepWithNext)."""
+    payload = export_hwpx.build_hwpx(TWO_COLUMN_DOC)
+    # 새 문서 템플릿의 빈 문단과 문서 제목 뒤로 문항 문단 5개다.
+    settings = _hwpx_break_settings(payload)[-5:]
+    assert all(setting["keepLines"] == "1" for setting in settings)
+    assert [setting["keepWithNext"] for setting in settings] == ["1", "1", "0", "1", "0"]
+
+
+def test_hwpx_one_column_doc_gets_no_keep_attributes() -> None:
+    """오답노트(1단)는 예전과 똑같이 나간다 — 기본 문단 서식만 쓴다."""
+    settings = _hwpx_break_settings(export_hwpx.build_hwpx(ONE_COLUMN_DOC))
+    assert all(setting["keepLines"] == "0" for setting in settings)
+    assert all(setting["keepWithNext"] == "0" for setting in settings)
+
+
+def test_hwpx_puts_the_problem_gap_only_before_the_first_paragraph() -> None:
+    """hwpx 도 문항 첫 문단 앞에만 간격을 넣는다(12pt = 1200 HWPUNIT)."""
+    payload = export_hwpx.build_hwpx(TWO_COLUMN_DOC)
+    expected = round(export_layout.ITEM_GAP_PT / 72 * export_layout.HWPUNIT_PER_INCH)
+    assert _hwpx_space_before(payload)[-5:] == [expected, 0, 0, expected, 0]
+
+
+def test_hwpx_two_column_layout_adds_only_a_few_paragraph_formats() -> None:
+    """문단마다 서식을 찍지 않는다 — 자리(첫/중간/마지막)마다 한 벌만 만든다.
+
+    `apply_paragraph_format` 은 부를 때마다 새 `paraPr` 을 찍고 중복을 합치지
+    않으므로, 문단마다 부르면 434문항 문서의 `header.xml` 이 수천 개로 불어난다.
+    """
+    counts = [
+        _hwpx_part(export_hwpx.build_hwpx(doc), "Contents/header.xml").count(
+            "<hh:paraPr "
+        )
+        for doc in (ONE_COLUMN_DOC, TWO_COLUMN_DOC)
+    ]
+    assert counts[1] - counts[0] == 3, counts
+
+
+def test_two_column_image_is_capped_at_the_column_width(tmp_path: Path) -> None:
+    """2단 문서의 이미지 폭 상한은 본문 폭이 아니라 **단 폭**이다.
+
+    본문 폭(150mm)을 상한으로 두면 크롭이 옆 단과 오른쪽 여백을 통째로 덮는다.
+    1단(오답노트)은 지금까지처럼 본문 폭이 상한이다.
+    """
+    wide = tmp_path / "wide.png"
+    PilImage.new("RGB", (3000, 300), "white").save(wide)
+    blocks: list[export_model.Block] = [
+        export_model.Heading("1번", 2),
+        export_model.Image(wide),
+    ]
+
+    column_width_hwpunit = round(
+        export_layout.COLUMN_WIDTH_MM
+        / export_layout.MM_PER_INCH
+        * export_layout.HWPUNIT_PER_INCH
+    )
+    two_column = export_hwpx.build_hwpx(
+        export_model.ExportDoc(title="시험지", blocks=blocks, two_column=True)
+    )
+    assert _hwpx_image_widths(two_column) == [column_width_hwpunit]
+    one_column = export_hwpx.build_hwpx(
+        export_model.ExportDoc(title="오답노트", blocks=blocks)
+    )
+    assert _hwpx_image_widths(one_column) == [_hwpx_body_width(one_column)]
+
+    document = _docx_document_xml(
+        export_docx.build_docx(
+            export_model.ExportDoc(title="시험지", blocks=blocks, two_column=True)
+        )
+    )
+    extents = [int(cx) for cx in re.findall(r'<wp:extent cx="(\d+)"', document)]
+    assert extents, "그림이 들어가지 않았다"
+    # mm -> EMU 환산에서 1 EMU 안쪽 오차가 난다.
+    column_width_emu = Mm(export_layout.COLUMN_WIDTH_MM).emu
+    assert all(abs(cx - column_width_emu) <= 2 for cx in extents), extents
+
+
+def test_hwpx_footer_does_not_inherit_the_problem_keep_attributes() -> None:
+    """꼬리말은 문항의 keep 속성을 물려받지 않는다(2단 문서에서도 기본 서식).
+
+    hwpx 의 `add_paragraph` 는 앞 문단의 서식 참조를 물려받는다. 그래서 문항
+    서식을 꼬리말보다 먼저 걸면 꼬리말이 마지막 문항의 서식을 그대로 쓴다.
+    """
+    payload = export_hwpx.build_hwpx(
+        export_model.ExportDoc(
+            title="시험지",
+            blocks=TWO_COLUMN_BLOCKS,
+            footer="출처: 풍문고",
+            two_column=True,
+        )
+    )
+    assert "출처: 풍문고" in _section_text(payload)
+    footer = _hwpx_break_settings(payload)[-1]
+    assert footer == {**footer, "keepLines": "0", "keepWithNext": "0"}
