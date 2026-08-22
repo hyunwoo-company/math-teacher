@@ -13,6 +13,7 @@ import { ReextractButton } from '@/components/center/ReextractButton';
 import { EmptyState, ErrorState, InlineBadge, LoadingState } from '@/components/ui/Feedback';
 import { formatDate } from '@/lib/format';
 import { hasAnyTranscript } from '@/lib/transcript';
+import { printedLabel, printedLabelSuffix, problemChipText } from '@/lib/problem-label';
 import { nodePath } from '@/lib/tree';
 import { useWorkspace } from '@/store/workspace';
 
@@ -163,6 +164,10 @@ export function CenterPanel() {
             {problems.map((problem) => {
               const status = solutions[problem.no]?.status ?? 'empty';
               const checked = picked.has(problem.no);
+              // 지면 표기(`label`)는 **표시 전용**이다. 클릭·선택이 넘기는 값은
+              // 여전히 `problem.no` 다(선택이 깨지면 안 된다).
+              const printed = printedLabel(problem.no, problem.label);
+              const suffix = printedLabelSuffix(problem.no, problem.label);
               return (
                 <button
                   key={problem.no}
@@ -170,11 +175,11 @@ export function CenterPanel() {
                   {...(picking
                     ? {
                         'aria-pressed': checked,
-                        'aria-label': `${problem.no}번 선택/해제`,
+                        'aria-label': `${problem.no}번 선택/해제${suffix}`,
                       }
                     : {
                         'aria-current': selectedProblemNo === problem.no,
-                        'aria-label': `${problem.no}번 문제`,
+                        'aria-label': `${problem.no}번 문제${suffix}`,
                       })}
                   onClick={() => {
                     if (!picking) {
@@ -185,12 +190,18 @@ export function CenterPanel() {
                   }}
                   title={
                     picking
-                      ? `${problem.no}번 선택/해제`
-                      : `${problem.no}번 문제 (${problem.page}쪽) · 클릭하면 이 문제로 대화가 시작됩니다`
+                      ? `${problem.no}번 선택/해제${suffix}`
+                      : `${problem.no}번 문제${suffix} (${problem.page}쪽) · 클릭하면 이 문제로 대화가 시작됩니다`
                   }
                   className={clsx(
                     'h-6 shrink-0 rounded border text-[11px] tabular-nums',
-                    picking ? 'w-8' : 'w-7',
+                    // 지면 표기는 `기본 문제 1-1` 처럼 길다. 칩을 늘리되 상한을
+                    // 두고 말줄임한다(줄바꿈으로 번호 줄이 무너지지 않게).
+                    printed
+                      ? 'min-w-[1.75rem] max-w-[7rem] truncate px-1.5'
+                      : picking
+                        ? 'w-8'
+                        : 'w-7',
                     picking && checked
                       ? 'border-rose-500 bg-rose-500 text-white'
                       : !picking && selectedProblemNo === problem.no
@@ -202,7 +213,7 @@ export function CenterPanel() {
                             : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50',
                   )}
                 >
-                  {picking && checked ? '✓' : problem.no}
+                  {picking && checked ? '✓' : problemChipText(problem.no, problem.label)}
                 </button>
               );
             })}

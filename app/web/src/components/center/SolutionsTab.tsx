@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { MathText } from '@/components/MathText';
 import { plainPreview } from '@/lib/math-text';
+import { printedLabel } from '@/lib/problem-label';
 import { ProblemCrop } from '@/components/center/ProblemCrop';
 import { VariantPanel } from '@/components/center/VariantPanel';
 import { TranscriptPanel } from '@/components/center/TranscriptPanel';
@@ -647,10 +648,13 @@ function SolutionRow({
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">
               <span className="text-[13px] font-semibold text-slate-800">{problem.no}번</span>
-              {/* 구획마다 번호가 되돌아가는 교재는 문제지 표기가 따로 있다. */}
-              {problem.label && problem.label !== String(problem.no) ? (
+              {/*
+                구획마다 번호가 되돌아가는 교재는 문제지 표기가 따로 있다.
+                표기에 `번` 을 붙이지 않는다 — `기본 문제 1-1번` 이 되어 이상하다.
+              */}
+              {printedLabel(problem.no, problem.label) !== null ? (
                 <span className="text-[11px] text-amber-700">
-                  문제지 {problem.label}번
+                  문제지 표기: {printedLabel(problem.no, problem.label)}
                 </span>
               ) : null}
               <span className="text-[11px] text-slate-400">{problem.page}쪽</span>

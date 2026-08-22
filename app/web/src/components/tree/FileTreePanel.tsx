@@ -28,7 +28,7 @@ import {
   type ClickGuard,
 } from '@/lib/tree-drag';
 import { resolveDropTarget, resolveUploadTarget } from '@/lib/upload-target';
-import { UPLOAD_NOTICE } from '@/lib/upload-notice';
+import { UPLOAD_NOTICE, UPLOAD_SPLIT_NOTICE } from '@/lib/upload-notice';
 import { ContextMenu, type ContextMenuItem } from '@/components/tree/ContextMenu';
 import { MoveDialog } from '@/components/tree/MoveDialog';
 import { NODE_MIME, TreeRow, type DragState } from '@/components/tree/TreeRow';
@@ -855,7 +855,14 @@ export function FileTreePanel({ onCollapse }: { onCollapse?: () => void }) {
             <span className="text-slate-400"> (폴더를 클릭하면 그 안에 만듭니다)</span>
           ) : null}
         </p>
-        {isNote ? null : <p className="mt-1 text-[11px] text-amber-700">{UPLOAD_NOTICE}</p>}
+        {isNote ? null : (
+          <>
+            <p className="mt-1 text-[11px] text-amber-700">{UPLOAD_NOTICE}</p>
+            {/* 번호 리셋은 감지하지 않는다 — 나눠 올리는 것이 전제이므로 왜 그래야
+                하는지(놓칠 수 있다)까지 적는다. 규칙만 적으면 무시된다. */}
+            <p className="mt-1 text-[11px] text-amber-700">{UPLOAD_SPLIT_NOTICE}</p>
+          </>
+        )}
       </footer>
 
       <input
