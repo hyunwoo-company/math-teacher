@@ -1669,11 +1669,35 @@ def _docx_document_xml(payload: bytes) -> str:
         return archive.read("word/document.xml").decode("utf-8")
 
 
-def _docx_cols(payload: bytes) -> dict[str, str]:
-    """`sectPr/w:cols` 의 속성들. 단 설정이 없으면 기본값(`w:space` 만) 그대로다."""
-    found = re.search(r"<w:cols[^>]*/?>", _docx_document_xml(payload))
-    assert found is not None, "w:cols 가 없다"
-    return dict(re.findall(r'w:(\w+)="([^"]*)"', found.group(0)))
+def _docx_sect_prs(payload: bytes) -> list[str]:
+    """문서의 `sectPr` 조각들(구역 순서 그대로).
+
+    2단 문서는 전폭/2단이 갈리는 자리마다 연속 구역을 만들므로 여러 개가 나온다.
+    마지막 구역만 `w:body` 직속이고, 나머지는 그 구역 **마지막 문단**의 `w:pPr`
+    안에 있다(ECMA-376 의 정식 표현).
+    """
+    return re.findall(r"<w:sectPr\b.*?</w:sectPr>", _docx_document_xml(payload), re.S)
+
+
+def _docx_cols(payload: bytes) -> list[dict[str, str]]:
+    """구역마다의 `w:cols` 속성. `w:num` 이 없으면 1단이므로 `"1"` 로 채운다."""
+    cols: list[dict[str, str]] = []
+    for sect_pr in _docx_sect_prs(payload):
+        found = re.search(r"<w:cols[^>]*/?>", sect_pr)
+        assert found is not None, "w:cols 가 없다"
+        attributes = dict(re.findall(r'w:(\w+)="([^"]*)"', found.group(0)))
+        cols.append({"num": "1", **attributes})
+    return cols
+
+
+def _docx_section_paragraphs(payload: bytes) -> list[list[str]]:
+    """구역마다의 문단 텍스트. 구역 속성을 실은 문단이 그 구역의 마지막이다."""
+    sections: list[list[str]] = [[]]
+    for paragraph in re.findall(r"<w:p\b.*?</w:p>", _docx_document_xml(payload), re.S):
+        sections[-1].append("".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", paragraph)))
+        if "<w:sectPr" in paragraph:
+            sections.append([])
+    return sections
 
 
 def _docx_paragraph_props(payload: bytes) -> list[str]:
@@ -1782,7 +1806,8 @@ def test_exam_and_variant_docs_are_two_column_and_the_note_is_not(
 
 def test_docx_two_column_has_a_center_separator_and_a_gap() -> None:
     """docx 는 구역 속성(`w:cols`)으로 2단을 낸다. `w:sep="1"` 이 중앙 세로선이다."""
-    cols = _docx_cols(export_docx.build_docx(TWO_COLUMN_DOC))
+    # 제목은 전폭 구역(0)에 있고 본문이 2단 구역(1)이다.
+    cols = _docx_cols(export_docx.build_docx(TWO_COLUMN_DOC))[1]
     assert cols["num"] == "2"
     assert cols["sep"] == "1"
     # 단 간격은 `export.layout` 이 단일 소스다(8mm = 454 twip).
@@ -1790,10 +1815,13 @@ def test_docx_two_column_has_a_center_separator_and_a_gap() -> None:
 
 
 def test_docx_one_column_doc_has_no_column_settings() -> None:
-    """오답노트(1단)에는 단 수도 구분선도 붙지 않는다(템플릿 기본값 그대로)."""
+    """오답노트(1단)는 구역이 하나뿐이고 단 수도 구분선도 붙지 않는다."""
     cols = _docx_cols(export_docx.build_docx(ONE_COLUMN_DOC))
-    assert "num" not in cols
-    assert "sep" not in cols
+    assert len(cols) == 1, cols
+    assert "sep" not in cols[0]
+    # `w:num` 은 템플릿에 없다(= 1단). 헬퍼가 채운 기본값만 남는다.
+    assert cols[0]["num"] == "1"
+    assert "w:num" not in _docx_document_xml(export_docx.build_docx(ONE_COLUMN_DOC))
 
 
 def test_hwpx_two_column_has_a_center_separator_and_a_gap() -> None:
@@ -1959,3 +1987,209 @@ def test_hwpx_footer_does_not_inherit_the_problem_keep_attributes() -> None:
     assert "출처: 풍문고" in _section_text(payload)
     footer = _hwpx_break_settings(payload)[-1]
     assert footer == {**footer, "keepLines": "0", "keepWithNext": "0"}
+
+
+# --------------------------------- 전폭(단 걸치기): 제목·해설부 표제·고지·출처
+# 2단으로 짠 뒤 "제목이 세로선 기준 좌측 단에만 나온다" 는 보고를 고친 것이다.
+# 문서를 감싸는 것(제목·고지·출처)과 문서를 가르는 표제(`정답 및 해설`)는 좌우
+# 단을 걸쳐야 한다. 나머지(문항·해설 본문)만 2단이다.
+
+# 시험지 한 벌의 최소 형태 — 문항부 2문항 + 페이지 나눔 + 해설부 표제 + 해설 1문항.
+FULL_WIDTH_BLOCKS: list[export_model.Block] = [
+    export_model.Heading("1번", 2),
+    export_model.Text("문항 1"),
+    export_model.Heading("2번", 2),
+    export_model.Text("문항 2"),
+    export_model.PageBreak(),
+    export_model.Heading("정답 및 해설", 1),
+    export_model.Heading("1번", 2),
+    export_model.Text("해설 1"),
+]
+FULL_WIDTH_DOC = export_model.ExportDoc(
+    title="omega 5회",
+    blocks=FULL_WIDTH_BLOCKS,
+    notice="※ 고지",
+    footer="출처: 풍문고",
+    two_column=True,
+)
+# 같은 내용의 오답노트(1단). 2단 쪽만 달라졌는지 대조하는 데 쓴다.
+FULL_WIDTH_NOTE_DOC = export_model.ExportDoc(
+    title="omega 5회",
+    blocks=FULL_WIDTH_BLOCKS,
+    notice="※ 고지",
+    footer="출처: 풍문고",
+)
+# 지면 구성 순서: 전폭(제목·고지) / 2단(문항) / 전폭(표제) / 2단(해설) / 전폭(출처).
+FULL_WIDTH_COLUMN_ORDER = ["1", "2", "1", "2", "1"]
+
+
+def test_full_width_flags_marks_only_level_one_headings() -> None:
+    """전폭 판정은 "1수준 Heading" 하나로 끝난다. `PageBreak` 만 None 이다.
+
+    해설부 표제(`정답 및 해설`)가 1수준이고 문항은 2수준이라(`model.Heading` 의
+    계약) 새 필드 없이 수준만 읽으면 된다. `PageBreak` 는 내용이 없는 지시라
+    속할 단이 없다 — None 을 받은 렌더러는 지금 단 설정을 그대로 둔다.
+    """
+    blocks: list[export_model.Block] = [
+        export_model.Heading("1번", 2),
+        export_model.Image(Path("a.png")),
+        export_model.Heading("풀이", 3),
+        export_model.Text("본문"),
+        export_model.PageBreak(),
+        export_model.Heading("정답 및 해설", 1),
+        export_model.Heading("1번", 2),
+    ]
+    assert export_model.full_width_flags(blocks) == [
+        False,
+        False,
+        False,
+        False,
+        None,
+        True,
+        False,
+    ]
+
+
+def test_docx_puts_the_title_the_answer_heading_and_the_footer_in_full_width() -> None:
+    """docx 는 전폭/2단이 갈리는 자리마다 **연속 구역**을 만든다.
+
+    `w:cols` 는 구역 속성이라 문단 단위로 바꿀 수 없다. 그래서 구역이 다섯 개로
+    갈리고 단 수가 `1 / 2 / 1 / 2 / 1` 로 번갈아 든다. 어느 문단이 어느 구역에
+    있는지까지 못박아 둔다 — 제목만 전폭이고 표제가 단 안에 남으면 이 보고가
+    반만 고쳐진 것이다.
+    """
+    payload = export_docx.build_docx(FULL_WIDTH_DOC)
+    cols = _docx_cols(payload)
+    assert [col["num"] for col in cols] == FULL_WIDTH_COLUMN_ORDER
+    # 세로 구분선은 2단 구역에만 있다(1단 구역에 남으면 전폭 한가운데 선이 그어진다).
+    assert [("sep" in col) for col in cols] == [False, True, False, True, False]
+    # 페이지 나눔 문단(빈 문단)이 2단 구역의 마지막이다.
+    assert _docx_section_paragraphs(payload) == [
+        ["omega 5회", "※ 고지"],
+        ["1번", "문항 1", "2번", "문항 2", ""],
+        ["정답 및 해설"],
+        ["1번", "해설 1"],
+        ["출처: 풍문고"],
+    ]
+
+
+def test_docx_every_section_has_the_same_a4_page() -> None:
+    """**모든** 구역의 용지가 A4 이고 여백이 같다.
+
+    용지·여백도 단 수와 마찬가지로 구역 속성이다. 첫 구역에만 걸면 나머지가
+    python-docx 기본값(Letter)으로 남아 문서 중간에서 페이지 크기가 바뀐다.
+    """
+    payload = export_docx.build_docx(FULL_WIDTH_DOC)
+    sect_prs = _docx_sect_prs(payload)
+    assert len(sect_prs) == len(FULL_WIDTH_COLUMN_ORDER)
+    pages: set[tuple[str, str]] = set()
+    for sect_pr in sect_prs:
+        size = re.search(r"<w:pgSz[^>]*/>", sect_pr)
+        margin = re.search(r"<w:pgMar[^>]*/>", sect_pr)
+        assert size is not None and margin is not None, sect_pr
+        pages.add((size.group(0), margin.group(0)))
+    # 구역마다 같은 한 벌이어야 한다 — 하나라도 다르면 지면이 중간에 바뀐다.
+    assert len(pages) == 1, pages
+    # 그 한 벌이 A4(11906x16838 twip) + hwpx 여백인지는 1단 문서와 같은 기준이다.
+    page = _docx_sect_pr(payload)
+    assert abs(page["w"] - 11906) <= 2
+    assert abs(page["h"] - 16838) <= 2
+    assert abs(page["left"] - 1701) <= 2
+    assert abs(page["right"] - 1701) <= 2
+    assert abs(page["top"] - 1134) <= 2
+    assert abs(page["bottom"] - 850) <= 2
+
+
+def test_docx_section_breaks_are_continuous_and_add_no_paragraph() -> None:
+    """연속 구역 나누기가 빈 문단(= 빈 페이지 씨앗)을 만들지 않는다.
+
+    확인 방법이 둘이다. (1) 구역 나누기가 모두 `continuous` 다 — `nextPage` 가
+    하나라도 있으면 그 자리에서 지면이 끊긴다. (2) 문단 순서가 같은 내용의 1단
+    문서와 **완전히 같다** — `Document.add_section` 이 옛 구역 속성을 담으려고
+    새로 만드는 빈 문단을 `_split_section` 이 지우기 때문이다. 문단이 늘지
+    않으므로 지면이 밀려 빈 페이지가 생길 여지도 없다.
+    """
+    payload = export_docx.build_docx(FULL_WIDTH_DOC)
+    types = re.findall(r'<w:type w:val="(\w+)"/>', _docx_document_xml(payload))
+    # 첫 구역은 문서의 시작이라 `w:type` 이 없다. 나머지 넷이 연속 구역이다.
+    assert types == ["continuous"] * (len(FULL_WIDTH_COLUMN_ORDER) - 1)
+    sections = _docx_section_paragraphs(payload)
+    # 문단이 하나도 없는 구역이 있으면 워드가 그 자리에 빈 지면을 낸다.
+    assert all(sections), sections
+    note = _docx_section_paragraphs(export_docx.build_docx(FULL_WIDTH_NOTE_DOC))
+    assert [paragraph for section in sections for paragraph in section] == note[0]
+
+
+def test_docx_keeps_problems_together_in_both_column_sections() -> None:
+    """문항 쪼개짐 방지가 구역이 갈린 뒤(해설부 2단)에도 그대로 걸린다.
+
+    전폭/2단을 갈랐다고 `item_spans` 가 끊기면 해설부 문항이 단 사이에서
+    쪼개진다. 표제·고지·출처는 문항이 아니므로 아무 속성도 받지 않는다.
+    """
+    props = _docx_paragraph_props(export_docx.build_docx(FULL_WIDTH_DOC))
+    # 제목, 고지, [1번 2문단], [2번 2문단], 페이지 나눔, 표제, [1번 2문단], 출처.
+    assert len(props) == 11, props
+    keep_lines = [False, False, True, True, True, True, False, False, True, True, False]
+    keep_next = [False, False, True, False, True, False, False, False, True, False, False]
+    assert [("<w:keepLines/>" in prop) for prop in props] == keep_lines
+    assert [("<w:keepNext/>" in prop) for prop in props] == keep_next
+
+
+def test_docx_one_column_doc_has_a_single_section() -> None:
+    """오답노트(1단)는 구역이 하나다 — 구역 나누기도 단 설정도 붙지 않는다."""
+    payload = export_docx.build_docx(FULL_WIDTH_NOTE_DOC)
+    assert len(_docx_sect_prs(payload)) == 1
+    document = _docx_document_xml(payload)
+    assert "<w:type" not in document
+    assert "w:num" not in document
+    assert "w:sep" not in document
+
+
+def _hwpx_column_switches(payload: bytes) -> list[tuple[str, str]]:
+    """단 정의를 실은 문단마다 `(문단 텍스트, 단 수)`. 문단 순서 그대로다."""
+    switches: list[tuple[str, str]] = []
+    for paragraph in re.findall(r"<hp:p\b.*?</hp:p>", _section_text(payload), re.S):
+        count = re.search(r'<hp:colPr[^>]*colCount="(\d+)"', paragraph)
+        if count is None:
+            continue
+        text = "".join(re.findall(r"<hp:t>([^<]*)</hp:t>", paragraph))
+        switches.append((text, count.group(1)))
+    return switches
+
+
+def test_hwpx_switches_columns_at_the_title_the_heading_and_the_footer() -> None:
+    """hwpx 는 구역이 아니라 **문단 안 제어 문자**(`hp:colPr`)로 단을 바꾼다.
+
+    그래서 docx 처럼 구역을 가를 필요 없이 자리마다 정의를 하나씩 싣는다. 첫
+    항목은 새 문서 템플릿의 빈 문단(기본 1단)이라 우리가 넣은 것이 아니다.
+    """
+    payload = export_hwpx.build_hwpx(FULL_WIDTH_DOC)
+    assert _hwpx_column_switches(payload) == [
+        ("", "1"),
+        ("omega 5회", "1"),
+        ("1번", "2"),
+        ("정답 및 해설", "1"),
+        ("1번", "2"),
+        ("출처: 풍문고", "1"),
+    ]
+    # 세로 구분선은 2단 정의에만 붙는다(1단에는 그을 자리가 없다).
+    assert _section_text(payload).count("<hp:colLine") == 2
+
+
+def test_hwpx_one_column_doc_keeps_the_default_single_column() -> None:
+    """오답노트(1단)는 예전 그대로다 — 템플릿 기본 1단 정의 하나만 남는다."""
+    payload = export_hwpx.build_hwpx(FULL_WIDTH_NOTE_DOC)
+    assert _hwpx_column_switches(payload) == [("", "1")]
+    assert "<hp:colLine" not in _section_text(payload)
+
+
+def test_hwpx_keeps_problems_together_in_both_column_sections() -> None:
+    """hwpx 도 단을 갈아 끼운 뒤(해설부)에도 문항 keep 속성이 그대로 걸린다."""
+    settings = _hwpx_break_settings(export_hwpx.build_hwpx(FULL_WIDTH_DOC))
+    # 템플릿 빈 문단, 제목, 고지, [1번 2문단], [2번 2문단], 페이지 나눔,
+    # 표제, [1번 2문단], 출처.
+    assert len(settings) == 12, settings
+    keep_lines = ["0", "0", "0", "1", "1", "1", "1", "0", "0", "1", "1", "0"]
+    keep_next = ["0", "0", "0", "1", "0", "1", "0", "0", "0", "1", "0", "0"]
+    assert [setting["keepLines"] for setting in settings] == keep_lines
+    assert [setting["keepWithNext"] for setting in settings] == keep_next

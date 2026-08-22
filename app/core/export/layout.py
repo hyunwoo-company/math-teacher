@@ -40,8 +40,14 @@ BODY_WIDTH_MM: Final[int] = PAGE_WIDTH_MM - 2 * MARGIN_SIDE_MM
 #: HWPUNIT 환산 상수(1인치 = 7200 HWPUNIT). hwpx 의 단 간격·문단 여백이 이 단위다.
 HWPUNIT_PER_INCH: Final[int] = 7200
 
-#: 2단 조판의 단 수. 시험지·변형 문서는 **항상** 이 값이다(설정이 없다).
+#: 2단 조판의 단 수. 시험지·변형 문서의 **본문**(문항·해설)이 이 값이다.
 COLUMN_COUNT: Final[int] = 2
+
+#: 단을 걸치는 자리의 단 수. 제목·고지·해설부 표제·출처는 2단 문서에서도 좌우를
+#: 가로지르는 한 덩이라(`model.full_width_flags`) 그 자리에서만 1단으로 되돌린다.
+#: 상수로 두는 이유는 `1` 이 "단 수" 라는 것을 렌더러 두 곳에서 같이 읽게 하려는
+#: 것이다 — docx 는 구역의 `w:cols/@w:num`, hwpx 는 `hp:colPr/@colCount` 로 쓴다.
+FULL_WIDTH_COLUMN_COUNT: Final[int] = 1
 
 #: 단 사이 간격(8mm). 시험지 조판의 관례 범위(4~8mm)에서 가장 넓은 쪽을 골랐다 —
 #: 두 단 사이에 세로 구분선을 세우므로, 선이 양쪽 글자에 붙어 보이지 않으려면
@@ -67,6 +73,7 @@ __all__ = [
     "COLUMN_COUNT",
     "COLUMN_GAP_MM",
     "COLUMN_WIDTH_MM",
+    "FULL_WIDTH_COLUMN_COUNT",
     "HWPUNIT_PER_INCH",
     "ITEM_GAP_PT",
     "MARGIN_BOTTOM_MM",

@@ -21,9 +21,11 @@ from typing import Any, Final
 
 from docx import Document
 from docx.document import Document as DocxDocument
+from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_LINE_SPACING
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
+from docx.section import Section
 from docx.shared import Inches, Length, Mm, Pt, RGBColor
 from docx.text.paragraph import Paragraph
 from PIL import Image as PilImage
@@ -37,6 +39,7 @@ from export.model import (
     MathRun,
     Text,
     TextRun,
+    full_width_flags,
     item_spans,
 )
 from export.omml import UnsupportedLatexError, latex_to_omml
@@ -173,17 +176,20 @@ def _tighten(document: DocxDocument) -> None:
         _apply_font(style, _BODY_FONT, size)
 
 
-def _set_page(document: DocxDocument) -> None:
-    """용지를 A4 로, 여백을 hwpx 쪽 실측값에 맞춘다.
+def _set_page(section: Section) -> None:
+    """구역 하나의 용지를 A4 로, 여백을 hwpx 쪽 실측값에 맞춘다.
 
     python-docx 기본 `sectPr` 은 Letter(8.5x11in)라 한국에서 인쇄하면 여백이
     어긋난다. 같은 문서를 hwpx 로 뽑으면 A4 로 나가므로 두 형식이 애초에 다른
     용지였고, 페이지 수를 비교하는 것 자체가 성립하지 않았다.
 
+    **구역마다** 걸어야 한다. 용지·여백도 단 수와 마찬가지로 구역 속성
+    (`w:pgSz` / `w:pgMar`)이라, 2단 문서처럼 구역을 여러 개 만들면 첫 구역만
+    A4 이고 나머지는 Letter 로 남아 문서 **중간에서 페이지 크기가 바뀐다**.
+
     Args:
-        document: 방금 만든 빈 문서. 본문을 채우기 전에 부른다.
+        section: 방금 만든 구역. 그 구역에 본문을 채우기 전에 부른다.
     """
-    section = document.sections[0]
     section.page_width = Mm(layout.PAGE_WIDTH_MM)
     section.page_height = Mm(layout.PAGE_HEIGHT_MM)
     section.left_margin = Mm(layout.MARGIN_SIDE_MM)
@@ -192,28 +198,73 @@ def _set_page(document: DocxDocument) -> None:
     section.bottom_margin = Mm(layout.MARGIN_BOTTOM_MM)
 
 
-def _set_columns(document: DocxDocument) -> None:
-    """구역을 좌우 2단으로 만들고 단 사이에 세로 구분선을 세운다.
+def _set_columns(section: Section, count: int) -> None:
+    """구역의 단 수를 정한다(2단이면 단 사이에 세로 구분선을 세운다).
 
     워드는 단 설정을 구역 속성(`w:sectPr/w:cols`)으로 갖는다 — 문단마다 거는
     것이 아니라 구역 전체에 걸린다. python-docx 에 고수준 API 가 없어 요소를
     직접 만진다(기본 템플릿에는 `<w:cols w:space="720"/>` 가 이미 있다).
 
     `w:sep="1"` 이 **중앙 세로선**이고, `w:space` 는 단 사이 간격(twip)이다.
-    제목과 고지도 같은 구역에 있으므로 함께 2단 안에 들어간다(hwpx 렌더러와
-    같은 모양이 되도록 일부러 구역을 나누지 않는다).
+    1단으로 되돌릴 때는 `w:sep` 를 **지운다** — `_split_section` 이 앞 구역의
+    속성을 복제하므로, 지우지 않으면 전폭 구역 한가운데에 세로선만 남는다.
 
     Args:
-        document: 방금 만든 빈 문서.
+        section: 대상 구역.
+        count: 단 수. `layout.COLUMN_COUNT`(2단 본문) 또는
+            `layout.FULL_WIDTH_COLUMN_COUNT`(전폭)다.
     """
-    sect_pr = document.sections[0]._sectPr
+    sect_pr = section._sectPr
     cols = sect_pr.find(qn("w:cols"))
     if cols is None:
         cols = OxmlElement("w:cols")
         sect_pr.insert_element_before(cols, *_COLS_SUCCESSORS)
-    cols.set(qn("w:num"), str(layout.COLUMN_COUNT))
-    cols.set(qn("w:space"), str(Mm(layout.COLUMN_GAP_MM).twips))
-    cols.set(qn("w:sep"), "1")
+    cols.set(qn("w:num"), str(count))
+    if count > layout.FULL_WIDTH_COLUMN_COUNT:
+        cols.set(qn("w:space"), str(Mm(layout.COLUMN_GAP_MM).twips))
+        cols.set(qn("w:sep"), "1")
+    else:
+        cols.attrib.pop(qn("w:sep"), None)
+
+
+def _split_section(document: DocxDocument) -> Section:
+    """지금 구역을 **직전 문단에서** 닫고 새 연속 구역을 열어 돌려준다.
+
+    워드의 "단 걸치기" 는 실제로 **연속 구역 나누기**로 구현된다. `w:cols` 는
+    구역 속성이라 문단 단위로 바꿀 수 없으므로, 단 수를 바꿀 자리마다 구역을
+    가르는 것 말고는 방법이 없다.
+
+    `Document.add_section` 은 옛 구역 속성을 담은 **빈 문단**을 문서 끝에 새로
+    만든다. 그 문단은 본문에 없던 빈 줄로 보이고(구역 경계마다 하나씩 늘어난다)
+    hwpx 쪽과 문단 수도 어긋난다. 그래서 옛 구역 속성만 직전 문단의 `w:pPr` 로
+    옮기고 빈 문단은 버린다 — 구역의 **마지막 문단이 구역 속성을 갖는**
+    (`w:p/w:pPr/w:sectPr`) 것이 OOXML 의 정식 표현이라 이쪽이 워드에게도
+    자연스럽다. `python-docx` 자신도 `CT_P.set_sectPr` 로 그 자리를 쓴다.
+
+    빈 구역은 만들지 않는다(= 빈 페이지가 생기지 않는다). 부르는 쪽이 단 수가
+    **실제로 달라질 때만** 부르고, 이 함수는 직전 문단을 옛 구역의 끝으로 쓰기
+    때문에 모든 구역에 문단이 최소 하나 들어간다.
+
+    Args:
+        document: 대상 문서. 문단이 하나 이상 들어간 상태여야 한다.
+
+    Returns:
+        새로 열린(문서의 마지막) 구역. 용지·여백은 이미 걸어 두었다.
+    """
+    # `add_section` 은 반환형 주석이 없어(python-docx 1.2) 값이 Any 다. 변수에
+    # 타입을 달아 strict mypy 가 이 함수의 계약을 지키게 한다.
+    section: Section = document.add_section(WD_SECTION.CONTINUOUS)
+    _set_page(section)
+    paragraphs = document.paragraphs
+    if len(paragraphs) >= 2:
+        holder = paragraphs[-1]._p
+        closing = holder.xpath("./w:pPr/w:sectPr")
+        parent = holder.getparent()
+        if closing and parent is not None:
+            # lxml 은 이미 부모가 있는 요소를 넣으면 **옮긴다**(복사가 아니다).
+            paragraphs[-2]._p.set_sectPr(closing[0])
+            parent.remove(holder)
+    return section
 
 
 def _fit_width(path: Path, max_inches: float) -> Length:
@@ -376,9 +427,14 @@ def build_docx(doc: ExportDoc) -> bytes:
     `doc.notice` 가 있으면 제목 바로 아래(첫 페이지)에, `doc.footer` 는 문서 맨
     끝에 작은 회색 한 줄로 넣는다. 둘 다 없으면 예전과 똑같은 문서다.
 
-    `doc.two_column` 이면 구역을 좌우 2단(중앙 세로선)으로 세우고, 문항마다
+    `doc.two_column` 이면 본문을 좌우 2단(중앙 세로선)으로 세우고, 문항마다
     쪼개짐 방지와 문항 간 간격을 건다(`_set_columns` / `_apply_item_layout`).
-    1단 문서(오답노트)는 예전과 똑같이 나간다 — 문단 속성도 붙지 않는다.
+    이때 제목·고지·해설부 표제(`model.full_width_flags`)·출처는 **단을 걸쳐야**
+    하므로 그 자리마다 연속 구역을 갈라 1단으로 되돌린다(`_split_section`) —
+    워드는 단 수를 문단이 아니라 구역으로 갖기 때문이다. 구역 구성은
+    `전폭(제목·고지) / 2단(문항) / 전폭(정답 및 해설) / 2단(해설) / 전폭(출처)`
+    이 된다. 1단 문서(오답노트)는 예전과 똑같이 나간다 — 구역이 하나뿐이고
+    문단 속성도 붙지 않는다.
 
     Args:
         doc: 렌더할 문서.
@@ -387,22 +443,42 @@ def build_docx(doc: ExportDoc) -> bytes:
         `.docx` 파일 바이트(ZIP 컨테이너, 시그니처 ``PK``).
     """
     document = Document()
-    _set_page(document)
-    if doc.two_column:
-        _set_columns(document)
+    _set_page(document.sections[0])
     _tighten(document)
+    columns = layout.FULL_WIDTH_COLUMN_COUNT
+
+    def use(full_width: bool | None) -> None:
+        """다음에 넣을 것이 요구하는 단 수로 구역을 맞춘다(달라질 때만 가른다)."""
+        nonlocal columns
+        if full_width is None or not doc.two_column:
+            return
+        count = layout.FULL_WIDTH_COLUMN_COUNT if full_width else layout.COLUMN_COUNT
+        if count == columns:
+            return
+        _set_columns(_split_section(document), count)
+        columns = count
+
     max_image_inches = (
         _MAX_COLUMN_IMAGE_WIDTH_INCHES if doc.two_column else _MAX_IMAGE_WIDTH_INCHES
     )
+    if doc.two_column:
+        # 제목·고지가 들어가는 첫 구역. 2단 문서에서도 여기는 전폭이라는 것을
+        # XML 에 못박아 둔다(생략하면 템플릿 기본값에 의존하게 된다).
+        _set_columns(document.sections[0], layout.FULL_WIDTH_COLUMN_COUNT)
     document.add_heading(doc.title, level=0)
     if doc.notice:
         # 고지는 **제목 바로 아래**(= 첫 페이지)다. 읽기 전에 보여야 의미가 있다.
         _add_aside(document, doc.notice)
     blocks = list(doc.blocks)
-    # 1단 문서는 문항 구간을 찾지 않는다 — 걸 속성이 없으므로 예전 경로 그대로다.
+    # 1단 문서는 문항 구간도 전폭 판정도 하지 않는다 — 걸 속성이 없으므로 예전
+    # 경로 그대로다.
     spans = item_spans(blocks) if doc.two_column else {}
+    full_width = full_width_flags(blocks) if doc.two_column else [None] * len(blocks)
     index = 0
     while index < len(blocks):
+        # 구역은 **넣기 전에** 맞춘다 — 문단을 만든 뒤에 가르면 그 문단이 앞
+        # 구역에 남는다(docx 는 구역 속성을 마지막 문단에 싣는다).
+        use(full_width[index])
         stop = spans.get(index)
         if stop is None:
             _add_block(document, blocks[index], max_image_inches=max_image_inches)
@@ -420,6 +496,8 @@ def build_docx(doc: ExportDoc) -> bytes:
         index = stop
     if doc.footer:
         # 출처는 문서 맨 끝 한 줄. 본문과 섞이지 않게 작은 회색 글씨로 낸다.
+        # 제목과 같이 문서를 감싸는 한 줄이라 2단 문서에서도 단을 걸친다.
+        use(True)
         _add_aside(document, doc.footer)
     buffer = io.BytesIO()
     document.save(buffer)

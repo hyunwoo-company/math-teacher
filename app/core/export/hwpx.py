@@ -35,6 +35,7 @@ from export.model import (
     MathRun,
     Text,
     TextRun,
+    full_width_flags,
     item_spans,
 )
 
@@ -173,23 +174,32 @@ def _add_block(
     return []
 
 
-def _set_columns(document: HwpxDocument, paragraph: HwpxOxmlParagraph) -> None:
-    """문서를 좌우 2단으로 만들고 단 사이에 세로 구분선을 세운다.
+def _set_columns(
+    document: HwpxDocument, paragraph: HwpxOxmlParagraph, count: int
+) -> None:
+    """그 문단부터 뒤로 단 수를 바꾼다(2단이면 단 사이에 세로 구분선을 세운다).
 
     한글은 단 설정을 구역 속성이 아니라 **문단 안의 제어 문자**
-    (`hp:ctrl/hp:colPr`)로 갖는다. 그래서 문서 첫 문단(제목)에 걸어 두면 그
-    뒤 전체가 2단이 된다. `separator_type` 이 중앙 세로선(`hp:colLine`)이다.
+    (`hp:ctrl/hp:colPr`)로 갖는다. 그래서 docx 처럼 구역을 가를 필요 없이,
+    단 수가 달라지는 문단마다 정의를 하나씩 실어 주면 된다 — 제목·해설부 표제·
+    출처 문단에는 1단, 본문이 다시 시작하는 문단에는 2단이다.
+
+    `separator_type` 이 중앙 세로선(`hp:colLine`)이다. 1단으로 되돌릴 때는
+    선을 지정하지 않는다 — 단이 하나면 그을 자리가 없다.
 
     Args:
         document: 대상 문서.
-        paragraph: 단 정의를 실을 문단(문서 첫 문단).
+        paragraph: 단 정의를 실을 문단(그 자리부터 새 단 설정이 걸린다).
+        count: 단 수. `layout.COLUMN_COUNT`(2단 본문) 또는
+            `layout.FULL_WIDTH_COLUMN_COUNT`(전폭)다.
     """
+    ruled = count > layout.FULL_WIDTH_COLUMN_COUNT
     document.page.set_columns(
-        layout.COLUMN_COUNT,
+        count,
         same_gap=_COLUMN_GAP_HWPUNIT,
-        separator_type=_COLUMN_SEPARATOR_TYPE,
-        separator_width=_COLUMN_SEPARATOR_WIDTH,
-        separator_color=_COLUMN_SEPARATOR_COLOR,
+        separator_type=_COLUMN_SEPARATOR_TYPE if ruled else None,
+        separator_width=_COLUMN_SEPARATOR_WIDTH if ruled else None,
+        separator_color=_COLUMN_SEPARATOR_COLOR if ruled else None,
         paragraph=paragraph,
     )
 
@@ -256,9 +266,12 @@ def build_hwpx(doc: ExportDoc) -> bytes:
     `doc.notice` 가 있으면 제목 바로 아래(첫 페이지)에, `doc.footer` 는 문서 맨
     끝에 넣는다. 이 모듈의 방침대로 서식은 지정하지 않고 기본 문단으로 낸다.
 
-    `doc.two_column` 이면 예외가 둘 생긴다 — 문서를 좌우 2단(중앙 세로선)으로
+    `doc.two_column` 이면 예외가 둘 생긴다 — 본문을 좌우 2단(중앙 세로선)으로
     세우고, 문항마다 쪼개짐 방지와 문항 간 간격을 건다(`_set_columns` /
-    `_apply_item_layout`). 1단 문서(오답노트)는 예전과 똑같이 나간다.
+    `_apply_item_layout`). 제목·고지·해설부 표제(`model.full_width_flags`)·
+    출처는 단을 걸쳐야 하므로 그 자리에서 1단으로 되돌린다. 그래서 단 정의는
+    `1(제목·고지) / 2(문항) / 1(정답 및 해설) / 2(해설) / 1(출처)` 순으로 실린다.
+    1단 문서(오답노트)는 예전과 똑같이 나간다.
 
     Args:
         doc: 렌더할 문서.
@@ -268,8 +281,27 @@ def build_hwpx(doc: ExportDoc) -> bytes:
     """
     document = HwpxDocument.new()
     title = document.add_paragraph(doc.title)
+    columns = layout.FULL_WIDTH_COLUMN_COUNT
     if doc.two_column:
-        _set_columns(document, title)
+        # 제목은 좌우를 걸치는 한 덩이다. 새 문서 기본값도 1단이지만, 2단 문서에서
+        # 여기가 전폭이라는 것을 XML 에 못박아 둔다.
+        _set_columns(document, title, layout.FULL_WIDTH_COLUMN_COUNT)
+
+    def use(full_width: bool | None, paragraphs: Sequence[HwpxOxmlParagraph]) -> None:
+        """방금 넣은 문단들이 요구하는 단 수를 첫 문단에 건다(달라질 때만).
+
+        단 정의를 실을 문단이 있어야 하므로 docx 와 달리 **넣은 뒤에** 부른다.
+        문단을 만들지 않는 블록(`PageBreak`)은 그래서 그냥 지나간다.
+        """
+        nonlocal columns
+        if full_width is None or not doc.two_column or not paragraphs:
+            return
+        count = layout.FULL_WIDTH_COLUMN_COUNT if full_width else layout.COLUMN_COUNT
+        if count == columns:
+            return
+        _set_columns(document, paragraphs[0], count)
+        columns = count
+
     max_image_mm = (
         _MAX_COLUMN_IMAGE_WIDTH_MM if doc.two_column else _MAX_IMAGE_WIDTH_MM
     )
@@ -277,29 +309,33 @@ def build_hwpx(doc: ExportDoc) -> bytes:
         # 고지는 **제목 바로 아래**(= 첫 페이지)다. 읽기 전에 보여야 의미가 있다.
         document.add_paragraph(doc.notice)
     blocks = list(doc.blocks)
-    # 1단 문서는 문항 구간을 찾지 않는다 — 걸 속성이 없으므로 예전 경로 그대로다.
+    # 1단 문서는 문항 구간도 전폭 판정도 하지 않는다 — 걸 속성이 없으므로 예전
+    # 경로 그대로다.
     spans = item_spans(blocks) if doc.two_column else {}
+    full_width = full_width_flags(blocks) if doc.two_column else [None] * len(blocks)
     items: list[list[HwpxOxmlParagraph]] = []
     index = 0
     while index < len(blocks):
         stop = spans.get(index)
         if stop is None:
-            _add_block(document, blocks[index], max_image_mm=max_image_mm)
+            use(
+                full_width[index],
+                _add_block(document, blocks[index], max_image_mm=max_image_mm),
+            )
             index += 1
             continue
-        items.append(
-            [
-                paragraph
-                for block in blocks[index:stop]
-                for paragraph in _add_block(
-                    document, block, max_image_mm=max_image_mm
-                )
-            ]
-        )
+        item = [
+            paragraph
+            for block in blocks[index:stop]
+            for paragraph in _add_block(document, block, max_image_mm=max_image_mm)
+        ]
+        items.append(item)
+        use(full_width[index], item)
         index = stop
     if doc.footer:
         # 출처 한 줄. 서식을 지정하지 않는 이 모듈의 방침대로 기본 문단으로 넣는다.
-        document.add_paragraph(doc.footer)
+        # 제목과 같이 문서를 감싸는 한 줄이라 2단 문서에서도 단을 걸친다.
+        use(True, [document.add_paragraph(doc.footer)])
     # 문단을 **다 만든 뒤에** 건다(`_apply_item_layout` docstring 의 두 이유).
     # 꼬리말보다 뒤에 두는 것도 그래서다 — `add_paragraph` 는 앞 문단의 서식을
     # 물려받으므로, 먼저 걸면 꼬리말이 마지막 문항의 keep 속성을 물려받는다.

@@ -11,9 +11,10 @@
 그래서 수식만은 LaTeX 원문(`MathRun.latex`)이 렌더러까지 살아서 간다. 조판에
 실패한 렌더러는 `MathRun.plain`(기존 유니코드 평문)으로 폴백한다.
 
-**조판 지시는 의미 단위로만 담는다.** `two_column`(2단 조판인가)과
-`item_spans`(문항의 시작·끝)까지가 이 모듈의 몫이고, 그것을 무슨 속성으로
-쓰는지(`w:keepNext` / `hh:breakSetting`)는 렌더러가 정한다.
+**조판 지시는 의미 단위로만 담는다.** `two_column`(2단 조판인가),
+`item_spans`(문항의 시작·끝), `full_width_flags`(단을 걸치는 블록)까지가 이
+모듈의 몫이고, 그것을 무슨 속성으로 쓰는지(`w:keepNext` / `hh:breakSetting`,
+연속 구역 나누기 / `hp:colPr`)는 렌더러가 정한다.
 """
 
 from __future__ import annotations
@@ -127,6 +128,11 @@ class ExportDoc:
 #: 문항을 여는 제목 수준. `Heading.level` 의 계약(2 = 문항)이 그대로 경계다.
 _ITEM_HEADING_LEVEL: Final[int] = 2
 
+#: **전폭**(단을 걸치는) 제목 수준. 문서를 문항부/해설부로 가르는 표제
+#: (`정답 및 해설`)가 이 수준이다(`build._with_answer_section`). 문항(2수준)보다
+#: 한 단 위라는 것이 이미 그 표제의 뜻이므로, 새 필드를 만들지 않고 수준을 읽는다.
+_FULL_WIDTH_HEADING_LEVEL: Final[int] = 1
+
 
 def item_spans(blocks: Sequence[Block]) -> dict[int, int]:
     """블록 목록에서 **문항 하나가 차지하는 구간**을 찾는다.
@@ -167,6 +173,36 @@ def item_spans(blocks: Sequence[Block]) -> dict[int, int]:
     return spans
 
 
+def full_width_flags(blocks: Sequence[Block]) -> list[bool | None]:
+    """블록마다 **전폭(단 걸치기)** 인지 표시한다.
+
+    2단 조판에서 제목·고지·출처는 좌우 단을 걸쳐야 한다(`ExportDoc` 필드라
+    렌더러가 바로 안다). 본문 블록 중에도 같은 것이 하나 있다 — 해설부 표제
+    `정답 및 해설` 이다. 문서를 문항부/해설부로 가르는 표제가 좌측 단에만 갇히면
+    문서를 가르는 구분으로 읽히지 않고 그 단의 소제목으로 읽힌다. 그것이
+    **1수준 `Heading`** 이고 문항은 2수준이므로(`Heading` docstring 의 계약),
+    규칙은 "1수준 Heading 은 전폭" 한 줄로 끝난다. 새 필드나 마커 블록을 만들지
+    않는 이유가 이것이다 — `build.py` 의 조립 결과가 한 글자도 바뀌지 않는다.
+
+    `PageBreak` 만 `None` 이다. 내용이 없는 지시(`여기서 지면을 끊어라`)라
+    속할 단이 없고, 여기서 구역을 갈면 문단 하나도 없는 빈 구역이 생긴다.
+    렌더러는 `None` 을 만나면 지금 단 설정을 그대로 둔다 — 그래서 실제 전환은
+    다음에 오는 내용 블록의 첫 문단에서 일어난다.
+
+    Args:
+        blocks: 문서 블록 목록.
+
+    Returns:
+        `blocks` 와 같은 길이의 목록. True = 전폭, False = 단 안, None = 그대로.
+    """
+    return [
+        None
+        if isinstance(block, PageBreak)
+        else (isinstance(block, Heading) and block.level == _FULL_WIDTH_HEADING_LEVEL)
+        for block in blocks
+    ]
+
+
 __all__ = [
     "Block",
     "ExportDoc",
@@ -177,5 +213,6 @@ __all__ = [
     "Run",
     "Text",
     "TextRun",
+    "full_width_flags",
     "item_spans",
 ]
