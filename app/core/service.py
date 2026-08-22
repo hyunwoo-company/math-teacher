@@ -31,6 +31,38 @@ _SECTION_LABELS: Final[dict[str, str]] = {
 }
 
 
+# --- 0문항 사유 --------------------------------------------------------------
+# 문항을 하나도 못 찾은 이유는 둘이고, 사용자가 해야 할 일이 서로 다르다.
+# 한 문구로 뭉개면 스캔본을 올린 사람이 [문제 다시 추출] 을 반복하게 된다
+# (다시 추출해도 결과가 같다 — 근거로 삼을 글자가 애초에 없다).
+_NO_ANCHOR_ERROR: Final[str] = (
+    "문제 번호 앵커를 찾지 못했습니다. "
+    "'1.' '2.' 형태의 문항 번호가 있는 시험지인지 확인하세요."
+)
+_SCANNED_PDF_ERROR: Final[str] = (
+    "글자 정보가 없는 스캔본(사진) PDF 입니다. 문항 번호를 읽을 수 없어 "
+    "0문항으로 등록했습니다. [문제 다시 추출] 을 눌러도 결과는 같습니다. "
+    "한글·워드에서 PDF 로 내보낸 파일(글자를 선택·복사할 수 있는 PDF)을 "
+    "올려 주세요."
+)
+
+
+def _no_problem_error(result: extractor.ExtractResult) -> str:
+    """문항 0개일 때의 사유 문구를 고른다.
+
+    스캔본 판정은 **백엔드에만** 둔다. 화면은 이 문장을 그대로 보여주기만 하므로
+    판정 기준이 두 곳으로 갈라지지 않는다.
+
+    Args:
+        result: 추출 결과(문항 0개).
+
+    Returns:
+        사용자에게 보여줄 한국어 사유.
+    """
+    if extractor.looks_scanned(result.text_chars, result.page_count):
+        return _SCANNED_PDF_ERROR
+    return _NO_ANCHOR_ERROR
+
 # ------------------------------------------------------------------ 공통
 def _clean_name(name: str) -> str:
     cleaned = name.strip()
@@ -291,10 +323,7 @@ def register_pdf(
         pua_ratio = result.pua_ratio
         problem_rows = _write_crops(node_id, result)
         if not problem_rows:
-            extract_error = (
-                "문제 번호 앵커를 찾지 못했습니다. "
-                "'1.' '2.' 형태의 문항 번호가 있는 시험지인지 확인하세요."
-            )
+            extract_error = _no_problem_error(result)
 
     with storage.transaction() as conn:
         storage.upsert_file(
@@ -305,6 +334,8 @@ def register_pdf(
             mode=mode,
             pua_ratio=pua_ratio,
             problem_count=len(problem_rows),
+            # 성공이면 None → 옛 사유가 남지 않는다(재추출로 해결된 경우).
+            extract_error=extract_error,
         )
         storage.replace_problems(conn, node_id, problem_rows)
         node = storage.get_node(conn, node_id)
@@ -365,10 +396,7 @@ def reextract_pdf(node_id: str) -> tuple[dict[str, Any], str | None, int]:
         _clear_crops(node_id)
         problem_rows = _write_crops(node_id, result)
         if not problem_rows:
-            extract_error = (
-                "문제 번호 앵커를 찾지 못했습니다. "
-                "'1.' '2.' 형태의 문항 번호가 있는 시험지인지 확인하세요."
-            )
+            extract_error = _no_problem_error(result)
 
     with storage.transaction() as conn:
         deleted_solutions = storage.delete_solutions(conn, node_id)
@@ -381,6 +409,8 @@ def reextract_pdf(node_id: str) -> tuple[dict[str, Any], str | None, int]:
             mode=mode,
             pua_ratio=pua_ratio,
             problem_count=len(problem_rows),
+            # 성공이면 None → 옛 사유가 남지 않는다(재추출로 해결된 경우).
+            extract_error=extract_error,
         )
         storage.replace_problems(conn, node_id, problem_rows)
 
@@ -426,13 +456,21 @@ def _write_crops(
 
 # ------------------------------------------------------------------ 조회
 def file_detail(node_id: str) -> dict[str, Any]:
-    """`GET /api/files/{id}` 용 상세."""
+    """`GET /api/files/{id}` 용 상세.
+
+    `extract_error` 는 **마지막 추출**의 실패/0문항 사유다(성공이면 None). 화면이
+    0문항 안내를 고정 문구가 아니라 실제 사유로 그릴 수 있도록 여기서 내려보낸다.
+    판정은 이미 백엔드에서 끝났고(`_no_problem_error`), 값은 완성된 한국어
+    문장이다. 마이그레이션 이전 업로드분은 백필하지 않았으므로 None 일 수 있다.
+    """
     with storage.transaction() as conn:
         node = require_file_node(conn, node_id)
+        file_row = storage.get_file(conn, node_id)
         problems = storage.list_problems(conn, node_id)
         solved = storage.solved_numbers(conn, node_id)
     return {
         "node": node,
+        "extract_error": (file_row or {}).get("extract_error"),
         "problems": [
             {
                 "no": problem["no"],

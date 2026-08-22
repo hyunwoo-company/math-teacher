@@ -32,8 +32,9 @@ SECTION_NOTE: Final[str] = "note"
 # 3 = jobs(작업 큐), 4 = variants(변형 저장), 5 = problems.label(원문 번호 표기),
 # 6 = problems.transcript / transcript_source / transcript_note (문항 텍스트화),
 # 7 = note_items.transcript / transcript_source (판독본 스냅샷),
-# 8 = problem_types / bank_problems / problem_tags (공용 문항 코퍼스).
-SCHEMA_VERSION: Final[int] = 8
+# 8 = problem_types / bank_problems / problem_tags (공용 문항 코퍼스),
+# 9 = files.extract_error (추출 실패/0문항 사유를 화면에서도 볼 수 있게).
+SCHEMA_VERSION: Final[int] = 9
 
 # `problems.transcript_source` 값. 출처마다 신뢰도가 다르므로 반드시 남긴다.
 #   pua    = PDF 텍스트 레이어 디코딩(AI 호출 0회, 결정적)
@@ -84,7 +85,11 @@ CREATE TABLE IF NOT EXISTS files (
     pages INTEGER NOT NULL,
     mode TEXT NOT NULL,
     pua_ratio REAL NOT NULL,
-    problem_count INTEGER NOT NULL
+    problem_count INTEGER NOT NULL,
+    -- 마지막 추출에서 실패했거나 문항이 0개였던 사유(한국어 완성 문장).
+    -- 성공하면 NULL 로 비운다. 업로드·재추출 응답에만 실려 토스트로 사라지던
+    -- 것을 화면(0문항 안내)에서도 쓰기 위해 저장한다.
+    extract_error TEXT NULL
 );
 
 CREATE TABLE IF NOT EXISTS problems (
@@ -342,6 +347,12 @@ def migrate(conn: sqlite3.Connection) -> None:
         for column in ("transcript", "transcript_source", "transcript_note"):
             if column not in problem_columns:
                 conn.execute(f"ALTER TABLE problems ADD COLUMN {column} TEXT NULL")
+
+    file_columns = table_columns(conn, "files")
+    if file_columns and "extract_error" not in file_columns:
+        # 백필하지 않는다 — 과거 업로드가 왜 0문항이었는지는 지금 알 수 없다.
+        # NULL 이 "사유를 모른다" 는 사실이고, 재추출하면 그때 채워진다.
+        conn.execute("ALTER TABLE files ADD COLUMN extract_error TEXT NULL")
 
     note_item_columns = table_columns(conn, "note_items")
     if note_item_columns:
@@ -630,20 +641,36 @@ def upsert_file(
     mode: str,
     pua_ratio: float,
     problem_count: int,
+    extract_error: str | None = None,
 ) -> None:
-    """파일 메타를 넣거나 갱신한다."""
+    """파일 메타를 넣거나 갱신한다.
+
+    `extract_error` 는 **매번 덮어쓴다**. 기본값 None 은 "이번 추출은 성공" 을
+    뜻하므로, 재추출로 해결된 파일에 옛 사유가 남지 않는다.
+    """
     conn.execute(
         """
-        INSERT INTO files (node_id, stored_path, pages, mode, pua_ratio, problem_count)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO files
+            (node_id, stored_path, pages, mode, pua_ratio, problem_count,
+             extract_error)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(node_id) DO UPDATE SET
             stored_path = excluded.stored_path,
             pages = excluded.pages,
             mode = excluded.mode,
             pua_ratio = excluded.pua_ratio,
-            problem_count = excluded.problem_count
+            problem_count = excluded.problem_count,
+            extract_error = excluded.extract_error
         """,
-        (node_id, stored_path, pages, mode, pua_ratio, problem_count),
+        (
+            node_id,
+            stored_path,
+            pages,
+            mode,
+            pua_ratio,
+            problem_count,
+            extract_error,
+        ),
     )
 
 

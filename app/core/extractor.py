@@ -27,7 +27,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, NamedTuple
 
 import fitz
 from PIL import Image
@@ -97,6 +97,10 @@ PUA_START: Final[int] = 0xE000
 PUA_END: Final[int] = 0xF8FF
 
 DEFAULT_PUA_THRESHOLD: Final[float] = 0.02
+
+# 스캔본(사진) 판정 임계: 페이지당 이 글자 수 미만이면 텍스트 레이어가 없는
+# 것으로 본다(`looks_scanned`). 근거는 docs/scanned-pdf-extraction.md 3-1 절.
+SCANNED_MAX_CHARS_PER_PAGE: Final[int] = 50
 DEFAULT_DPI: Final[int] = 150
 DEFAULT_MAX_EDGE_PX: Final[int] = 1568  # Anthropic 이미지 장변 상한
 
@@ -130,9 +134,29 @@ _BODY_X0_CLUSTER_TOL: Final[float] = 1.0
 # 값 5 의 근거(실측): 정상 칼럼의 정렬선 표본은 10~25개로 넉넉하고, 버려야 하는
 # 오염 칼럼의 최대 표본은 3개였다. 양쪽에서 2 이상 떨어진 5 를 고른다.
 # a.pdf 로 4~6 모두 68개 전부 통과, 8 부터 누락이 생긴다(실측 스윕).
-# 표본이 부족하면 정렬선을 포기하고 기존 절대 기준만 쓴다 — 근거 없는 기준으로
-# 통과시키느니 못 잡는 편이 낫다.
 _BODY_X0_MIN_SAMPLES: Final[int] = 5
+
+# --- 문서 전역 정렬선(페이지 표본이 부족할 때의 폴백) -------------------------
+# 페이지 표본이 `_BODY_X0_MIN_SAMPLES` 를 못 채우면 그 페이지는 정렬선이 없어
+# 절대 기준만 남는다. 절대 기준이 애초에 못 쓰는 문서(위 a.pdf 형태)에서는 그
+# 페이지의 앵커가 통째로 탈락한다.
+#
+# 실측(`69-134 고1 2학기 오리진1 한글.pdf`, 65쪽, 66문항 중 61개만 잡힘):
+# 누락 5개(81·82·84·87·90번, p12·13·15·18·21)는 전부 이 경로였다.
+#   * content_rect.x0 = 23.8 인데 본문 글자는 x0 = 85.0 → 차이 61.2pt
+#     > DEFAULT_ANCHOR_INDENT_TOL(30.0) 이라 절대 기준 탈락.
+#   * 그 페이지들은 문항이 1개뿐이라 left 칼럼 x0=85.0 표본이 **4개** — 정상
+#     페이지(p1·p3 는 6개, p2 는 5개)와 달리 최소 표본 5 를 하나 못 채워
+#     페이지 정렬선이 `None` → 2차 기준도 못 씀.
+#
+# `_BODY_X0_MIN_SAMPLES` 를 낮추는 것으로 풀지 않는다. 위 주석의 근거대로 버려야
+# 하는 오염 칼럼의 최대 표본이 3개라, 5 아래로 내리면 그 오염을 정렬선으로
+# 인정하게 된다. 대신 **문서 전체**에서 같은 조건으로 모은 표본으로 정렬선을 한
+# 번 더 구해 폴백한다. 같은 교재는 조판이 일정해 전역 표본이 깔끔하고
+# (실측: left = 85.0339, right = 299.6114), 표본이 많아 오염에도 강하다.
+#
+# 폴백은 **페이지 정렬선이 없을 때만** 쓴다(있으면 그 페이지 값이 우선). 판정이
+# `_is_anchor_indent_ok` 의 OR 이므로 이 폴백으로 기존 앵커가 빠지는 일은 없다.
 
 # --- 유형 문제집 폴백 (additive) ---------------------------------------------
 # 유형 문제집은 문제 번호가 "1." 이 아니라 "001" "002" 처럼 3자리 zero-padded 로,
@@ -227,6 +251,10 @@ class ExtractResult:
     pua_threshold: float
     mode: Mode
     dpi: int
+    #: 페이지 텍스트의 총 글자 수(공백 제외 앞뒤 트림 기준). 스캔본 판정용
+    #: (`looks_scanned`). `pua_ratio` 로는 스캔본을 알 수 없다 — 분모가 0이면
+    #: 0.0 이 나와 `mode` 가 'text' 로 떨어지기 때문이다.
+    text_chars: int = 0
     problems: list[Problem] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -236,6 +264,7 @@ class ExtractResult:
             "pua_threshold": self.pua_threshold,
             "mode": self.mode,
             "dpi": self.dpi,
+            "text_chars": self.text_chars,
             "problem_count": len(self.problems),
             "problems": [p.to_dict() for p in self.problems],
         }
@@ -243,6 +272,30 @@ class ExtractResult:
 
 class ExtractionError(RuntimeError):
     """PDF 파싱/분할 실패."""
+
+
+def looks_scanned(text_chars: int, page_count: int) -> bool:
+    """텍스트 레이어가 사실상 없는 스캔본(사진)인지 판정한다.
+
+    `pua_ratio` 로는 이것을 알 수 없다. 글자가 0자면 분모가 0이라 비율이 0.0 이
+    되고 `mode` 가 'text' 로 떨어져, "텍스트 추출 성공" 과 "판정 불가" 가
+    구분되지 않는다.
+
+    임계는 `docs/scanned-pdf-extraction.md` 3-1 절의 제안(페이지당 50자 미만)을
+    그대로 쓴다. 실측한 스캔본 두 건(`풍문고 부교재.pdf` 54쪽,
+    `2027 강대X 시즌2 6회 문제.pdf` 20쪽)은 **총 0자**라 어떤 값으로도 걸린다.
+    반대쪽(정상 시험지)은 페이지당 수백~수천 자라 여유가 크다.
+
+    Args:
+        text_chars: 페이지 텍스트 총 글자 수(`ExtractResult.text_chars`).
+        page_count: 페이지 수.
+
+    Returns:
+        스캔본으로 보이면 True. 페이지가 0장이면 판정하지 않는다(False).
+    """
+    if page_count <= 0:
+        return False
+    return text_chars < SCANNED_MAX_CHARS_PER_PAGE * page_count
 
 
 def pua_ratio(text: str) -> float:
@@ -372,14 +425,19 @@ def _leftmost_supported_x0(values: Sequence[float]) -> float | None:
     return None
 
 
-def _column_body_x0(
+def _body_x0_buckets(
     lines: Sequence[TextLine], content: fitz.Rect, page: fitz.Page
-) -> dict[Column, float | None]:
-    """페이지의 칼럼별 본문 정렬선(실제로 글자가 시작하는 x)을 잰다.
+) -> dict[Column, list[float]]:
+    """정렬선 표본(칼럼별 본문 줄의 x0)을 모은다.
 
-    앵커 판정과 **같은 조건**(머리말·꼬리말 제외, 칼럼 범위 안)으로 거른 줄만
-    쓴다. 머리말·꼬리말은 칼럼과 무관하게 페이지 폭에 걸쳐 있어 정렬선을 실제보다
-    왼쪽으로 끌어내리기 때문이다.
+    머리말·꼬리말과 칼럼 밖 줄을 뺀다. 머리말·꼬리말은 칼럼과 무관하게 페이지
+    폭에 걸쳐 있어 정렬선을 실제보다 왼쪽으로 끌어내리기 때문이다.
+
+    머리말·꼬리말 판정은 줄의 **상단/하단**(`y0`/`y1`)으로 한다. 앵커 판정
+    (`find_anchors`)은 같은 일을 줄 **중심**으로 하므로 조건이 일부러 다르다 —
+    정렬선은 "본문 글자가 어디서 시작하나(x)" 를 재는 것이라 수식 때문에 키가
+    커진 줄을 표본에 넣을 이유가 없고, 앵커 판정은 "그 줄이 본문인가" 를 가리는
+    것이라 키 큰 줄을 살려야 한다. 검증한 조합이 이것이므로 임의로 맞추지 말 것.
 
     Args:
         lines: 페이지의 텍스트 줄.
@@ -387,7 +445,7 @@ def _column_body_x0(
         page: 칼럼 판정용 페이지.
 
     Returns:
-        칼럼별 정렬선 x0. 표본이 부족한 칼럼은 `None`.
+        칼럼별 x0 표본 목록.
     """
     buckets: dict[Column, list[float]] = {"left": [], "right": []}
     for line in lines:
@@ -399,10 +457,31 @@ def _column_body_x0(
         if not (col_x0 - 1.0 <= x0 <= col_x1):
             continue
         buckets[column].append(x0)
+    return buckets
+
+
+def _resolve_body_x0(buckets: dict[Column, list[float]]) -> dict[Column, float | None]:
+    """칼럼별 x0 표본에서 정렬선을 확정한다(표본 부족이면 `None`)."""
     return {
         "left": _leftmost_supported_x0(buckets["left"]),
         "right": _leftmost_supported_x0(buckets["right"]),
     }
+
+
+def _column_body_x0(
+    lines: Sequence[TextLine], content: fitz.Rect, page: fitz.Page
+) -> dict[Column, float | None]:
+    """페이지의 칼럼별 본문 정렬선(실제로 글자가 시작하는 x)을 잰다.
+
+    Args:
+        lines: 페이지의 텍스트 줄.
+        content: 머리말/꼬리말을 뺀 본문 영역.
+        page: 칼럼 판정용 페이지.
+
+    Returns:
+        칼럼별 정렬선 x0. 표본이 부족한 칼럼은 `None`.
+    """
+    return _resolve_body_x0(_body_x0_buckets(lines, content, page))
 
 
 def _is_anchor_indent_ok(
@@ -581,6 +660,107 @@ def _jeongseok_anchor_chain(candidates: Sequence[tuple[Anchor, str]]) -> list[An
     return kept
 
 
+def _is_inside_content(y0: float, y1: float, content: fitz.Rect) -> bool:
+    """그 줄이 본문 영역 안인지(머리말·꼬리말이 아닌지) 판정한다.
+
+    **줄 중심**으로 잰다. 상단/하단으로 재면 수식 때문에 키가 커진 줄이 머리말로
+    오판된다. 실측(`오리진1.pdf` p61, 434문항 중 61번 누락): 문항 첫 줄에 큰
+    수식이 있어 bbox 가 위로 17.9pt 늘어 y0=51.9 < content.y0=62.2 로 탈락했다.
+    같은 문서의 앞뒤 페이지(p60·p62)는 줄 높이가 11.7pt 로 y0=71.x 였다.
+    중심(66.7)으로 재면 통과한다.
+
+    진짜 머리말·꼬리말은 줄 전체가 본문 영역 밖에 있어 중심도 밖이므로 그대로
+    걸러진다 — 이것이 이 판정의 안전선이다.
+    """
+    mid = (y0 + y1) / 2.0
+    # fitz.Rect 의 좌표는 타입이 Any 라 bool() 로 좁힌다(mypy strict).
+    return bool(content.y0 <= mid <= content.y1)
+
+
+class _AnchorCandidate(NamedTuple):
+    """들여쓰기 판정 **전**의 앵커 후보.
+
+    들여쓰기는 문서 전역 정렬선(모든 페이지를 훑어야 알 수 있다)에 폴백하므로
+    페이지 루프 안에서 확정할 수 없다. 판정에 필요한 값을 후보에 실어 두고
+    루프가 끝난 뒤 한 번에 거른다(페이지를 두 번 읽지 않기 위해서다 — 403쪽
+    문서가 있다).
+    """
+
+    anchor: Anchor
+    series: str
+    #: 그 페이지·칼럼의 왼쪽 경계(`content_rect` 기반 절대 기준).
+    col_x0: float
+    #: 그 페이지·칼럼의 본문 정렬선. 표본 부족이면 `None` → 전역 정렬선으로 폴백.
+    page_body_x0: float | None
+
+
+def _scan_anchor_candidates(
+    doc: fitz.Document,
+) -> tuple[list[_AnchorCandidate], dict[Column, float | None]]:
+    """페이지를 한 번 훑어 앵커 후보와 **문서 전역 정렬선**을 함께 구한다.
+
+    들여쓰기 판정만 남겨 둔 후보를 읽는 순서로 돌려준다. 전역 정렬선은 페이지별
+    버킷과 완전히 같은 조건(`_body_x0_buckets`)으로 모은 표본을 문서 단위로
+    합쳐 `_leftmost_supported_x0` 를 한 번 적용한 것이다.
+
+    Args:
+        doc: 열려 있는 PDF 문서.
+
+    Returns:
+        (앵커 후보 목록, 칼럼별 문서 전역 정렬선).
+    """
+    raw: list[_AnchorCandidate] = []
+    doc_buckets: dict[Column, list[float]] = {"left": [], "right": []}
+    for page_no in range(doc.page_count):
+        page = doc[page_no]
+        content = content_rect(page)
+        lines = _page_lines(page)
+        # 들여쓰기 판정의 두 번째 기준. 페이지마다 한 번만 잰다.
+        page_buckets = _body_x0_buckets(lines, content, page)
+        doc_buckets["left"].extend(page_buckets["left"])
+        doc_buckets["right"].extend(page_buckets["right"])
+        body_x0 = _resolve_body_x0(page_buckets)
+        page_candidates: list[_AnchorCandidate] = []
+        for line in lines:
+            parsed = _parse_anchor_line(line.text)
+            if parsed is None:
+                continue
+            no, series, label = parsed
+            x0, y0, _, y1 = line.bbox
+            # 머리말/꼬리말 제외 (줄 중심 기준 — `_is_inside_content` 참고)
+            if not _is_inside_content(y0, y1, content):
+                continue
+            column = _classify_column(x0, page)
+            col_x0, col_x1 = column_bounds(content, column)
+            # 칼럼 밖인 줄은 앵커가 아니다(들여쓰기는 전역 정렬선까지 모은 뒤 본다)
+            if not (col_x0 - 1.0 <= x0 <= col_x1):
+                continue
+            page_candidates.append(
+                _AnchorCandidate(
+                    anchor=Anchor(
+                        no=no,
+                        page=page_no,
+                        column=column,
+                        x0=x0,
+                        y0=y0,
+                        label=label,
+                    ),
+                    series=series,
+                    col_x0=col_x0,
+                    page_body_x0=body_x0[column],
+                )
+            )
+        page_candidates.sort(
+            key=lambda item: (
+                0 if item.anchor.column == "left" else 1,
+                item.anchor.y0,
+                item.anchor.x0,
+            )
+        )
+        raw.extend(page_candidates)
+    return raw, _resolve_body_x0(doc_buckets)
+
+
 def find_anchors(
     doc: fitz.Document, *, indent_tol: float = DEFAULT_ANCHOR_INDENT_TOL
 ) -> list[Anchor]:
@@ -594,52 +774,23 @@ def find_anchors(
     후보가 몇 개 잡히는데, 그 사슬은 정석 사슬보다 훨씬 짧아 밀린다. 반대로 정석
     표기가 없는 문서는 정석 후보가 0개라 항상 기존 경로가 그대로 선택된다
     (동수일 때도 검증된 기존 경로를 고른다).
+
+    들여쓰기 판정은 페이지를 한 번 훑어 후보와 전역 정렬선 표본을 함께 모은 뒤
+    마지막에 적용한다(`_AnchorCandidate` 참고).
     """
-    candidates: list[tuple[Anchor, str]] = []
-    for page_no in range(doc.page_count):
-        page = doc[page_no]
-        content = content_rect(page)
-        lines = _page_lines(page)
-        # 들여쓰기 판정의 두 번째 기준. 페이지마다 한 번만 잰다.
-        body_x0 = _column_body_x0(lines, content, page)
-        page_candidates: list[tuple[Anchor, str]] = []
-        for line in lines:
-            parsed = _parse_anchor_line(line.text)
-            if parsed is None:
-                continue
-            no, series, label = parsed
-            x0, y0, _, y1 = line.bbox
-            # 머리말/꼬리말 제외
-            if y0 < content.y0 or y1 > content.y1:
-                continue
-            column = _classify_column(x0, page)
-            col_x0, col_x1 = column_bounds(content, column)
-            # 칼럼 밖이거나 지나치게 들여쓰기된 줄은 앵커가 아니다
-            if not (col_x0 - 1.0 <= x0 <= col_x1):
-                continue
-            if not _is_anchor_indent_ok(x0, col_x0, body_x0[column], indent_tol):
-                continue
-            page_candidates.append(
-                (
-                    Anchor(
-                        no=no,
-                        page=page_no,
-                        column=column,
-                        x0=x0,
-                        y0=y0,
-                        label=label,
-                    ),
-                    series,
-                )
-            )
-        page_candidates.sort(
-            key=lambda item: (
-                0 if item[0].column == "left" else 1,
-                item[0].y0,
-                item[0].x0,
-            )
+    raw, doc_body_x0 = _scan_anchor_candidates(doc)
+    candidates: list[tuple[Anchor, str]] = [
+        (item.anchor, item.series)
+        for item in raw
+        if _is_anchor_indent_ok(
+            item.anchor.x0,
+            item.col_x0,
+            item.page_body_x0
+            if item.page_body_x0 is not None
+            else doc_body_x0[item.anchor.column],
+            indent_tol,
         )
-        candidates.extend(page_candidates)
+    ]
 
     plain = _plain_anchor_chain(candidates)
     jeongseok = _jeongseok_anchor_chain(candidates)
@@ -869,6 +1020,7 @@ def extract_problems(
     try:
         page_texts = [doc[i].get_text("text") for i in range(doc.page_count)]
         ratio = pua_ratio("".join(page_texts))
+        text_chars = sum(len(text.strip()) for text in page_texts)
         resolved_mode: Mode = (
             ("image" if ratio >= pua_threshold else "text") if mode == "auto" else mode
         )
@@ -944,6 +1096,7 @@ def extract_problems(
             pua_threshold=pua_threshold,
             mode=resolved_mode,
             dpi=dpi,
+            text_chars=text_chars,
             problems=problems,
         )
     finally:

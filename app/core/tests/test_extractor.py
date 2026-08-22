@@ -920,3 +920,256 @@ def test_anchors_survive_when_content_rect_is_far_left_of_text() -> None:
 
     result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
     assert [problem.no for problem in result.problems] == [1, 2, 3, 4, 5, 6]
+
+
+# --- 페이지 표본 부족 → 문서 전역 정렬선 폴백 --------------------------------
+# 실측(`69-134 고1 2학기 오리진1 한글.pdf`): 66문항 중 5개(81·82·84·87·90번)가
+# 누락됐다. content_rect.x0=23.8 대 본문 x0=85.0 으로 절대 기준이 61.2pt 벌어져
+# 탈락하고, 그 페이지들은 문항이 1개뿐이라 정렬선 표본이 4개(정상 페이지는 5~6)로
+# `_BODY_X0_MIN_SAMPLES`(5)를 하나 못 채워 페이지 정렬선도 없었다.
+# `_BODY_X0_MIN_SAMPLES` 를 낮추는 대신 문서 전역 표본으로 폴백한다.
+
+
+def _build_sparse_sample_page_pdf() -> bytes:
+    """정렬선 표본이 부족한 페이지가 섞인 PDF.
+
+    괘선이 글자보다 훨씬 왼쪽까지 뻗어 `content_rect.x0` 가 22pt 로 잡히지만 본문
+    글자는 85pt 에서 시작한다(차이 63pt > `DEFAULT_ANCHOR_INDENT_TOL`).
+    p0 은 본문 줄이 6줄이라 페이지 정렬선이 잡히고, p1 은 문항이 1개뿐이라 2줄만
+    있어 페이지 정렬선이 `None` 이다(위 실측의 표본 4 상황).
+    """
+    doc = fitz.open()
+    try:
+        for page_index in range(2):
+            page = doc.new_page(width=595, height=841)
+            for y in (30.0, 31.0, 810.0, 811.0):
+                page.draw_line(fitz.Point(20, y), fitz.Point(575, y), width=0.5)
+            numbers = (1, 2, 3) if page_index == 0 else (4,)
+            for index, no in enumerate(numbers):
+                top = 60.0 + index * 200.0
+                page.insert_text((85, top), f"{no}. munje", fontsize=11)
+                page.insert_text((85, top + 20), "next line", fontsize=11)
+        data: bytes = doc.tobytes()
+        return data
+    finally:
+        doc.close()
+
+
+def test_page_with_too_few_samples_has_no_page_baseline() -> None:
+    """재현 조건 고정: 문항 1개 페이지는 표본이 모자라 페이지 정렬선이 없다."""
+    doc = fitz.open(stream=_build_sparse_sample_page_pdf(), filetype="pdf")
+    try:
+        sparse = doc[1]
+        content = ex.content_rect(sparse)
+        lines = ex._page_lines(sparse)
+        col_x0, _ = ex.column_bounds(content, "left")
+        # 절대 기준만으로는 탈락하는 배치다(실측 61.2pt 를 재현한 63pt).
+        assert 85.0 - col_x0 > ex.DEFAULT_ANCHOR_INDENT_TOL
+        buckets = ex._body_x0_buckets(lines, content, sparse)
+        assert len(buckets["left"]) < ex._BODY_X0_MIN_SAMPLES
+        assert ex._column_body_x0(lines, content, sparse)["left"] is None
+    finally:
+        doc.close()
+
+
+def test_document_baseline_rescues_sparse_page_anchor() -> None:
+    """페이지 정렬선이 없는 페이지의 앵커를 문서 전역 정렬선이 살린다.
+
+    이 폴백이 없으면 4번이 통째로 빠진다(수정 전 코드로 실측: [1, 2, 3]).
+    """
+    pdf_bytes = _build_sparse_sample_page_pdf()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        _, doc_baseline = ex._scan_anchor_candidates(doc)
+        assert doc_baseline["left"] == 85.0
+        assert [anchor.no for anchor in ex.find_anchors(doc)] == [1, 2, 3, 4]
+    finally:
+        doc.close()
+
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+    assert [problem.no for problem in result.problems] == [1, 2, 3, 4]
+
+
+def _build_stray_element_pdf(pages: int) -> bytes:
+    """칼럼 안이지만 본문 정렬선보다 왼쪽으로 튀어나온 요소가 섞인 PDF.
+
+    페이지마다 좌/우 칼럼에 그런 요소를 **1개씩** 둔다(실측 a.pdf 의 오염 표본은
+    칼럼당 최대 3개였다). 본문은 좌 85pt / 우 353pt 에서 시작한다.
+    """
+    doc = fitz.open()
+    try:
+        for page_index in range(pages):
+            page = doc.new_page(width=595, height=841)
+            for y in (30.0, 31.0, 810.0, 811.0):
+                page.draw_line(fitz.Point(20, y), fitz.Point(575, y), width=0.5)
+            page.insert_text((30, 300), "stray", fontsize=9)
+            page.insert_text((300, 300), "stray", fontsize=9)
+            for index in range(2):
+                page.insert_text((85, 60 + index * 40), "left body", fontsize=11)
+                page.insert_text((353, 60 + index * 40), "right body", fontsize=11)
+            page.insert_text((85, 500), f"{page_index + 1}. munje", fontsize=11)
+        data: bytes = doc.tobytes()
+        return data
+    finally:
+        doc.close()
+
+
+def test_document_baseline_is_not_dragged_left_by_stray_elements() -> None:
+    """오염 요소가 여러 페이지에 흩어져 있어도 전역 정렬선이 왼쪽으로 끌리지 않는다.
+
+    전역 표본은 페이지 표본보다 훨씬 많아 `_BODY_X0_MIN_SAMPLES` 를 쉽게 넘기지만,
+    "표본이 충분한 정렬선 중 가장 왼쪽" 규칙은 그대로다. 페이지마다 1개씩 흩어진
+    오염(총 4개 < 5)은 정렬선으로 인정되지 않는다.
+
+    한계도 함께 적어 둔다(실측 스윕): 같은 x 의 오염이 문서 전체에서 5개 이상
+    모이면 전역 정렬선은 그쪽으로 간다. 그래도 판정은 `_is_anchor_indent_ok` 의
+    OR 이라 **기준이 느슨해지기만** 하고 기존 앵커가 빠지지는 않는다
+    (실물 24종 전수 스윕에서 앵커 수 변화 없음).
+    """
+    doc = fitz.open(stream=_build_stray_element_pdf(4), filetype="pdf")
+    try:
+        # 재현 조건: 페이지 정렬선은 좌/우 모두 표본 부족이라 없다.
+        for page_no in range(doc.page_count):
+            page = doc[page_no]
+            content = ex.content_rect(page)
+            lines = ex._page_lines(page)
+            assert ex._column_body_x0(lines, content, page) == {
+                "left": None,
+                "right": None,
+            }
+        _, doc_baseline = ex._scan_anchor_candidates(doc)
+        assert doc_baseline == {"left": 85.0, "right": 353.0}
+        assert [anchor.no for anchor in ex.find_anchors(doc)] == [1, 2, 3, 4]
+    finally:
+        doc.close()
+
+
+# --- 머리말/꼬리말 판정은 줄 중심으로 ----------------------------------------
+# 실측(`오리진1.pdf` p61, 1~434번 중 61번만 누락): 문항 첫 줄에 큰 수식이 있어
+# 줄 bbox 가 위로 17.9pt 늘어 y0=51.9 < content.y0=62.2 로 머리말 취급됐다.
+# 앞뒤 페이지(p60·p62)는 줄 높이 11.7pt 로 y0=71.x 라 통과했다.
+
+
+def test_is_inside_content_keeps_tall_line_measured_on_origin_pdf() -> None:
+    """실측값 그대로: 상단 기준으로는 탈락, 중심 기준으로는 통과한다."""
+    content = fitz.Rect(52.0, 62.2, 542.7, 788.4)
+    # 61번 문항 첫 줄(수식 때문에 키가 29.6pt).
+    assert content.y0 > 51.9  # 옛 기준(줄 상단)으로는 머리말로 오판된다
+    assert ex._is_inside_content(51.9, 81.5, content)
+    # 앞뒤 페이지의 보통 줄은 어느 기준으로도 통과한다.
+    assert ex._is_inside_content(71.5, 83.2, content)
+    assert ex._is_inside_content(71.0, 82.7, content)
+
+
+def test_is_inside_content_still_rejects_real_header_and_footer() -> None:
+    """줄 전체가 본문 밖이면(중심도 밖) 여전히 머리말·꼬리말이다.
+
+    이 변경의 안전선이다. 중심 판정으로 바꾸면서 머리말이 앵커로 새면 페이지마다
+    오탐이 하나씩 생긴다.
+    """
+    content = fitz.Rect(52.0, 62.2, 542.7, 788.4)
+    assert not ex._is_inside_content(30.0, 42.0, content)  # 머리말
+    assert not ex._is_inside_content(800.0, 812.0, content)  # 꼬리말
+    # 경계에 걸친 줄도 중심이 밖이면 배제한다(절반 이상이 본문 밖).
+    assert not ex._is_inside_content(20.0, 62.0, content)
+    assert not ex._is_inside_content(789.0, 830.0, content)
+
+
+def _build_tall_line_pdf() -> bytes:
+    """키 큰 줄(수식)과 진짜 머리말·꼬리말이 함께 있는 PDF.
+
+    번호를 위에서 아래로 1~5 로 매겨 두면 머리말·꼬리말이 앵커로 새는지가 결과
+    번호 목록에 그대로 드러난다(1~5 가 이미 순증가라 사슬 필터가 가려 주지 않는다).
+    """
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        for y in (30.0, 31.0, 810.0, 811.0):
+            page.draw_line(fitz.Point(40, y), fitz.Point(555, y), width=0.5)
+        page.insert_text((50, 20), "1. header", fontsize=9)
+        # 같은 베이스라인의 큰 글리프가 줄 bbox 를 위로 늘린다(수식 대역).
+        page.insert_text((50, 60), "2. ", fontsize=11)
+        page.insert_text((70, 60), "K", fontsize=34)
+        page.insert_text((50, 400), "3. normal", fontsize=11)
+        page.insert_text((50, 800), "4. ", fontsize=11)
+        page.insert_text((70, 800), "K", fontsize=34)
+        page.insert_text((50, 832), "5. footer", fontsize=9)
+        data: bytes = doc.tobytes()
+        return data
+    finally:
+        doc.close()
+
+
+def test_tall_lines_survive_and_real_header_footer_still_dropped() -> None:
+    """키 큰 줄의 앵커는 살고, 진짜 머리말·꼬리말은 그대로 걸러진다.
+
+    수정 전 코드로는 [3] 하나만 잡혔다(2·4번이 줄 높이 때문에 탈락).
+    """
+    pdf_bytes = _build_tall_line_pdf()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[0]
+        content = ex.content_rect(page)
+        spans = {
+            line.text.split(".")[0]: (line.bbox[1], line.bbox[3])
+            for line in ex._page_lines(page)
+        }
+        # 재현 조건: 2·4번 줄은 상단/하단 기준으로는 본문 밖이다.
+        assert spans["2"][0] < content.y0
+        assert spans["4"][1] > content.y1
+        assert [anchor.no for anchor in ex.find_anchors(doc)] == [2, 3, 4]
+    finally:
+        doc.close()
+
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+    assert [problem.label for problem in result.problems] == ["2", "3", "4"]
+
+
+# --- 스캔본 감지 -------------------------------------------------------------
+
+
+def test_looks_scanned_uses_per_page_threshold() -> None:
+    """임계는 페이지당 50자다(docs/scanned-pdf-extraction.md 3-1)."""
+    limit = ex.SCANNED_MAX_CHARS_PER_PAGE
+    assert ex.looks_scanned(0, 54)  # 풍문고 부교재.pdf: 54쪽 0자
+    assert ex.looks_scanned(0, 20)  # 2027 강대X 시즌2 6회 문제.pdf: 20쪽 0자
+    assert ex.looks_scanned(limit * 10 - 1, 10)
+    assert not ex.looks_scanned(limit * 10, 10)
+    assert not ex.looks_scanned(100_000, 7)  # 보통 시험지
+
+
+def test_looks_scanned_does_not_judge_empty_document() -> None:
+    """페이지가 0장이면 스캔본이라고 단정하지 않는다(다른 실패다)."""
+    assert not ex.looks_scanned(0, 0)
+
+
+def test_extract_result_reports_text_chars() -> None:
+    """`text_chars` 는 스캔본 판정의 유일한 근거다 — 결과에 실어 보낸다."""
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        page.insert_text((50, 60), "1. munje", fontsize=11)
+        for index in range(12):
+            page.insert_text(
+                (50, 90 + index * 20), "body line with plenty of text", fontsize=11
+            )
+        text_layer: bytes = doc.tobytes()
+    finally:
+        doc.close()
+    text_pdf = ex.extract_problems(pdf_bytes=text_layer, render_images=False)
+    assert text_pdf.text_chars > ex.SCANNED_MAX_CHARS_PER_PAGE
+    assert not ex.looks_scanned(text_pdf.text_chars, text_pdf.page_count)
+
+    doc = fitz.open()
+    try:
+        doc.new_page(width=595, height=841)
+        doc.new_page(width=595, height=841)
+        blank: bytes = doc.tobytes()
+    finally:
+        doc.close()
+    scanned = ex.extract_problems(pdf_bytes=blank, render_images=False)
+    assert scanned.text_chars == 0
+    assert scanned.pua_ratio == 0.0  # 분모가 0이라 PUA 비율로는 알 수 없다
+    assert scanned.mode == "text"  # `mode` 는 '판정 성공' 을 뜻하지 않는다
+    assert ex.looks_scanned(scanned.text_chars, scanned.page_count)
+    assert scanned.to_dict()["text_chars"] == 0

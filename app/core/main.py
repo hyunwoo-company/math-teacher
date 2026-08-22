@@ -488,7 +488,11 @@ async def upload_file(
     responses=_ERRORS,
 )
 def read_file(node_id: NodeId) -> FileDetailResponse:
-    """파일 노드와 문항 목록(풀이 존재 여부 포함)."""
+    """파일 노드와 문항 목록(풀이 존재 여부 포함).
+
+    문항이 0개인 파일은 `extract_error` 에 마지막 추출의 사유가 담긴다(화면의
+    0문항 안내를 고정 문구가 아니라 실제 사유로 그리기 위한 것).
+    """
     return FileDetailResponse.model_validate(service.file_detail(node_id))
 
 

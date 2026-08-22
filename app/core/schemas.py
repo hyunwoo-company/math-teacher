@@ -117,10 +117,17 @@ class ProblemOut(BaseModel):
 
 
 class FileDetailResponse(BaseModel):
-    """`GET /api/files/{id}` 응답."""
+    """`GET /api/files/{id}` 응답.
+
+    `extract_error` 는 **마지막 추출**의 실패/0문항 사유(한국어 완성 문장)다.
+    성공이면 null 이고, 이 필드가 생기기 전에 올린 파일도 null 이다(백필 안 함).
+    화면은 이 문장을 그대로 보여주기만 한다 — 스캔본인지 앵커를 못 찾은 것인지
+    판정하는 로직은 백엔드에만 있다.
+    """
 
     node: NodeOut
     problems: list[ProblemOut]
+    extract_error: str | None = None
 
 
 class ReextractResponse(BaseModel):

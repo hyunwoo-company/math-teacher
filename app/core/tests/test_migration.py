@@ -252,7 +252,7 @@ def test_v2_db_gains_variants_table(tmp_path: Path) -> None:
 
         conn = storage.connect()
         try:
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 8
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 9
             assert "variants" in {
                 str(row["name"])
                 for row in conn.execute(
@@ -500,7 +500,7 @@ def test_v6_db_gains_note_item_transcript_snapshot(tmp_path: Path) -> None:
         config.use_data_dir(data_dir)
         storage.init_db()
         with storage.transaction() as conn:
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 8
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 9
             assert {"transcript", "transcript_source"} <= storage.table_columns(
                 conn, "note_items"
             )
@@ -530,5 +530,65 @@ def test_v6_db_gains_note_item_transcript_snapshot(tmp_path: Path) -> None:
             assert saved is not None
             assert saved["transcript"] == r"값 \(x^{2}\)"
             assert saved["transcript_source"] == storage.TRANSCRIPT_PUA
+    finally:
+        config.use_data_dir(original)
+
+
+def test_migration_adds_files_extract_error_without_backfill(tmp_path: Path) -> None:
+    """v1 DB 에 `files.extract_error` 가 생기고 기존 행은 NULL 로 남는다.
+
+    백필하지 않는다 — 과거 업로드가 왜 0문항이었는지는 지금 알 수 없으므로
+    NULL("사유를 모른다")이 사실이다. 재추출하면 그때 채워진다.
+    """
+    data_dir = tmp_path / "legacy-data"
+    _make_legacy_db(data_dir / "app.db")
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        storage.init_db()
+
+        conn = storage.connect()
+        try:
+            assert "extract_error" in storage.table_columns(conn, "files")
+            row = storage.get_file(conn, "file1")
+            assert row is not None
+            assert row["extract_error"] is None
+            # 기존 메타는 그대로다.
+            assert row["problem_count"] == 22
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 9
+        finally:
+            conn.close()
+    finally:
+        config.use_data_dir(original)
+
+
+def test_files_extract_error_survives_repeated_migration(tmp_path: Path) -> None:
+    """마이그레이션을 여러 번 돌려도 저장된 사유가 지워지거나 바뀌지 않는다(멱등)."""
+    data_dir = tmp_path / "legacy-data"
+    _make_legacy_db(data_dir / "app.db")
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        storage.init_db()
+        with storage.transaction() as conn:
+            storage.upsert_file(
+                conn,
+                node_id="file1",
+                stored_path="files/file1.pdf",
+                pages=7,
+                mode="image",
+                pua_ratio=0.39,
+                problem_count=0,
+                extract_error="글자 정보가 없는 스캔본(사진) PDF 입니다.",
+            )
+
+        for _ in range(3):  # 여러 번 기동해도 안전해야 한다
+            storage.init_db()
+
+        with storage.transaction() as conn:
+            row = storage.get_file(conn, "file1")
+            assert row is not None
+            assert row["extract_error"] == "글자 정보가 없는 스캔본(사진) PDF 입니다."
+            assert row["problem_count"] == 0
     finally:
         config.use_data_dir(original)
