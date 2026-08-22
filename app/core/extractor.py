@@ -420,7 +420,7 @@ def _classify_column(x0: float, page: fitz.Page) -> Column:
 
 @dataclass(frozen=True)
 class PageLayout:
-    """한 페이지의 본문 영역과 2단 칼럼 기하."""
+    """한 페이지의 본문 영역과 칼럼 기하(2단 기본, 1단 지원)."""
 
     content: fitz.Rect
     #: 좌측 칼럼의 (x0, x1).
@@ -429,33 +429,233 @@ class PageLayout:
     right: tuple[float, float]
     #: 좌/우 칼럼을 가르는 x. 기본은 페이지 중앙(`_classify_column` 과 같은 값).
     split_x: float
+    #: 1단(전폭) 지면인가. 기본값 False = 지금까지의 2단 가정.
+    single_column: bool = False
 
     def bounds(self, column: Column) -> tuple[float, float]:
-        """그 칼럼의 (x0, x1)."""
+        """그 칼럼의 (x0, x1). 1단이면 칼럼과 무관하게 본문 전폭이다."""
+        if self.single_column:
+            return float(self.content.x0), float(self.content.x1)
         return self.left if column == "left" else self.right
 
     def column_of(self, x0: float) -> Column:
-        """x0 가 속한 칼럼."""
+        """x0 가 속한 칼럼. 1단이면 칼럼이 하나뿐이라 항상 `left` 다.
+
+        `left` 로 통일하는 것이 요점이다. 1단 지면에서 오른쪽 절반에 있는 앵커를
+        `right` 로 분류하면, 세로 범위를 "같은 칼럼의 다음 앵커까지" 로 자르는
+        계산(`extract_problems`)이 그 앵커를 다른 칼럼의 첫 문항으로 보고 지면
+        아래까지 통째로 잡는다.
+        """
+        if self.single_column:
+            return "left"
         return "left" if x0 < self.split_x else "right"
 
 
-def layout_from(content: fitz.Rect, page: fitz.Page) -> PageLayout:
+def layout_from(
+    content: fitz.Rect, page: fitz.Page, *, single_column: bool = False
+) -> PageLayout:
     """본문 영역 + 페이지에서 **기존 규칙 그대로**의 기하를 만든다.
 
     분기선은 페이지 중앙이다(`_classify_column` 과 같은 값). 본문 영역만 따로
     계산해 둔 호출부(테스트 포함)를 위해 `page_layout` 에서 떼어 놓았다.
+
+    Args:
+        content: 본문 영역.
+        page: 대상 페이지.
+        single_column: 1단(전폭) 지면이면 True. 기본값은 기존 동작(2단)이다.
+
+    Returns:
+        페이지 기하.
     """
     return PageLayout(
         content=content,
         left=column_bounds(content, "left"),
         right=column_bounds(content, "right"),
         split_x=float(page.rect.x0) + float(page.rect.width) / 2.0,
+        single_column=single_column,
     )
 
 
-def page_layout(page: fitz.Page) -> PageLayout:
+def page_layout(page: fitz.Page, *, single_column: bool = False) -> PageLayout:
     """기존 규칙 그대로의 페이지 기하(`content_rect` + `column_bounds` + 페이지 중앙)."""
-    return layout_from(content_rect(page), page)
+    return layout_from(content_rect(page), page, single_column=single_column)
+
+
+# --- 1단(전폭) 지면 판정 ------------------------------------------------------
+# 이 파일은 오랫동안 모든 지면을 2단으로 가정했다. 1단 교재를 넣으면 크롭 x 범위가
+# 페이지 절반(`column_bounds`)이라 문항의 오른쪽 절반이 통째로 잘린다. 실측
+# (`69-134 고1 2학기 오리진1 한글.pdf`, 595pt 폭·세로 구분선 없음): 본문 글자가
+# x 85 에서 시작해 510 근처까지 흐르는데 66문항 전부 크롭 폭이 212~213pt 였다
+# (x1=295 = 페이지 절반). 같은 책 전권(`오리진1.pdf`, 403쪽)에서도 434문항 전부가
+# 폭 232.8~238.1pt 였다.
+#
+# 판정 신호는 "본문 왼쪽 정렬선 근처에서 시작해 분기선을 크게 넘어가는 행"
+# (= 전폭 행)이다. 처음에는 **줄(line) bbox** 가 분기선을 넘는지로 재려 했는데
+# 실측에서 양쪽으로 다 틀렸다:
+#   - 1단 한글 PDF 의 줄 bbox 는 조각조각 끊겨, 분기선을 넘는 줄이 페이지당 0~9개
+#     (비율 최대 0.143)뿐이었다(오리진 65쪽).
+#   - 2단 PDF 는 반대로 MuPDF 가 좌·우 칼럼의 같은 baseline 을 한 줄로 묶어 주는
+#     바람에 분기선을 넘는 줄 비율이 0.18~0.35 로 1단보다 **높게** 나왔다
+#     (개포고·숙명).
+# 그래서 줄이 아니라 **단어 박스**(`get_text("words")`, OCR 경로는 OCR 줄 박스)를
+# 쓰고, y 중심이 같은 박스를 한 행으로 묶어 가로 간격이 `_ROW_INK_GAP_PT` 이내면
+# 이어 붙인다. 간격 한도의 근거: 2단 파일에서 분기선을 품은 빈 간격(=거터)의
+# 최솟값이 17.0pt(0809 일일테스트) · 18.5pt(개포고) · 19.7pt(숙명)였고, 1단 파일
+# 본문 행의 단어 간격은 8~9pt 였다. 12pt 는 그 사이에서 거터 최솟값보다 5pt 낮다.
+#
+# "왼쪽 정렬선에서 시작" 조건이 2단 전폭 제목·표제 함정을 막는다. 실측(0809
+# 일일테스트 p1)의 전폭 머리말 3줄은 x 195.9 · 352.8 · 371.6 에서 시작해(가운데
+# 정렬) 이 조건에서 탈락한다.
+#
+# 판정은 **문서 단위**다. 쪽 단위로 끊으면 그림·수식만 있는 헐렁한 쪽에서 전폭
+# 행이 0개가 나와(오리진 65쪽 중 4쪽, 글자 있는 400쪽 중 20쪽) 그 쪽만 2단으로
+# 남아 문항이 잘린다. 반대로 2단 스캔본(강대X, 캐시된 OCR 줄 박스)에서는 글자
+# 있는 17쪽 중 2쪽이 전폭 행 1개를 만들어 그 쪽만 1단으로 뒤집힐 뻔했다. 쪽 비율로
+# 보면 1단 문서 94~95% 대 2단 문서 0%(개포고·숙명·0809·집합 시리즈 등 tmp 전수
+# 22개 파일) / 12%(강대X 스캔본) 로 크게 벌어진다 — 그래서 "전폭 행이 있는 쪽이
+# 절반 이상 + 문서 전체 전폭 행 3개 이상" 으로 판정한다. 행 수 하한은 1~2쪽짜리
+# 2단 시험지의 전폭 제목 한두 줄에 문서 전체가 넘어가지 않게 하는 안전선이다
+# (그 대가로 아주 짧은 1단 문서는 2단으로 남는다).
+
+#: 같은 행으로 볼 y 중심 차(pt).
+_ROW_MID_TOL_PT: Final[float] = 2.0
+#: 한 행 안에서 잉크를 이어 붙일 최대 가로 간격(pt). 2단 거터 최솟값 17.0pt 아래.
+_ROW_INK_GAP_PT: Final[float] = 12.0
+#: 전폭 행으로 인정할 시작 x 한계(본문 폭 비율). 가운데 정렬 제목을 떨어뜨린다.
+_FULL_WIDTH_START_FRAC: Final[float] = 0.15
+#: 전폭 행으로 인정할 도달선(분기선 + 본문 폭 비율).
+_FULL_WIDTH_REACH_FRAC: Final[float] = 0.10
+#: 1단으로 보려면 문서 전체에 전폭 행이 최소 이만큼 있어야 한다.
+_SINGLE_COLUMN_MIN_ROWS: Final[int] = 3
+
+#: (x0, y0, x1, y1). 단어 박스 · OCR 줄 박스 공용.
+BBox = tuple[float, float, float, float]
+
+
+def _ink_rows(boxes: Sequence[BBox]) -> list[list[tuple[float, float]]]:
+    """글자 박스를 행으로 묶고, 행마다 가로 구간을 이어 붙인다.
+
+    Args:
+        boxes: 한 페이지의 글자 박스(단어 또는 OCR 줄).
+
+    Returns:
+        행별 가로 구간 목록. 구간은 `_ROW_INK_GAP_PT` 이내면 하나로 이어진다.
+    """
+    ordered = sorted(boxes, key=lambda box: ((box[1] + box[3]) / 2.0, box[0]))
+    grouped: list[tuple[float, list[BBox]]] = []
+    for box in ordered:
+        mid = (box[1] + box[3]) / 2.0
+        if grouped and abs(mid - grouped[-1][0]) <= _ROW_MID_TOL_PT:
+            grouped[-1][1].append(box)
+            continue
+        grouped.append((mid, [box]))
+    rows: list[list[tuple[float, float]]] = []
+    for _, row in grouped:
+        spans = sorted((box[0], box[2]) for box in row)
+        x0, x1 = spans[0]
+        merged: list[tuple[float, float]] = []
+        for start, end in spans[1:]:
+            if start - x1 <= _ROW_INK_GAP_PT:
+                x1 = max(x1, end)
+            else:
+                merged.append((x0, x1))
+                x0, x1 = start, end
+        merged.append((x0, x1))
+        rows.append(merged)
+    return rows
+
+
+def full_width_rows(
+    boxes: Sequence[BBox], content: fitz.Rect, split_x: float
+) -> tuple[int, int]:
+    """한 페이지의 (전폭 행 수, 본문 행 수)를 센다.
+
+    머리말·꼬리말은 앵커 판정과 같은 조건(`_is_inside_content`)으로 뺀다.
+
+    Args:
+        boxes: 한 페이지의 글자 박스(단어 또는 OCR 줄).
+        content: 그 페이지의 본문 영역.
+        split_x: 2단 기준의 좌/우 분기선.
+
+    Returns:
+        (전폭 행 수, 본문 행 수). 본문에 글자가 없으면 (0, 0).
+    """
+    inside = [box for box in boxes if _is_inside_content(box[1], box[3], content)]
+    if not inside:
+        return 0, 0
+    width = float(content.x1) - float(content.x0)
+    start_max = float(content.x0) + width * _FULL_WIDTH_START_FRAC
+    reach_min = split_x + width * _FULL_WIDTH_REACH_FRAC
+    rows = _ink_rows(inside)
+    full = sum(
+        1 for row in rows if any(x0 <= start_max and x1 >= reach_min for x0, x1 in row)
+    )
+    return full, len(rows)
+
+
+def is_single_column(pages: Sequence[tuple[int, int]]) -> bool:
+    """쪽별 (전폭 행 수, 본문 행 수)로 문서가 1단인지 판정한다.
+
+    글자가 없는 쪽은 표본에서 뺀다(판정 근거가 없다 → 기존 동작인 2단).
+
+    Args:
+        pages: 쪽별 `full_width_rows` 결과.
+
+    Returns:
+        1단(전폭) 문서면 True.
+    """
+    scored = [(full, total) for full, total in pages if total > 0]
+    if not scored:
+        return False
+    if sum(full for full, _ in scored) < _SINGLE_COLUMN_MIN_ROWS:
+        return False
+    with_full = sum(1 for full, _ in scored if full > 0)
+    return with_full * 2 >= len(scored)
+
+
+def _word_boxes(page: fitz.Page) -> list[BBox]:
+    """페이지의 단어 박스. 줄 bbox 와 달리 칼럼을 건너뛰어 묶이지 않는다."""
+    return [
+        (float(word[0]), float(word[1]), float(word[2]), float(word[3]))
+        for word in page.get_text("words")
+    ]
+
+
+def detect_single_column(doc: fitz.Document) -> bool:
+    """PDF 텍스트 레이어로 문서가 1단 조판인지 판정한다.
+
+    Args:
+        doc: 열려 있는 PDF 문서.
+
+    Returns:
+        1단(전폭) 문서면 True. 텍스트 레이어가 없는 스캔본은 False.
+    """
+    pages: list[tuple[int, int]] = []
+    for page_no in range(doc.page_count):
+        page = doc[page_no]
+        layout = page_layout(page)
+        pages.append(full_width_rows(_word_boxes(page), layout.content, layout.split_x))
+    return is_single_column(pages)
+
+
+def default_layout_provider(doc: fitz.Document) -> LayoutProvider:
+    """문서 전체로 단 수를 한 번 판정해 두고 쓰는 기본 기하 제공자.
+
+    판정을 문서당 한 번만 하기 위한 것이다(`detect_single_column` 이 페이지를 한
+    번 훑는다). 2단으로 판정되면 `page_layout(page)` 과 완전히 같은 값이다.
+
+    Args:
+        doc: 열려 있는 PDF 문서.
+
+    Returns:
+        페이지 기하를 주는 함수.
+    """
+    single_column = detect_single_column(doc)
+
+    def provide(page: fitz.Page, _page_no: int) -> PageLayout:
+        return page_layout(page, single_column=single_column)
+
+    return provide
 
 
 #: 페이지의 텍스트 줄을 주는 함수. 기본은 `_page_lines`(PDF 텍스트 레이어).
@@ -778,20 +978,18 @@ def _scan_anchor_candidates(
         doc: 열려 있는 PDF 문서.
         lines_provider: 페이지의 텍스트 줄을 대신 주는 함수. 기본(None)은 PDF
             텍스트 레이어(`_page_lines`). 스캔본 OCR 경로가 여기에 OCR 줄을 넣는다.
-        layout_provider: 페이지 기하를 대신 주는 함수. 기본(None)은 `page_layout`.
+        layout_provider: 페이지 기하를 대신 주는 함수. 기본(None)은
+            `default_layout_provider`(문서 단위로 단 수를 판정한다).
 
     Returns:
         (앵커 후보 목록, 칼럼별 문서 전역 정렬선).
     """
     raw: list[_AnchorCandidate] = []
     doc_buckets: dict[Column, list[float]] = {"left": [], "right": []}
+    provide_layout = layout_provider or default_layout_provider(doc)
     for page_no in range(doc.page_count):
         page = doc[page_no]
-        layout = (
-            page_layout(page)
-            if layout_provider is None
-            else layout_provider(page, page_no)
-        )
+        layout = provide_layout(page, page_no)
         content = layout.content
         lines = (
             _page_lines(page)
@@ -872,7 +1070,8 @@ def find_anchors(
         doc: 열려 있는 PDF 문서.
         indent_tol: 앵커로 인정할 최대 들여쓰기(pt).
         lines_provider: 텍스트 줄을 대신 주는 함수(기본은 PDF 텍스트 레이어).
-        layout_provider: 페이지 기하를 대신 주는 함수(기본은 `page_layout`).
+        layout_provider: 페이지 기하를 대신 주는 함수(기본은
+            `default_layout_provider` — 문서 단위 단 수 판정).
 
     Returns:
         읽는 순서로 정렬된 앵커 목록.
@@ -1106,7 +1305,8 @@ def extract_problems(
             로 시작하는 것이 요점이다 — `Problem.text` 는 이 값을 쓰지 않고 계속
             PDF 텍스트 레이어에서만 만든다. OCR 텍스트를 본문으로 저장하면 수식이
             깨진 글자가 그대로 프롬프트·내보내기에 섞여 들어간다.
-        layout_provider: 페이지 기하를 주는 함수(기본은 `page_layout`).
+        layout_provider: 페이지 기하를 주는 함수(기본은
+            `default_layout_provider` — 문서 단위 단 수 판정).
 
     Returns:
         추출 결과.
@@ -1134,11 +1334,14 @@ def extract_problems(
             ("image" if ratio >= pua_threshold else "text") if mode == "auto" else mode
         )
 
+        # 기하 제공자를 여기서 확정해 앵커 탐색과 크롭이 **같은 것**을 쓰게 한다
+        # (기본 제공자는 문서 단위 단 수 판정을 한 번만 하므로 두 번 훑지 않는다).
+        provide_layout = layout_provider or default_layout_provider(doc)
         anchors = find_anchors(
             doc,
             indent_tol=indent_tol,
             lines_provider=anchor_lines_provider,
-            layout_provider=layout_provider,
+            layout_provider=provide_layout,
         )
         # 시험지 경로에서 앵커를 사실상 못 찾았을 때만 유형 문제집 폴백을 시도한다
         # (additive: 시험지 결과가 충분하면 이 블록은 아무것도 하지 않는다).
@@ -1162,11 +1365,7 @@ def extract_problems(
         for index, anchor in enumerate(anchors):
             page = doc[anchor.page]
             if anchor.page not in layout_cache:
-                layout_cache[anchor.page] = (
-                    page_layout(page)
-                    if layout_provider is None
-                    else layout_provider(page, anchor.page)
-                )
+                layout_cache[anchor.page] = provide_layout(page, anchor.page)
                 # 본문 텍스트는 **항상** PDF 텍스트 레이어에서 만든다
                 # (`anchor_lines_provider` 를 쓰지 않는다 — 위 Args 참고).
                 lines_cache[anchor.page] = _page_lines(page)

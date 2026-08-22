@@ -192,7 +192,10 @@ def text_lines(
 
 
 def page_layout(
-    page: fitz.Page, lines: Sequence[extractor.TextLine]
+    page: fitz.Page,
+    lines: Sequence[extractor.TextLine],
+    *,
+    single_column: bool = False,
 ) -> extractor.PageLayout:
     """스캔본 페이지의 기하를 OCR 로 읽은 글자의 x 범위로 잡는다.
 
@@ -208,15 +211,20 @@ def page_layout(
     분류돼 들여쓰기 필터에서 통째로 탈락했다. OCR 글자 범위의 중앙으로 가르면
     20쪽 전부에서 좌/우 분류가 맞았다.
 
+    단 수(1단/2단)는 여기서 정하지 않는다. 그것은 지면 전체의 성질이라 문서를 다
+    보고 한 번 정하는 것이 맞다(`detect_single_column`). 실측에서 쪽 단위로 끊으면
+    2단 스캔본(강대X) 17쪽 중 2쪽이 1단으로 뒤집혔다.
+
     Args:
         page: 대상 페이지.
         lines: 그 페이지에서 읽은(신뢰도 필터를 통과한) 줄들.
+        single_column: 1단(전폭) 지면이면 True. 기본값은 기존 동작(2단)이다.
 
     Returns:
         페이지 기하. 읽은 줄이 없으면 기존 규칙 그대로(`extractor.page_layout`).
     """
     if not lines:
-        return extractor.page_layout(page)
+        return extractor.page_layout(page, single_column=single_column)
     content = extractor.content_rect(page)
     x0 = max(
         float(page.rect.x0), min(line.bbox[0] for line in lines) - _CONTENT_PAD_PT
@@ -225,14 +233,43 @@ def page_layout(
         float(page.rect.x1), max(line.bbox[2] for line in lines) + _CONTENT_PAD_PT
     )
     if x1 - x0 <= 0.0:
-        return extractor.page_layout(page)
+        return extractor.page_layout(page, single_column=single_column)
     scanned = fitz.Rect(x0, content.y0, x1, content.y1)
     return extractor.PageLayout(
         content=scanned,
         left=extractor.column_bounds(scanned, "left"),
         right=extractor.column_bounds(scanned, "right"),
         split_x=(x0 + x1) / 2.0,
+        single_column=single_column,
     )
+
+
+def detect_single_column(
+    doc: fitz.Document, lines: Mapping[int, Sequence[extractor.TextLine]]
+) -> bool:
+    """스캔본 문서가 1단 조판인지 OCR 줄 박스로 판정한다.
+
+    판정 규칙은 텍스트 레이어 경로와 **같은 것**(`extractor.is_single_column`)을
+    쓴다. 글자 박스만 OCR 줄 박스로 바꾼다 — 스캔본에는 단어 좌표가 없다.
+    분기선은 이 모듈의 규칙(OCR 글자 x 범위의 중앙)을 그대로 쓴다.
+
+    Args:
+        doc: 열려 있는 PDF 문서.
+        lines: 쪽번호(0부터) → 그 페이지의 OCR 줄.
+
+    Returns:
+        1단(전폭) 문서면 True.
+    """
+    pages: list[tuple[int, int]] = []
+    for index in range(doc.page_count):
+        page_lines = lines.get(index, ())
+        layout = page_layout(doc[index], page_lines)
+        pages.append(
+            extractor.full_width_rows(
+                [line.bbox for line in page_lines], layout.content, layout.split_x
+            )
+        )
+    return extractor.is_single_column(pages)
 
 
 def extract_with_ocr(
@@ -272,8 +309,12 @@ def extract_with_ocr(
     def provide_lines(_page: fitz.Page, index: int) -> list[extractor.TextLine]:
         return lines.get(index, [])
 
+    # 단 수는 문서 단위로 한 번 정한다(쪽 단위 판정의 뒤집힘은 `page_layout` 참고).
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        single_column = detect_single_column(doc, lines)
+
     def provide_layout(page: fitz.Page, index: int) -> extractor.PageLayout:
-        return page_layout(page, lines.get(index, []))
+        return page_layout(page, lines.get(index, []), single_column=single_column)
 
     return extractor.extract_problems(
         pdf_bytes=pdf_bytes,

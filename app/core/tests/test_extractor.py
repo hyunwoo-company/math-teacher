@@ -1173,3 +1173,190 @@ def test_extract_result_reports_text_chars() -> None:
     assert scanned.mode == "text"  # `mode` 는 '판정 성공' 을 뜻하지 않는다
     assert ex.looks_scanned(scanned.text_chars, scanned.page_count)
     assert scanned.to_dict()["text_chars"] == 0
+
+
+# --- 1단(전폭) 지면 판정 ------------------------------------------------------
+# 실측 근거는 `extractor` 의 "1단(전폭) 지면 판정" 주석에 모아 두었다. 여기서는
+# 그 판정이 무엇을 세고 무엇을 무시하는지 값으로 고정한다.
+
+_ONE_COL_CONTENT = fitz.Rect(23.8, 25.2, 571.2, 790.5)
+#: 595pt 페이지의 중앙. 2단 기준 분기선이다.
+_SPLIT_X = 297.5
+
+
+def _row(x_spans: list[tuple[float, float]], y: float) -> list[ex.BBox]:
+    """같은 행(y 중심 동일)에 놓인 글자 박스들."""
+    return [(x0, y, x1, y + 12.0) for x0, x1 in x_spans]
+
+
+def test_ink_rows_merges_word_gaps_but_keeps_gutter() -> None:
+    """행 안의 단어 간격(8~9pt)은 이어 붙이고, 2단 거터(17pt+)는 남긴다.
+
+    실측: 1단 오리진 본문 행의 단어 간격은 8~9pt, 2단 파일에서 분기선을 품은 빈
+    간격(거터)의 최솟값은 17.0pt(0809)·18.5pt(개포고)·19.7pt(숙명)였다.
+    """
+    merged = ex._ink_rows(_row([(85.0, 170.8), (178.8, 220.5)], 100.0))
+    assert merged == [[(85.0, 220.5)]]
+
+    gutter = ex._ink_rows(_row([(46.2, 280.0), (306.4, 548.1)], 100.0))
+    assert gutter == [[(46.2, 280.0), (306.4, 548.1)]]
+
+
+def test_ink_rows_groups_by_row_not_by_column() -> None:
+    """y 중심이 `_ROW_MID_TOL_PT` 를 넘으면 다른 행이다."""
+    boxes = _row([(85.0, 200.0)], 100.0) + _row([(85.0, 200.0)], 120.0)
+    assert len(ex._ink_rows(boxes)) == 2
+
+
+def test_full_width_rows_counts_body_row_crossing_split() -> None:
+    """1단 본문 행(왼쪽 정렬선에서 시작해 분기선을 크게 넘김)은 전폭 행이다.
+
+    실측(`69-134 고1 2학기 오리진1 한글.pdf` p13): 본문 행이 x 85.0 -> 509.9 로
+    흐르고 분기선은 297.5 다.
+    """
+    boxes = _row([(85.0, 170.8), (178.8, 300.0), (308.0, 509.9)], 106.2)
+    assert ex.full_width_rows(boxes, _ONE_COL_CONTENT, _SPLIT_X) == (1, 1)
+
+
+def test_full_width_rows_ignores_centered_title() -> None:
+    """2단 지면의 전폭 제목·표제는 전폭 행이 아니다(가운데 정렬이라 탈락).
+
+    실측(`0809 일일테스트.pdf` p1): 분기선을 넘는 머리말 3줄이 x 195.9 · 352.8 ·
+    371.6 에서 시작한다. "한 줄이라도 넘으면 1단" 이면 이 지면이 1단이 된다.
+    """
+    boxes = (
+        _row([(195.9, 328.6), (338.3, 474.0)], 109.3)
+        + _row([(371.6, 469.1)], 136.6)
+        + _row([(352.8, 382.5), (399.5, 470.7)], 196.8)
+    )
+    assert ex.full_width_rows(boxes, _ONE_COL_CONTENT, _SPLIT_X) == (0, 3)
+
+
+def test_full_width_rows_ignores_two_column_row() -> None:
+    """좌·우 칼럼이 같은 행에 있어도 거터가 비어 있으면 전폭 행이 아니다."""
+    boxes = _row([(46.2, 280.0), (306.4, 548.1)], 100.0)
+    assert ex.full_width_rows(boxes, _ONE_COL_CONTENT, _SPLIT_X) == (0, 1)
+
+
+def test_full_width_rows_skips_header_and_footer() -> None:
+    """머리말·꼬리말은 앵커 판정과 같은 조건으로 뺀다(전폭이라도 세지 않는다)."""
+    header = _row([(85.0, 509.9)], 5.0)
+    footer = _row([(85.0, 509.9)], 800.0)
+    assert ex.full_width_rows(header + footer, _ONE_COL_CONTENT, _SPLIT_X) == (0, 0)
+
+
+def test_is_single_column_needs_majority_of_pages() -> None:
+    """전폭 행이 있는 쪽이 절반 이상이어야 1단이다.
+
+    실측 비율: 1단 문서 94~95%(오리진 65쪽·403쪽) vs 2단 문서 0%(개포고·숙명·
+    0809) / 12%(강대X 스캔본, OCR 줄 박스).
+    """
+    assert ex.is_single_column([(2, 10), (3, 12), (0, 8)])
+    # 4쪽 중 1쪽만 전폭 행 -> 2단(전폭 행 총수는 하한을 넘겨도 비율이 부족하다).
+    assert not ex.is_single_column([(3, 10), (0, 9), (0, 11), (0, 12)])
+
+
+def test_is_single_column_needs_minimum_full_width_rows() -> None:
+    """전폭 행이 문서 전체에 1~2개뿐이면 1단으로 뒤집지 않는다.
+
+    1~2쪽짜리 2단 시험지의 전폭 제목 한두 줄에 문서 전체가 넘어가지 않게 하는
+    안전선이다(그 대가로 아주 짧은 1단 문서는 2단으로 남는다).
+    """
+    assert not ex.is_single_column([(1, 8)])
+    assert not ex.is_single_column([(1, 8), (1, 9)])
+    assert ex.is_single_column([(1, 8), (1, 9), (1, 10)])
+
+
+def test_is_single_column_ignores_pages_without_text() -> None:
+    """글자가 없는 쪽은 근거가 없으니 표본에서 뺀다(스캔본은 2단 그대로)."""
+    assert not ex.is_single_column([])
+    assert not ex.is_single_column([(0, 0), (0, 0)])
+    assert ex.is_single_column([(3, 10), (0, 0), (0, 0)])
+
+
+def test_page_layout_single_column_gives_full_width_bounds() -> None:
+    """1단이면 `bounds` 는 칼럼과 무관하게 본문 전폭이고 칼럼은 하나다."""
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=595, height=841)
+        two = ex.layout_from(_ONE_COL_CONTENT, page)
+        one = ex.layout_from(_ONE_COL_CONTENT, page, single_column=True)
+        # 기존(2단) 동작은 그대로다.
+        assert not two.single_column
+        assert two.bounds("left") == (23.8, 294.5)
+        assert two.bounds("right") == (300.5, 571.2)
+        assert two.column_of(400.0) == "right"
+        # 1단은 좌/우 모두 본문 전폭, 칼럼 분류는 항상 left.
+        assert one.bounds("left") == one.bounds("right") == (23.8, 571.2)
+        assert one.column_of(400.0) == "left"
+        # 분기선 자체는 그대로 남는다(판정 근거로 계속 쓴다).
+        assert one.split_x == two.split_x == 297.5
+    finally:
+        doc.close()
+
+
+def _build_one_column_pdf(pages: int = 3) -> bytes:
+    """1단(전폭) 조판 PDF. 본문 행이 페이지 중앙을 넘어 흐른다."""
+    body = "wide body line that flows across the whole page width here"
+    doc = fitz.open()
+    try:
+        for index in range(pages):
+            page = doc.new_page(width=595, height=841)
+            page.insert_text((85, 100), f"{index + 1}. {body}", fontsize=11)
+            page.insert_text((85, 120), body, fontsize=11)
+            page.insert_text((85, 140), body, fontsize=11)
+        data: bytes = doc.tobytes()
+        return data
+    finally:
+        doc.close()
+
+
+def test_detect_single_column_on_one_column_document() -> None:
+    """1단 문서는 1단으로, 2단 문서는 2단으로 판정한다(문서 단위)."""
+    one = fitz.open(stream=_build_one_column_pdf(), filetype="pdf")
+    two = fitz.open(stream=_build_two_column_pdf(2), filetype="pdf")
+    try:
+        assert ex.detect_single_column(one)
+        assert not ex.detect_single_column(two)
+    finally:
+        one.close()
+        two.close()
+
+
+def test_one_column_crop_spans_full_content_width() -> None:
+    """1단 문서의 크롭 x 범위는 본문 전폭이다(반쪽으로 잘리지 않는다).
+
+    회귀 대상: 모든 지면을 2단으로 가정해 크롭 x1 을 페이지 절반으로 잡던 버그
+    (실측 `69-134 고1 2학기 오리진1 한글.pdf`: 66문항 전부 폭 212~213pt).
+    """
+    pdf_bytes = _build_one_column_pdf()
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+    assert [problem.no for problem in result.problems] == [1, 2, 3]
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        content = ex.content_rect(doc[0])
+    finally:
+        doc.close()
+    for problem in result.problems:
+        assert problem.bbox[0] == round(content.x0, 2)
+        assert problem.bbox[2] == round(content.x1, 2)
+
+
+def test_two_column_crop_width_is_unchanged() -> None:
+    """2단 문서의 크롭 x 범위는 예전 그대로 칼럼 폭이다(한 픽셀도 바뀌면 안 된다)."""
+    pdf_bytes = _build_two_column_pdf(2)
+    result = ex.extract_problems(pdf_bytes=pdf_bytes, render_images=False)
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        content = ex.content_rect(doc[0])
+    finally:
+        doc.close()
+    left = ex.column_bounds(content, "left")
+    right = ex.column_bounds(content, "right")
+    widths = {(problem.bbox[0], problem.bbox[2]) for problem in result.problems}
+    assert widths == {
+        (round(left[0], 2), round(left[1], 2)),
+        (round(right[0], 2), round(right[1], 2)),
+    }

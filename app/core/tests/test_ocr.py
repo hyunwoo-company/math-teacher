@@ -119,6 +119,64 @@ def test_right_column_left_of_page_center_is_classified_right() -> None:
         doc.close()
 
 
+def _full_width_page_lines(first_no: int) -> list[ocr.OcrLine]:
+    """1단(전폭) 조판 한 페이지분 가짜 OCR 결과(문항 2개, 본문이 전폭으로 흐른다)."""
+    lines: list[ocr.OcrLine] = []
+    for index, no in enumerate((first_no, first_no + 1)):
+        top = 100.0 + index * 300.0
+        lines.append(_line(f"{no}.", _LEFT_X, top, _LEFT_X + 20.0))
+        lines.append(_line("전폭 본문", _LEFT_X, top + 20.0, _CONTENT_X1))
+        lines.append(_line("전폭 본문", _LEFT_X, top + 40.0, _CONTENT_X1))
+    return lines
+
+
+def test_two_column_scan_is_not_detected_as_single_column() -> None:
+    """2단 스캔본은 2단으로 남는다.
+
+    실측(강대X 20쪽, 캐시된 OCR 결과): 전폭 행이 있는 쪽이 17쪽 중 2쪽(12%)이라
+    쪽 단위로 끊으면 그 2쪽만 1단으로 뒤집힌다. 판정을 문서 단위로 두는 이유다.
+    """
+    doc = fitz.open(stream=_scanned_pdf(pages=2), filetype="pdf")
+    try:
+        lines = {0: ocr.text_lines(_page_lines(1)), 1: ocr.text_lines(_page_lines(5))}
+        assert not ocr.detect_single_column(doc, lines)
+        layout = ocr.page_layout(doc[0], lines[0])
+        # 기존 기하 그대로: 좌/우 칼럼이 나뉜다.
+        assert layout.bounds("left") != layout.bounds("right")
+    finally:
+        doc.close()
+
+
+def test_single_column_scan_gets_full_width_bounds() -> None:
+    """1단 스캔본은 1단으로 판정하고, 크롭 x 범위가 본문 전폭이 된다.
+
+    `split_x` 계산(OCR 글자 x 범위의 중앙)은 그대로 쓴다 — 스캔 오프셋 때문에
+    페이지 중앙을 쓸 수 없다는 판단은 이 변경과 무관하다.
+    """
+    raw = _scanned_pdf(pages=2)
+    ocr_lines = {0: _full_width_page_lines(1), 1: _full_width_page_lines(3)}
+    doc = fitz.open(stream=raw, filetype="pdf")
+    try:
+        kept = {index: ocr.text_lines(items) for index, items in ocr_lines.items()}
+        assert ocr.detect_single_column(doc, kept)
+        layout = ocr.page_layout(doc[0], kept[0], single_column=True)
+        assert layout.bounds("left") == layout.bounds("right")
+        assert layout.bounds("left") == (
+            float(layout.content.x0),
+            float(layout.content.x1),
+        )
+        # 분기선은 OCR 글자 범위의 중앙 그대로다(페이지 중앙이 아니다).
+        assert layout.split_x != doc[0].rect.width / 2.0
+    finally:
+        doc.close()
+
+    result = ocr.extract_with_ocr(raw, ocr_lines, render_images=False)
+    assert [problem.no for problem in result.problems] == [1, 2, 3, 4]
+    widths = {round(p.bbox[2] - p.bbox[0], 1) for p in result.problems}
+    # 문항 4개 모두 전폭(글자 범위 32~528 + 여백)이다.
+    assert widths == {round(_CONTENT_X1 + 2.0 - (_LEFT_X - 2.0), 1)}
+
+
 def test_low_confidence_lines_are_dropped() -> None:
     """신뢰도 임계 미달 줄은 앵커가 되지 못한다."""
     raw = _scanned_pdf()
