@@ -200,6 +200,51 @@ def test_render_scale_is_two() -> None:
     assert ocr.RENDER_SCALE == 2.0
 
 
+# --- 렌더 캐시 해제 ----------------------------------------------------------
+# `page.get_pixmap()` 이 MuPDF **전역** store 에 페이지당 약 12MiB 를 쌓고, 그것이
+# `doc.close()` 로도 돌아오지 않아 두 번째 OCR 잡이 파드를 OOMKilled 시켰다
+# (2026-08-22, limit 1Gi). 실측: 15쪽 렌더 후 +242MiB 가 남고, `store_shrink(100)`
+# 을 부르면 즉시 회수된다. 그래서 `read_page` 는 **쪽마다 반드시** 비워야 한다.
+# 이 두 테스트는 그 `finally` 가 지워지는 것을 막는다(회귀 방지가 목적이다).
+
+
+def _one_page() -> fitz.Page:
+    """실제 fitz 페이지 한 장(렌더가 되어야 하므로 가짜로 대체할 수 없다)."""
+    doc = fitz.open(stream=_scanned_pdf(), filetype="pdf")
+    return doc[0]
+
+
+def test_read_page_releases_render_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """정상 경로에서 페이지마다 렌더 캐시를 비운다."""
+    calls: list[int] = []
+    monkeypatch.setattr(ocr, "release_render_cache", lambda: calls.append(1))
+
+    def engine(image: Any) -> tuple[None, float]:
+        return None, 0.0
+
+    assert ocr.read_page(_one_page(), engine=engine) == []
+    assert len(calls) == 1
+
+
+def test_read_page_releases_render_cache_when_engine_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """엔진이 터져도 캐시를 비운다.
+
+    `finally` 가 아니라 정상 경로 끝에만 두면, 한 쪽이 실패한 뒤부터 캐시가
+    쌓이기 시작한다. 그때가 정확히 메모리가 가장 아쉬운 순간이다.
+    """
+    calls: list[int] = []
+    monkeypatch.setattr(ocr, "release_render_cache", lambda: calls.append(1))
+
+    def engine(image: Any) -> tuple[None, float]:
+        raise RuntimeError("엔진 실패")
+
+    with pytest.raises(RuntimeError):
+        ocr.read_page(_one_page(), engine=engine)
+    assert len(calls) == 1
+
+
 def test_false_anchor_is_dropped_by_chain_filter() -> None:
     """오탐(`0.`)은 번호 사슬 필터에서 걸러진다.
 

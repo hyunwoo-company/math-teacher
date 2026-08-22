@@ -79,6 +79,32 @@ MIN_CONFIDENCE: Final[float] = 0.5
 _CONTENT_PAD_PT: Final[float] = 2.0
 
 
+def release_render_cache() -> None:
+    """MuPDF 의 **전역** 렌더 캐시를 비운다.
+
+    왜 필요한가 (2026-08-22 OOMKilled 실측)
+    ------------------------------------
+    `page.get_pixmap()` 은 페이지를 그리면서 원본 이미지의 디코드 결과를 MuPDF
+    전역 store 에 넣어 둔다. 스캔본은 페이지마다 큰 JPEG 한 장이라 그 캐시가
+    **페이지당 약 12MiB** 쌓이고, 캐시 상한(약 256MiB)까지 단조 증가한다.
+    그리고 그 256MiB 는 `doc.close()` 로도 잡이 끝나도 돌아오지 않는다 —
+    store 는 문서가 아니라 MuPDF 컨텍스트에 매달려 있기 때문이다.
+
+    실측(풍문고 54쪽 → 강대X 20쪽을 한 프로세스에서 연달아):
+      - 이 함수 없이: 1번 잡에서 RSS 234 → 506MiB(피크 876MiB), 잡이 끝나고
+        정리해도 **418MiB** 에서 안 내려간다. 그래서 2번 잡은 418MiB 에서
+        시작해 한계를 넘는다. 프로덕션에서 죽은 것이 정확히 이 2번 잡이다
+        (커널 로그: anon-rss 1037576kB + file-rss 97320kB > 1Gi).
+      - 이 함수를 페이지마다 부르면: RSS 가 244MiB 에서 **평평하다**(54쪽 내내),
+        피크 876 → 640MiB.
+
+    전역 캐시를 비우므로 같은 시각 다른 요청이 쓰던 디코드 결과도 함께
+    버려진다. OCR 잡은 단일 워커에서 순차로 도는 백그라운드 작업이고
+    (`jobs`), 캐시가 비면 다시 디코드할 뿐 결과는 같으므로 그 편을 택했다.
+    """
+    fitz.TOOLS.store_shrink(100)
+
+
 class OcrLine(NamedTuple):
     """OCR 이 읽은 글자 한 덩어리. 좌표는 **PDF 좌표계**(pt)로 환산해 둔다."""
 
@@ -144,13 +170,21 @@ def read_page(page: fitz.Page, *, engine: OcrEngine) -> list[OcrLine]:
     Returns:
         읽은 줄들(PDF 좌표계). 아무것도 못 읽으면 빈 목록.
     """
-    pix = page.get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
-    image: npt.NDArray[np.uint8] = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-        pix.height, pix.width, pix.n
-    )
-    if pix.n == 4:  # RGBA -> RGB (엔진은 3채널을 받는다)
-        image = image[:, :, :3]
-    result, _elapsed = engine(image)
+    try:
+        pix = page.get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
+        image: npt.NDArray[np.uint8] = np.frombuffer(
+            pix.samples, dtype=np.uint8
+        ).reshape(pix.height, pix.width, pix.n)
+        if pix.n == 4:  # RGBA -> RGB (엔진은 3채널을 받는다)
+            image = image[:, :, :3]
+        # `pix.samples` 는 이미 복사본이다(`image` 가 그 bytes 를 붙잡고 있다).
+        # 추론이 순간 268MiB 를 쓰므로 그 전에 렌더 버퍼(약 6MiB)를 놓는다.
+        del pix
+        result, _elapsed = engine(image)
+        del image
+    finally:
+        # 페이지마다 반드시 비운다 — 안 비우면 페이지당 12MiB 가 쌓인다.
+        release_render_cache()
     if not result:
         return []
 
@@ -413,6 +447,9 @@ async def ocr_events(
         result = await run_in_threadpool(
             partial(extract_with_ocr, raw, ocr_lines, min_confidence=min_confidence)
         )
+        # 크롭 렌더도 같은 전역 캐시를 채운다. 잡 경계에서 비워, 다음 잡이
+        # 남은 캐시를 짊어지고 시작하지 않게 한다.
+        await run_in_threadpool(release_render_cache)
         problem_count = await run_in_threadpool(
             service.apply_ocr_problems, node_id, result
         )
