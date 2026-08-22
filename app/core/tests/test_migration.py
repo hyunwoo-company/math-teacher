@@ -148,6 +148,8 @@ def test_migration_preserves_data_and_adds_schema(tmp_path: Path) -> None:
                 # 판독본 스냅샷(v7). 담을 때 복사하고 원본이 지워져도 남는다.
                 "transcript",
                 "transcript_source",
+                # 지면 번호 표기 스냅샷(v10). 위와 같은 규칙으로 복사한다.
+                "problem_label",
                 "created_at",
             }
             indexes = {
@@ -252,7 +254,7 @@ def test_v2_db_gains_variants_table(tmp_path: Path) -> None:
 
         conn = storage.connect()
         try:
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 9
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 10
             assert "variants" in {
                 str(row["name"])
                 for row in conn.execute(
@@ -500,7 +502,7 @@ def test_v6_db_gains_note_item_transcript_snapshot(tmp_path: Path) -> None:
         config.use_data_dir(data_dir)
         storage.init_db()
         with storage.transaction() as conn:
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 9
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 10
             assert {"transcript", "transcript_source"} <= storage.table_columns(
                 conn, "note_items"
             )
@@ -534,6 +536,128 @@ def test_v6_db_gains_note_item_transcript_snapshot(tmp_path: Path) -> None:
         config.use_data_dir(original)
 
 
+# v9 note_items. 판독본 스냅샷 2열은 있지만 지면 표기(`problem_label`)가 없다.
+V9_NOTE_ITEMS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS note_items (
+    id TEXT PRIMARY KEY,
+    note_node_id TEXT NOT NULL,
+    source_node_id TEXT NULL,
+    source_name TEXT NOT NULL,
+    problem_no INTEGER NOT NULL,
+    crop_snapshot_path TEXT NOT NULL DEFAULT '',
+    memo TEXT NULL,
+    transcript TEXT NULL,
+    transcript_source TEXT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (note_node_id, source_node_id, problem_no)
+);
+PRAGMA user_version = 9;
+"""
+
+
+def _make_v9_note_db(data_dir: Path) -> None:
+    """v9 스키마 + 이미 담아 둔 노트 항목 1건이 있는 DB."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(data_dir / "app.db")
+    try:
+        conn.executescript(LEGACY_SCHEMA)
+        conn.executescript(V9_NOTE_ITEMS_SCHEMA)
+        conn.execute(
+            "INSERT INTO note_items"
+            " (id, note_node_id, source_node_id, source_name, problem_no,"
+            "  crop_snapshot_path, memo, transcript, transcript_source, created_at)"
+            " VALUES ('item1', 'note1', 'file1', '오리진1', 7,"
+            "  'note_crops/item1.png', '계산 실수', '값 x', 'pua',"
+            "  '2026-08-21T10:00:00+09:00')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_v9_db_gains_note_item_problem_label(tmp_path: Path) -> None:
+    """v9 DB 를 열면 `problem_label` 이 생기고 기존 항목은 NULL 로 남는다.
+
+    백필하지 않는다 — 담은 시점의 지면 표기가 무엇이었는지는 지금 알 수 없다
+    (원본이 재추출·삭제됐을 수 있다). NULL 이 "표기 스냅샷이 없다" 는 사실이고,
+    그런 항목은 예전처럼 `{problem_no}번` 으로 나간다.
+    """
+    data_dir = tmp_path / "v9-data"
+    _make_v9_note_db(data_dir)
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        storage.init_db()
+        with storage.transaction() as conn:
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 10
+            assert "problem_label" in storage.table_columns(conn, "note_items")
+            item = storage.get_note_item(conn, "item1")
+            assert item is not None
+            # 기존 스냅샷은 그대로다.
+            assert item["memo"] == "계산 실수"
+            assert item["transcript"] == "값 x"
+            assert item["problem_label"] is None
+            # 새 컬럼을 바로 쓸 수 있다.
+            assert (
+                storage.insert_note_item(
+                    conn,
+                    item_id="item2",
+                    note_node_id="note1",
+                    source_node_id="file1",
+                    source_name="오리진1",
+                    problem_no=8,
+                    crop_snapshot_path="",
+                    memo=None,
+                    problem_label="기본 문제 2-3",
+                )
+                is True
+            )
+            saved = storage.get_note_item(conn, "item2")
+            assert saved is not None
+            assert saved["problem_label"] == "기본 문제 2-3"
+    finally:
+        config.use_data_dir(original)
+
+
+def test_note_item_problem_label_survives_repeated_migration(tmp_path: Path) -> None:
+    """마이그레이션을 여러 번 돌려도 표기 스냅샷이 바뀌지 않는다(멱등).
+
+    두 번째 실행이 컬럼을 다시 추가하려 들면 SQLite 가 에러를 내고, 백필을 하면
+    NULL 이던 항목이 값을 얻는다. 둘 다 일어나지 않아야 한다.
+    """
+    data_dir = tmp_path / "v9-data"
+    _make_v9_note_db(data_dir)
+    original = config.data_dir()
+    try:
+        config.use_data_dir(data_dir)
+        storage.init_db()
+        with storage.transaction() as conn:
+            storage.insert_note_item(
+                conn,
+                item_id="item2",
+                note_node_id="note1",
+                source_node_id="file1",
+                source_name="오리진1",
+                problem_no=8,
+                crop_snapshot_path="",
+                memo=None,
+                problem_label="유제 1-2",
+            )
+
+        for _ in range(3):  # 여러 번 기동해도 안전해야 한다
+            storage.init_db()
+
+        with storage.transaction() as conn:
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 10
+            first = storage.get_note_item(conn, "item1")
+            second = storage.get_note_item(conn, "item2")
+            assert first is not None and second is not None
+            assert first["problem_label"] is None  # 백필되지 않는다
+            assert second["problem_label"] == "유제 1-2"
+    finally:
+        config.use_data_dir(original)
+
+
 def test_migration_adds_files_extract_error_without_backfill(tmp_path: Path) -> None:
     """v1 DB 에 `files.extract_error` 가 생기고 기존 행은 NULL 로 남는다.
 
@@ -555,7 +679,7 @@ def test_migration_adds_files_extract_error_without_backfill(tmp_path: Path) -> 
             assert row["extract_error"] is None
             # 기존 메타는 그대로다.
             assert row["problem_count"] == 22
-            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 9
+            assert storage.user_version(conn) == storage.SCHEMA_VERSION == 10
         finally:
             conn.close()
     finally:

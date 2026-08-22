@@ -26,7 +26,7 @@ from PIL import Image as PilImage
 
 from export import layout
 from export.hwpeq import HwpEquationError, latex_to_hwp_equation
-from export.model import ExportDoc, Heading, Image, MathRun, Text, TextRun
+from export.model import ExportDoc, Heading, Image, MathRun, PageBreak, Text, TextRun
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
@@ -140,6 +140,12 @@ def build_hwpx(doc: ExportDoc) -> bytes:
             )
         elif isinstance(block, Text):
             _add_text(document, block)
+        elif isinstance(block, PageBreak):
+            # 한글은 페이지 나눔을 문단 속성으로 표현한다(`hp:p/@pageBreak`).
+            # 전용 API 가 없어 `add_paragraph` 의 raw 속성 통로(`**extra_attrs`)로
+            # 넣는다 — 서식을 지정하지 않는 이 모듈의 방침과 어긋나지 않는 최소
+            # 조작이고, XML 을 직접 조립하지 않는다.
+            document.add_paragraph("", pageBreak="1")
     if doc.footer:
         # 출처 한 줄. 서식을 지정하지 않는 이 모듈의 방침대로 기본 문단으로 넣는다.
         document.add_paragraph(doc.footer)

@@ -4,6 +4,7 @@
 - `.docx` 는 ZIP 시그니처 `PK`, `.hwpx` 는 ZIP 안 `mimetype == application/hwp+zip`.
 - `.hwpx` 안에 `BinData/` 이미지가 문항 수만큼 있다.
 - `include=full` 이 `include=problems` 보다 크다(해설이 실제로 들어갔다).
+- `include=full` 은 해설을 **문서 끝으로 모은다**(페이지 나눔 + `정답 및 해설`).
 - 내보낼 것이 없으면 400 + 한국어 메시지.
 - Content-Disposition 의 한글 파일명이 RFC5987 로 인코딩된다.
 - 접속 비밀번호가 설정된 상태에서 `?access=` 로 `.hwpx` 가 200 (미들웨어 회귀 방지).
@@ -940,3 +941,414 @@ def test_note_text_body_keeps_the_crop_snapshot_for_a_figure(tmp_path: Path) -> 
     images = [b for b in blocks if isinstance(b, export_model.Image)]
     assert texts and images
     assert blocks.index(texts[0]) < blocks.index(images[0])
+
+
+# ------------------------------------------------- 지면 번호 표기(problems.label)
+# `no` 는 저장·조회용 통짜 순번이고 `label` 은 지면에 실제로 찍힌 표기다.
+# 정석 계열(`기본 문제 1-1` / `유제 1-1`)처럼 구획마다 번호가 되돌아가는 교재는
+# 둘이 달라서, 내보낸 문서가 `1번` 이면 원본과 대조할 수 없다.
+PRINTED_LABEL = "기본 문제 1-1"
+
+
+def _headings(doc: export_model.ExportDoc) -> list[str]:
+    """문서의 2수준 제목(문항 제목)만."""
+    return [
+        block.text
+        for block in doc.blocks
+        if isinstance(block, export_model.Heading) and block.level == 2
+    ]
+
+
+@pytest.mark.parametrize("label", ["", "1", "  1  "])
+def test_label_same_as_the_number_changes_nothing(tmp_path: Path, label: str) -> None:
+    """표기가 없거나 `str(no)` 와 같으면 문서가 **완전히 동일**하다(회귀 방지선).
+
+    보통 시험지는 `label == str(no)` 다. 이 경로에서 결과물이 한 글자라도
+    달라지면 이미 배포한 문서와 대조가 깨지므로, 조립 결과를 통째로 비교한다.
+    """
+    crop = _crop(tmp_path)
+    exam_bare = export_build.build_exam_doc(
+        title="시험지",
+        items=[export_build.ExamItem(no=1, image=crop)],
+        include_full=False,
+    )
+    exam_labeled = export_build.build_exam_doc(
+        title="시험지",
+        items=[export_build.ExamItem(no=1, label=label, image=crop)],
+        include_full=False,
+    )
+    assert exam_labeled == exam_bare
+
+    variants_bare = export_build.build_variants_doc(
+        title="변형",
+        items=[export_build.VariantItem(no=1, mode="number", text=VARIANT_TEXT)],
+        include_full=False,
+    )
+    variants_labeled = export_build.build_variants_doc(
+        title="변형",
+        items=[
+            export_build.VariantItem(
+                no=1, mode="number", text=VARIANT_TEXT, label=label
+            )
+        ],
+        include_full=False,
+    )
+    assert variants_labeled == variants_bare
+
+    note_bare = export_build.build_note_doc(
+        title="오답노트",
+        items=[export_build.NoteItem(source_name="풍문고", problem_no=1, image=crop)],
+        include_full=False,
+    )
+    note_labeled = export_build.build_note_doc(
+        title="오답노트",
+        items=[
+            export_build.NoteItem(
+                source_name="풍문고", problem_no=1, label=label, image=crop
+            )
+        ],
+        include_full=False,
+    )
+    assert note_labeled == note_bare
+
+
+def test_exam_doc_uses_the_printed_label_without_adding_beon(tmp_path: Path) -> None:
+    """표기가 다르면 제목이 그 표기이고, `번` 을 덧붙이지 않는다.
+
+    `기본 문제 1-1번` 은 이상하다 — `번` 은 순번을 읽어 주는 조수사이고 지면
+    표기는 이미 완성된 이름이다.
+    """
+    crop = _crop(tmp_path)
+    doc = export_build.build_exam_doc(
+        title="시험지",
+        items=[
+            export_build.ExamItem(no=1, label=PRINTED_LABEL, image=crop),
+            export_build.ExamItem(no=2, label="유제 1-1", image=crop),
+        ],
+        include_full=False,
+    )
+    assert _headings(doc) == [PRINTED_LABEL, "유제 1-1"]
+    assert not any(heading.endswith("번") for heading in _headings(doc))
+
+
+def test_variants_doc_puts_the_printed_label_before_the_mode() -> None:
+    """변형은 `{표기} · {종류}` 형태를 유지한다."""
+    doc = export_build.build_variants_doc(
+        title="변형",
+        items=[
+            export_build.VariantItem(
+                no=1, mode="number", text=VARIANT_TEXT, label=PRINTED_LABEL
+            )
+        ],
+        include_full=False,
+    )
+    assert _headings(doc) == [f"{PRINTED_LABEL} · 숫자 변형"]
+
+
+def test_note_doc_uses_the_printed_label_snapshot(tmp_path: Path) -> None:
+    """오답노트 제목은 `{시험지명} {표기}` 다(`번` 없음)."""
+    crop = _crop(tmp_path)
+    doc = export_build.build_note_doc(
+        title="오답노트",
+        items=[
+            export_build.NoteItem(
+                source_name="오리진1", problem_no=1, label=PRINTED_LABEL, image=crop
+            )
+        ],
+        include_full=False,
+    )
+    assert _headings(doc) == [f"오리진1 {PRINTED_LABEL}"]
+
+
+def _set_label(node_id: str, no: int, label: str) -> None:
+    """문항의 지면 표기를 직접 바꾼다(정석 계열 교재를 흉내낸다)."""
+    with storage.transaction() as conn:
+        conn.execute(
+            "UPDATE problems SET label = ? WHERE node_id = ? AND no = ?",
+            (label, node_id, no),
+        )
+
+
+def test_exam_export_route_uses_the_printed_label(client: TestClient) -> None:
+    """업로드 → 내보내기 경로 끝까지 지면 표기가 흐른다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _set_label(node_id, 3, PRINTED_LABEL)
+
+    response = client.get(f"/api/files/{node_id}/export.docx")
+    assert response.status_code == 200, response.text
+    text = _document_text(response.content, "docx")
+    assert PRINTED_LABEL in text
+    assert f"{PRINTED_LABEL}번" not in text
+    # 표기가 번호와 같은 나머지 문항은 예전 제목 그대로다.
+    assert "1번" in text
+
+
+def test_variants_export_route_uses_the_printed_label(client: TestClient) -> None:
+    """변형은 `variants` 에 표기가 없으므로 `problems.label` 을 조회해 붙인다."""
+    node_id = upload_test_pdf(client)["node"]["id"]
+    _set_label(node_id, 2, PRINTED_LABEL)
+    _save_variant(node_id, 2, "number")
+
+    response = client.get(f"/api/files/{node_id}/variants/export.docx")
+    assert response.status_code == 200, response.text
+    text = _document_text(response.content, "docx")
+    assert f"{PRINTED_LABEL} · 숫자 변형" in text
+    assert f"{PRINTED_LABEL}번" not in text
+
+
+def test_note_export_uses_the_label_snapshot_from_when_it_was_added(
+    client: TestClient,
+) -> None:
+    """오답노트는 **담은 시점**의 표기를 쓴다.
+
+    원본이 재추출돼 표기가 바뀌어도(여기서는 직접 갈아 끼운다) 이미 담은 항목은
+    담긴 그 시점의 표기로 남아야 한다 — 크롭·판독본 스냅샷과 같은 규칙이다.
+    """
+    source_id = upload_test_pdf(client)["node"]["id"]
+    _set_label(source_id, 3, PRINTED_LABEL)
+    note_id = make_note(client, "이현우 오답")
+    added = client.post(
+        f"/api/notes/{note_id}/items",
+        json={"source_node_id": source_id, "problem_numbers": [3]},
+    )
+    assert added.status_code == 201, added.text
+
+    # 담은 뒤 원본 표기가 바뀐다(재추출 상황).
+    _set_label(source_id, 3, "유제 9-9")
+
+    response = client.get(f"/api/notes/{note_id}/export.docx")
+    assert response.status_code == 200, response.text
+    text = _document_text(response.content, "docx")
+    assert PRINTED_LABEL in text
+    assert "유제 9-9" not in text
+
+
+# --------------------------------------- 해설 미주(문서 끝 해설 모음, ERR-12)
+# 요구: "문항은 위에 따로 해설은 밑에 미주로 모아주기 (항상)".
+# 시험지 앞장만 떼어 학생에게 나눠 줄 수 있어야 한다. 설정은 만들지 않는다 —
+# `include_full=True` 면 항상 뒤로 모인다.
+SOLUTION_ONLY_SKIPPED = """## 문제 확인
+이 문항은 이차함수의 최댓값을 묻습니다.
+
+## 검산
+구한 값을 원식에 도로 넣으면 성립합니다.
+"""
+
+ANSWER_SECTION_HEADING = export_model.Heading("정답 및 해설", 1)
+
+
+def _headings_2(blocks: list[export_model.Block]) -> list[str]:
+    """블록 목록의 2수준 제목(문항 제목)만."""
+    return [
+        block.text
+        for block in blocks
+        if isinstance(block, export_model.Heading) and block.level == 2
+    ]
+
+
+def _split_at_page_break(
+    doc: export_model.ExportDoc,
+) -> tuple[list[export_model.Block], list[export_model.Block]]:
+    """문서를 페이지 나눔 기준으로 (문항부, 해설부)로 자른다.
+
+    해설부는 `정답 및 해설` 표제를 뺀 나머지다.
+    """
+    blocks = list(doc.blocks)
+    breaks = [
+        index
+        for index, block in enumerate(blocks)
+        if isinstance(block, export_model.PageBreak)
+    ]
+    assert len(breaks) == 1, f"페이지 나눔이 1개여야 한다: {breaks}"
+    cut = breaks[0]
+    assert blocks[cut + 1] == ANSWER_SECTION_HEADING, blocks[cut + 1]
+    return blocks[:cut], blocks[cut + 2 :]
+
+
+def test_problems_only_export_is_exactly_the_old_document(tmp_path: Path) -> None:
+    """`include_full=False` 는 예전과 **완전히 동일**하다(회귀 방지선).
+
+    풀이를 애초에 넣지 않으므로 나눌 것이 없다 — 페이지 나눔도 `정답 및 해설`
+    표제도 생기면 안 된다. 이미 배포한 문제지와 대조가 깨지지 않게 조립 결과를
+    통째로 비교한다.
+    """
+    crop = _crop(tmp_path)
+    doc = export_build.build_exam_doc(
+        title="시험지",
+        items=[
+            export_build.ExamItem(no=1, image=crop, solution=SOLUTION_TEXT),
+            export_build.ExamItem(no=2, image=crop, solution=SOLUTION_TEXT),
+        ],
+        include_full=False,
+    )
+    assert doc == export_model.ExportDoc(
+        title="시험지",
+        blocks=[
+            export_model.Heading("1번", 2),
+            export_model.Image(crop),
+            export_model.Heading("2번", 2),
+            export_model.Image(crop),
+        ],
+        footer=None,
+        notice=None,
+    )
+
+
+def test_full_export_puts_every_solution_behind_a_page_break(tmp_path: Path) -> None:
+    """`include_full=True` 면 문항부 → 페이지 나눔 → 표제 → 해설부 순서다.
+
+    문항부에는 풀이 소제목(3수준)이 하나도 없고, 해설부에는 크롭 이미지가 하나도
+    없어야 한다 — 섞여 있으면 앞장만 떼어 나눠 줄 수 없다.
+    """
+    crop = _crop(tmp_path)
+    doc = export_build.build_exam_doc(
+        title="시험지",
+        items=[
+            export_build.ExamItem(no=1, image=crop, solution=SOLUTION_TEXT),
+            export_build.ExamItem(no=2, image=crop, solution=SOLUTION_TEXT),
+        ],
+        include_full=True,
+    )
+    problems, answers = _split_at_page_break(doc)
+
+    assert problems == [
+        export_model.Heading("1번", 2),
+        export_model.Image(crop),
+        export_model.Heading("2번", 2),
+        export_model.Image(crop),
+    ]
+    assert not any(
+        isinstance(block, export_model.Heading) and block.level == 3 for block in problems
+    )
+    assert not any(isinstance(block, export_model.Image) for block in answers)
+    assert _headings_2(answers) == ["1번", "2번"]
+    # 해설부 안 구성은 예전 그대로다(문항 제목 아래 3수준 소제목).
+    assert [
+        block.text for block in answers if isinstance(block, export_model.Heading)
+    ] == ["1번", "풀이", "정답", "2번", "풀이", "정답"]
+
+
+def test_answer_section_lists_only_items_that_have_a_solution(tmp_path: Path) -> None:
+    """풀이가 없는 문항은 해설부에 **제목조차 나오지 않는다**.
+
+    제목만 남기면 해설이 있는 척하는 빈 항목이 되어, 학생이 빠진 것을 찾는다.
+    문항부에는 세 문항이 그대로 다 있어야 한다.
+    """
+    crop = _crop(tmp_path)
+    doc = export_build.build_exam_doc(
+        title="시험지",
+        items=[
+            export_build.ExamItem(no=1, image=crop),
+            export_build.ExamItem(no=2, image=crop, solution=SOLUTION_TEXT),
+            # 섹션이 전부 `_SKIPPED_SECTIONS` 라 넣을 블록이 남지 않는 풀이.
+            export_build.ExamItem(no=3, image=crop, solution=SOLUTION_ONLY_SKIPPED),
+        ],
+        include_full=True,
+    )
+    problems, answers = _split_at_page_break(doc)
+
+    assert _headings_2(problems) == ["1번", "2번", "3번"]
+    assert _headings_2(answers) == ["2번"]
+
+
+def test_full_export_without_any_solution_has_no_answer_section(tmp_path: Path) -> None:
+    """풀이가 하나도 없으면 페이지 나눔도 표제도 없다(빈 페이지 방지).
+
+    결과가 `include_full=False` 와 **완전히 같아야** 한다.
+    """
+    crop = _crop(tmp_path)
+    items = [export_build.ExamItem(no=1, image=crop)]
+    full = export_build.build_exam_doc(title="시험지", items=items, include_full=True)
+    problems_only = export_build.build_exam_doc(
+        title="시험지", items=items, include_full=False
+    )
+    assert full == problems_only
+    assert not any(isinstance(block, export_model.PageBreak) for block in full.blocks)
+    assert ANSWER_SECTION_HEADING not in list(full.blocks)
+
+
+def test_answer_heading_matches_the_problem_heading(tmp_path: Path) -> None:
+    """지면 표기가 다른 문항도 문항부와 해설부의 제목이 **같다**.
+
+    둘이 어긋나면 뒷장에서 해당 문항을 찾을 수 없다.
+    """
+    crop = _crop(tmp_path)
+    doc = export_build.build_exam_doc(
+        title="시험지",
+        items=[
+            export_build.ExamItem(
+                no=1, label=PRINTED_LABEL, image=crop, solution=SOLUTION_TEXT
+            )
+        ],
+        include_full=True,
+    )
+    problems, answers = _split_at_page_break(doc)
+    assert _headings_2(problems) == [PRINTED_LABEL]
+    assert _headings_2(answers) == [PRINTED_LABEL]
+
+
+def test_variants_and_note_docs_keep_solutions_inline(tmp_path: Path) -> None:
+    """변형·오답노트는 **바뀌지 않는다** — 해설이 문항 옆에 그대로 있다.
+
+    오답노트는 틀린 문제를 바로 다시 보는 용도라 해설이 옆에 있어야 하고,
+    변형은 이번 요구 범위가 아니다.
+    """
+    crop = _crop(tmp_path)
+    variants = export_build.build_variants_doc(
+        title="변형",
+        items=[export_build.VariantItem(no=1, mode="number", text=VARIANT_TEXT)],
+        include_full=True,
+    )
+    note = export_build.build_note_doc(
+        title="오답노트",
+        items=[
+            export_build.NoteItem(
+                source_name="풍문고",
+                problem_no=1,
+                image=crop,
+                solution=SOLUTION_TEXT,
+            )
+        ],
+        include_full=True,
+    )
+    for doc in (variants, note):
+        assert not any(isinstance(block, export_model.PageBreak) for block in doc.blocks)
+        assert ANSWER_SECTION_HEADING not in list(doc.blocks)
+    # 오답노트는 문항 제목 → 크롭 → 풀이 소제목이 이어진다(예전 구성).
+    assert [type(block).__name__ for block in note.blocks][:3] == [
+        "Heading",
+        "Image",
+        "Heading",
+    ]
+
+
+PAGE_BREAK_DOC = export_model.ExportDoc(
+    title="시험지",
+    blocks=[
+        export_model.Text("문항부"),
+        export_model.PageBreak(),
+        export_model.Heading("정답 및 해설", 1),
+        export_model.Text("해설부"),
+    ],
+)
+
+
+def test_docx_renders_a_hard_page_break() -> None:
+    """docx 는 워드 네이티브 페이지 나눔(`w:br w:type="page"`)으로 지면을 끊는다."""
+    payload = export_docx.build_docx(PAGE_BREAK_DOC)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        document = archive.read("word/document.xml").decode("utf-8")
+    assert '<w:br w:type="page"/>' in document
+    assert document.count('w:type="page"') == 1
+
+
+def test_hwpx_renders_a_hard_page_break() -> None:
+    """hwpx 는 문단 속성(`hp:p/@pageBreak="1"`)으로 지면을 끊는다.
+
+    한글이 없는 환경이라 렌더는 못 보지만 저장된 XML 은 확인할 수 있다. 보통
+    문단은 모두 `pageBreak="0"` 으로 나가므로 `1` 이 유의미한 값이다.
+    """
+    payload = export_hwpx.build_hwpx(PAGE_BREAK_DOC)
+    section = _section_text(payload)
+    assert 'pageBreak="1"' in section
+    assert section.count('pageBreak="1"') == 1

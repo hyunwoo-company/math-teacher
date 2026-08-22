@@ -722,6 +722,8 @@ def export_exam(
         items.append(
             export_build.ExamItem(
                 no=no,
+                # 지면 표기. `no` 와 같으면 조립부가 예전 제목을 그대로 쓴다.
+                label=str(problem.get("label") or ""),
                 image=crop if has_crop else None,
                 solution=solutions_by_no.get(no),
                 transcript=transcript,
@@ -781,6 +783,8 @@ def export_variants(
     with storage.transaction() as conn:
         node = require_file_node(conn, node_id)
         rows = storage.list_variants(conn, node_id)
+        # `variants` 에는 `no` 만 있어 지면 표기를 따로 조회한다.
+        labels = storage.problem_labels(conn, node_id)
     if not rows:
         raise bad_request(
             "no_variants",
@@ -790,7 +794,10 @@ def export_variants(
 
     items = [
         export_build.VariantItem(
-            no=int(row["no"]), mode=str(row["mode"]), text=str(row["text"])
+            no=int(row["no"]),
+            mode=str(row["mode"]),
+            text=str(row["text"]),
+            label=labels.get(int(row["no"]), ""),
         )
         for row in rows
     ]
@@ -865,6 +872,9 @@ def export_note(
             export_build.NoteItem(
                 source_name=_display_exam_name(str(row["source_name"])),
                 problem_no=int(row["problem_no"]),
+                # 담을 때 복사한 지면 표기 스냅샷. 원본을 다시 읽지 않는다
+                # (크롭·판독본 스냅샷과 같은 규칙).
+                label=str(row.get("problem_label") or ""),
                 image=image if image is not None and image.is_file() else None,
                 memo=row["memo"],
                 solution=solutions_by_item.get(str(row["id"])),
@@ -1252,9 +1262,10 @@ def add_note_items(
 ) -> dict[str, list[int]]:
     """여러 문항을 한 번에 담는다. 이미 있는 문항은 `skipped` 로 돌려준다(멱등).
 
-    추가 시점의 시험지 이름·크롭 PNG·**판독본**을 스냅샷으로 복사해 둔다. 원본을
-    참조하면 원본 삭제 시 깨지기 때문이다(설계 §3-3). 담은 뒤에 원본 판독본을
-    다시 만들거나 고쳐도 이미 담은 항목은 담긴 그 시점의 텍스트로 남는다.
+    추가 시점의 시험지 이름·크롭 PNG·**판독본·지면 번호 표기**를 스냅샷으로
+    복사해 둔다. 원본을 참조하면 원본 삭제 시 깨지기 때문이다(설계 §3-3). 담은
+    뒤에 원본 판독본을 다시 만들거나 고쳐도 이미 담은 항목은 담긴 그 시점의
+    텍스트·표기로 남는다.
 
     Raises:
         ApiError: 노트/시험지를 찾을 수 없거나 없는 문항 번호일 때.
@@ -1302,6 +1313,7 @@ def add_note_items(
                 memo=memo,
                 transcript=by_no[no].get("transcript"),
                 transcript_source=by_no[no].get("transcript_source"),
+                problem_label=by_no[no].get("label"),
             )
             if not inserted:  # 동시 요청이 먼저 넣은 경우
                 skipped.append(no)

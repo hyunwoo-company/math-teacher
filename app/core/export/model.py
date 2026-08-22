@@ -77,7 +77,19 @@ class Text:
     lines: Sequence[Sequence[Run]] | None = None
 
 
-Block = Heading | Image | Text
+@dataclass(frozen=True)
+class PageBreak:
+    """페이지 나눔 블록.
+
+    필드가 없다 — 이 블록은 "여기서 지면을 끊어라" 라는 지시뿐이다. 문서 구성
+    규칙(`build.py`)이 문항부와 해설부를 갈라야 해서 생겼다(시험지 미주 구성).
+
+    두 렌더러 모두 형식 고유 기능으로 낸다. docx 는 `w:br w:type="page"`
+    (`Document.add_page_break`), hwpx 는 빈 문단의 `hp:p/@pageBreak` 속성이다.
+    """
+
+
+Block = Heading | Image | PageBreak | Text
 
 
 @dataclass(frozen=True)
@@ -107,6 +119,7 @@ __all__ = [
     "Heading",
     "Image",
     "MathRun",
+    "PageBreak",
     "Run",
     "Text",
     "TextRun",

@@ -33,8 +33,9 @@ SECTION_NOTE: Final[str] = "note"
 # 6 = problems.transcript / transcript_source / transcript_note (문항 텍스트화),
 # 7 = note_items.transcript / transcript_source (판독본 스냅샷),
 # 8 = problem_types / bank_problems / problem_tags (공용 문항 코퍼스),
-# 9 = files.extract_error (추출 실패/0문항 사유를 화면에서도 볼 수 있게).
-SCHEMA_VERSION: Final[int] = 9
+# 9 = files.extract_error (추출 실패/0문항 사유를 화면에서도 볼 수 있게),
+# 10 = note_items.problem_label (담을 때의 지면 번호 표기 스냅샷).
+SCHEMA_VERSION: Final[int] = 10
 
 # `problems.transcript_source` 값. 출처마다 신뢰도가 다르므로 반드시 남긴다.
 #   pua    = PDF 텍스트 레이어 디코딩(AI 호출 0회, 결정적)
@@ -146,6 +147,12 @@ CREATE TABLE IF NOT EXISTS note_items (
     problem_no INTEGER NOT NULL,
     crop_snapshot_path TEXT NOT NULL DEFAULT '',
     memo TEXT NULL,
+    -- 지면 번호 표기 **스냅샷**(v10). 담은 시점의 `problems.label` 사본이다.
+    -- `problem_no` 는 저장용 통짜 순번이라 구획마다 번호가 되돌아가는 교재에서는
+    -- 지면 표기와 다르고, 내보낸 오답노트가 원본과 대조되지 않는다.
+    -- 크롭·판독본과 같은 규칙으로 복사한다 — 원본이 재추출돼 표기가 바뀌어도
+    -- 이미 담은 항목은 담긴 그 시점의 표기로 남아야 한다.
+    problem_label TEXT NULL,
     -- 판독본 **스냅샷**. 담은 시점의 `problems.transcript` 를 복사한 값이고,
     -- 원본 시험지가 지워져도 텍스트로 내보낼 수 있어야 하므로 참조가 아니라
     -- 복사다(크롭 스냅샷과 같은 규칙, 설계 §3-3).
@@ -362,6 +369,11 @@ def migrate(conn: sqlite3.Connection) -> None:
         for column in ("transcript", "transcript_source"):
             if column not in note_item_columns:
                 conn.execute(f"ALTER TABLE note_items ADD COLUMN {column} TEXT NULL")
+        # 지면 표기 스냅샷(v10). 백필하지 않는다 — 담은 시점의 표기가 무엇이었는지는
+        # 지금 알 수 없고(원본이 재추출·삭제됐을 수 있다), NULL 이 "표기 스냅샷이
+        # 없다"는 사실이다. 그런 항목은 예전처럼 `{problem_no}번` 으로 나간다.
+        if "problem_label" not in note_item_columns:
+            conn.execute("ALTER TABLE note_items ADD COLUMN problem_label TEXT NULL")
 
     conn.executescript(POST_MIGRATION_SCHEMA)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -765,6 +777,26 @@ def get_problem(conn: sqlite3.Connection, node_id: str, no: int) -> dict[str, An
         "SELECT * FROM problems WHERE node_id = ? AND no = ?", (node_id, no)
     ).fetchone()
     return None if row is None else _problem_row_to_dict(row)
+
+
+def problem_labels(conn: sqlite3.Connection, node_id: str) -> dict[int, str]:
+    """문항 번호 -> 지면 번호 표기.
+
+    변형 내보내기가 쓴다 — `variants` 테이블에는 `no` 만 있어 지면 표기를 알
+    수 없다. 본문·bbox 까지 읽는 `list_problems` 와 달리 두 열만 읽는다.
+
+    Args:
+        conn: 열린 커넥션.
+        node_id: 시험지 노드 id.
+
+    Returns:
+        `{문항 번호: 표기}`. 표기가 빈 행은 담지 않는다(호출자에게 "없음" 과 같다).
+    """
+    rows = conn.execute(
+        "SELECT no, label FROM problems WHERE node_id = ?", (node_id,)
+    ).fetchall()
+    labels = {int(row["no"]): str(row["label"] or "") for row in rows}
+    return {no: label for no, label in labels.items() if label}
 
 
 # ------------------------------------------------------------- transcripts
@@ -1391,6 +1423,9 @@ def _note_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "problem_no": int(row["problem_no"]),
         "crop_snapshot_path": row["crop_snapshot_path"],
         "memo": row["memo"],
+        # 지면 표기 스냅샷(v10). 마이그레이션 전에 열린 커넥션이 컬럼 없는 행을
+        # 줄 수 있으므로 `_optional_text` 로 방어적으로 읽는다.
+        "problem_label": _optional_text(row, "problem_label"),
         # 판독본 스냅샷(v7). 마이그레이션 전에 열린 커넥션이 컬럼 없는 행을 줄
         # 수 있으므로 `_optional_text` 로 방어적으로 읽는다.
         "transcript": _optional_text(row, "transcript"),
@@ -1423,6 +1458,7 @@ def insert_note_item(
     memo: str | None,
     transcript: str | None = None,
     transcript_source: str | None = None,
+    problem_label: str | None = None,
 ) -> bool:
     """노트 항목을 추가한다. 이미 있으면 아무것도 하지 않고 False.
 
@@ -1437,6 +1473,9 @@ def insert_note_item(
         memo: 메모(없으면 None).
         transcript: 담는 시점의 판독본 **스냅샷**(없으면 None).
         transcript_source: 그 판독본의 출처(`pua` / `ai` / `manual`).
+        problem_label: 담는 시점의 지면 번호 표기 **스냅샷**(없으면 None).
+            `problem_no` 와 같으면 굳이 저장하지 않아도 되지만, 사실을 그대로
+            남기는 편이 나중에 판정하기 쉬워 호출자가 준 값을 그대로 넣는다.
 
     Returns:
         실제로 넣었으면 True. 같은 (노트, 시험지, 문항)이 이미 있으면 False.
@@ -1445,8 +1484,9 @@ def insert_note_item(
         """
         INSERT INTO note_items
             (id, note_node_id, source_node_id, source_name, problem_no,
-             crop_snapshot_path, memo, transcript, transcript_source, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             crop_snapshot_path, memo, transcript, transcript_source,
+             problem_label, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(note_node_id, source_node_id, problem_no) DO NOTHING
         """,
         (
@@ -1459,6 +1499,7 @@ def insert_note_item(
             memo,
             transcript,
             transcript_source,
+            problem_label,
             now_iso(),
         ),
     )

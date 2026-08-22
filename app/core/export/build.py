@@ -22,7 +22,17 @@ from typing import Final, Literal
 
 import figure_ref
 import markdown_sections
-from export.model import Block, ExportDoc, Heading, Image, MathRun, Run, Text, TextRun
+from export.model import (
+    Block,
+    ExportDoc,
+    Heading,
+    Image,
+    MathRun,
+    PageBreak,
+    Run,
+    Text,
+    TextRun,
+)
 from to_plain_text import PlainSegment, to_plain_segments, to_plain_text
 
 # 문항 본문을 무엇으로 낼지(설계 §3-4).
@@ -70,6 +80,10 @@ _SKIPPED_SECTIONS: Final[frozenset[str]] = frozenset(
     {markdown_sections.PROBLEM_CHECK_TITLE, markdown_sections.VERIFY_TITLE}
 )
 
+# 시험지 뒤에 모으는 해설부의 표제. 종이 시험지가 뒷장 머리에 찍는 말을 그대로
+# 쓴다 — 앞장만 떼어 학생에게 주고 이 장은 교사가 갖는 관행이 문구에 이미 있다.
+_ANSWER_SECTION_TITLE: Final[str] = "정답 및 해설"
+
 # 변형 응답의 문제 본문 섹션 제목. 문항 제목이 이미 있어 소제목을 붙이지 않는다.
 _PROBLEM_TITLE: Final[str] = "문제"
 # 섹션이 없는 풀이에 붙이는 소제목.
@@ -83,7 +97,9 @@ class ExamItem:
     """시험지 내보내기 항목 1건.
 
     Attributes:
-        no: 문항 번호.
+        no: 문항 번호(저장·조회용 통짜 순번).
+        label: 지면에 찍힌 번호 표기. `no` 와 같거나 비면 제목은 `{no}번` 그대로다
+            (`_display_no`). 기본값이 빈 문자열이라 기존 호출부는 영향이 없다.
         image: 크롭 PNG 경로. 크롭이 없고 판독본만 있는 문항은 None 이다
             (`body="image"` 에서는 호출자가 그런 항목을 아예 넘기지 않는다).
         solution: 저장된 풀이 원문(마크다운). 없으면 None.
@@ -93,6 +109,7 @@ class ExamItem:
     """
 
     no: int
+    label: str = ""
     image: Path | None = None
     solution: str | None = None
     transcript: str | None = None
@@ -104,14 +121,17 @@ class VariantItem:
     """변형 내보내기 항목 1건.
 
     Attributes:
-        no: 원본 문항 번호.
+        no: 원본 문항 번호(저장·조회용 통짜 순번).
         mode: 변형 종류(`number` / `condition` / `number_condition`).
         text: 변형 응답 원문(`## 문제 / ## 정답 / ## 풀이` 마크다운).
+        label: 원본 문항의 지면 표기. `variants` 테이블에는 없으므로 호출자가
+            `problems.label` 을 조회해 넣는다. 비면 `{no}번` 그대로다.
     """
 
     no: int
     mode: str
     text: str
+    label: str = ""
 
 
 @dataclass(frozen=True)
@@ -121,6 +141,8 @@ class NoteItem:
     Attributes:
         source_name: 출처 시험지 이름(스냅샷).
         problem_no: 출처 문항 번호.
+        label: 담을 때 복사한 지면 표기 **스냅샷**(`note_items.problem_label`).
+            원본이 재추출돼 표기가 바뀌어도 노트는 담긴 그 시점의 표기를 쓴다.
         image: 크롭 스냅샷 PNG 경로. 스냅샷이 없으면 None.
         memo: 메모. 없으면 None.
         solution: 원본 문항의 저장된 풀이 원문. 원본이 지워졌거나 풀이가 없으면 None.
@@ -131,11 +153,35 @@ class NoteItem:
 
     source_name: str
     problem_no: int
+    label: str = ""
     image: Path | None = None
     memo: str | None = None
     solution: str | None = None
     transcript: str | None = None
     transcript_source: str | None = None
+
+
+def _display_no(no: int, label: str) -> str:
+    """문항 제목에 쓸 번호 표기를 고른다.
+
+    `no` 는 저장·조회용 통짜 순번이고 `label` 은 **지면에 실제로 찍힌 표기**다.
+    정석 계열처럼 구획마다 번호가 되돌아가는 교재는 둘이 달라서, 내보낸 문서에
+    `1번` 만 찍으면 원본과 대조할 수 없다.
+
+    표기가 있을 때는 `번` 을 붙이지 않는다 — `기본 문제 1-1번` 이 되어 이상하다.
+    `번` 은 순번을 읽어 주는 조수사이고, 지면 표기는 이미 완성된 이름이다.
+
+    Args:
+        no: 문항 번호.
+        label: 지면 표기. 빈 문자열이면 없는 것으로 본다.
+
+    Returns:
+        표기가 없거나 `str(no)` 와 같으면 `{no}번`(예전과 동일), 다르면 표기 그대로.
+    """
+    printed = label.strip()
+    if not printed or printed == str(no):
+        return f"{no}번"
+    return printed
 
 
 def _heading_text(title: str) -> str:
@@ -369,8 +415,23 @@ def build_exam_doc(
 ) -> ExportDoc:
     """시험지 문서를 조립한다.
 
-    구성은 문항마다 `N번`(제목) + 문항 본문이고, `include_full` 이면 그 뒤에
-    저장된 풀이를 섹션별로 붙인다.
+    구성은 문항마다 `N번`(제목) + 문항 본문이다. `include_full` 이면 **풀이를
+    문항 옆에 붙이지 않고 문서 끝에 모은다** — 문항부 전체 뒤에 페이지를 끊고
+    `정답 및 해설` 표제를 세운 다음, 풀이가 있는 문항만 같은 제목으로 다시
+    나열한다. 앞장만 떼어 학생에게 나눠 줄 수 있어야 한다는 요구다(ERR-12).
+    해설부의 문항 제목은 문항부와 **같은 문자열**(`_display_no`)이라 대조된다.
+
+    **뒤로 모으는 것은 시험지뿐이다.** 오답노트(`build_note_doc`)는 틀린 문제를
+    바로 다시 보는 용도라 해설이 문항 옆에 있어야 하고, 변형(`build_variants_doc`)은
+    요구에 없다. 그래서 두 함수는 예전 구성을 그대로 쓴다.
+
+    `include_full=False`(문제만 내보내기)는 애초에 풀이를 넣지 않으므로 나눌
+    것이 없다 — 페이지 나눔도 표제도 생기지 않고 예전 문서와 완전히 같다.
+    `include_full=True` 인데 풀이가 하나도 없을 때도 같다(빈 페이지 방지).
+
+    제목은 항목의 지면 표기(`ExamItem.label`)가 `no` 와 다를 때만 그 표기로
+    바뀐다(`_display_no`). 표기가 없거나 같은 보통 시험지는 예전 문서와 한 글자도
+    다르지 않다.
 
     문항 본문은 `body` 가 정한다. `image`(기본)면 예전과 똑같이 크롭 이미지만
     넣는다 — 항목에 판독본이 실려 있어도 보지 않는다. `text` 면 판독본을
@@ -381,7 +442,7 @@ def build_exam_doc(
     Args:
         title: 문서 제목(시험지 이름).
         items: 번호 순으로 정렬된 문항 목록.
-        include_full: True 면 풀이까지 넣는다.
+        include_full: True 면 풀이까지 넣는다(문서 끝 해설부로 모인다).
         source: 문서 끝에 넣을 출처. None/빈 문자열이면 넣지 않는다.
         body: `image`(기본) 또는 `text`.
 
@@ -389,17 +450,36 @@ def build_exam_doc(
         조립된 문서. `body="text"` 로 텍스트가 하나라도 들어갔으면 `notice` 가 찬다.
     """
     blocks: list[Block] = []
+    answers: list[Block] = []
     used_sources: list[str | None] = []
     for item in items:
-        blocks.append(Heading(f"{item.no}번", 2))
+        # 같은 Heading 객체를 두 부분에 넣는다. 문항부와 해설부의 제목이 어긋나면
+        # 대조가 안 되므로, 표기 규칙을 두 번 적용하지 않고 결과를 공유한다
+        # (frozen dataclass 라 공유해도 나중에 달라질 수 없다).
+        heading = Heading(_display_no(item.no, item.label), 2)
+        blocks.append(heading)
         item_blocks, used_text = _item_body_blocks(
             transcript=item.transcript, no=item.no, image=item.image, body=body
         )
         blocks.extend(item_blocks)
         if used_text:
             used_sources.append(item.transcript_source)
-        if include_full and item.solution:
-            blocks.extend(_solution_blocks(item.solution))
+        if not include_full or not item.solution:
+            continue
+        item_answers = _solution_blocks(item.solution)
+        if not item_answers:
+            # 섹션이 전부 `_SKIPPED_SECTIONS` 였거나 평문화 결과가 빈 풀이.
+            # 제목만 남기면 해설이 있는 척하는 빈 항목이 되므로 넣지 않는다.
+            continue
+        answers.append(heading)
+        answers.extend(item_answers)
+    if answers:
+        # 넣을 해설이 하나라도 있을 때만 지면을 끊는다. 비면 빈 페이지가 생긴다.
+        blocks.append(PageBreak())
+        # 표제는 문항 제목(2수준)보다 한 단 위다. 문서를 문제부/해설부로 가르는
+        # 구분이라 문항과 동급이면 어느 쪽이 상위인지 읽히지 않는다.
+        blocks.append(Heading(_ANSWER_SECTION_TITLE, 1))
+        blocks.extend(answers)
     return ExportDoc(
         title=title,
         blocks=blocks,
@@ -420,6 +500,10 @@ def build_variants_doc(
     원본 크롭은 넣지 않는다 — 변형 문제만 깔끔하게 배포할 수 있어야 한다.
     한 문항에 여러 mode 가 저장돼 있으면 모두 넣는다(호출자가 정렬해 넘긴다).
 
+    제목은 `{번호 표기} · {변형 종류}` 다. 번호 표기 규칙은 시험지와 같다
+    (`_display_no`) — `variants` 에는 표기가 없으므로 호출자가 원본
+    `problems.label` 을 조회해 항목에 실어 준다.
+
     Args:
         title: 문서 제목(예: `<시험지명> 변형 문제`).
         items: (번호, mode) 순으로 정렬된 변형 목록.
@@ -431,8 +515,10 @@ def build_variants_doc(
     """
     blocks: list[Block] = []
     for item in items:
-        label = VARIANT_MODE_LABEL.get(item.mode, item.mode)
-        blocks.append(Heading(f"{item.no}번 · {label}", 2))
+        mode_label = VARIANT_MODE_LABEL.get(item.mode, item.mode)
+        blocks.append(
+            Heading(f"{_display_no(item.no, item.label)} · {mode_label}", 2)
+        )
         for section_title, raw in markdown_sections.split_sections(item.text).items():
             if section_title in _SKIPPED_SECTIONS:
                 continue
@@ -459,7 +545,9 @@ def build_note_doc(
 ) -> ExportDoc:
     """오답노트 문서를 조립한다.
 
-    원본이 삭제된 항목도 스냅샷(크롭·판독본)으로 넣는다(풀이만 빠진다).
+    원본이 삭제된 항목도 스냅샷(크롭·판독본·지면 표기)으로 넣는다(풀이만 빠진다).
+    제목의 번호 표기는 **담을 때 복사한 스냅샷**(`NoteItem.label`)을 쓴다 —
+    원본이 재추출돼 표기가 바뀌어도 이미 담은 항목은 그대로여야 한다.
     본문 선택 규칙은 `build_exam_doc` 과 같다 — `body="text"` 면 판독본
     스냅샷을 텍스트로, 없으면 크롭 스냅샷으로 낸다. 판독본이 그림을 가리키면
     크롭 스냅샷을 함께 넣는 것도 같다.
@@ -477,7 +565,11 @@ def build_note_doc(
     blocks: list[Block] = []
     used_sources: list[str | None] = []
     for item in items:
-        blocks.append(Heading(f"{item.source_name} {item.problem_no}번", 2))
+        blocks.append(
+            Heading(
+                f"{item.source_name} {_display_no(item.problem_no, item.label)}", 2
+            )
+        )
         item_blocks, used_text = _item_body_blocks(
             transcript=item.transcript,
             no=item.problem_no,

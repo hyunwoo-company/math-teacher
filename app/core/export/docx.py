@@ -29,7 +29,7 @@ from docx.text.paragraph import Paragraph
 from PIL import Image as PilImage
 
 from export import layout
-from export.model import ExportDoc, Heading, Image, MathRun, Text, TextRun
+from export.model import ExportDoc, Heading, Image, MathRun, PageBreak, Text, TextRun
 from export.omml import UnsupportedLatexError, latex_to_omml
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
@@ -267,6 +267,10 @@ def build_docx(doc: ExportDoc) -> bytes:
             document.add_picture(str(block.path), width=_fit_width(block.path))
         elif isinstance(block, Text):
             _add_text(document, block)
+        elif isinstance(block, PageBreak):
+            # `w:br w:type="page"` 를 담은 문단 하나를 만든다(python-docx 내장).
+            # python-docx 가 이 메서드에만 주석을 달지 않아 strict mypy 가 막는다.
+            document.add_page_break()  # type: ignore[no-untyped-call]
     if doc.footer:
         # 출처는 문서 맨 끝 한 줄. 본문과 섞이지 않게 작은 회색 글씨로 낸다.
         _add_aside(document, doc.footer)
