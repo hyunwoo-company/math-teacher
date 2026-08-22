@@ -39,6 +39,14 @@ import type { Problem } from '@/types/api';
 
 const EMPTY_PROBLEMS: Problem[] = [];
 
+/**
+ * 0문항인데 사유를 받지 못했을 때 쓰는 문구. 이 필드가 없던 백엔드가 떠 있거나,
+ * 필드가 생기기 전에 올린 파일이면 사유가 `undefined`/`null` 로 온다 — 그때도
+ * 무엇을 해 볼 수 있는지는 말해 줘야 한다.
+ */
+const NO_PROBLEM_FALLBACK =
+  '업로드한 PDF가 시험지 형식이 아니거나 문제 번호를 인식하지 못했을 수 있습니다. 원본을 PDF 탭에서 확인해 보세요. 추출 규칙이 개선된 뒤라면 아래 버튼으로 다시 시도할 수 있습니다(파일을 다시 올릴 필요 없음).';
+
 /** 문항 행의 체크박스가 무엇을 고르는 중인지. 두 모드는 동시에 켜지지 않는다. */
 type PickMode = 'none' | 'note' | 'variant';
 
@@ -155,9 +163,22 @@ export function SolutionsTab() {
   if (problems.length === 0) {
     return (
       <EmptyState
+        // 제목은 사실만 말하고, 사유는 description 이 말한다.
         title="이 파일에서 문제를 찾지 못했습니다"
-        description="업로드한 PDF가 시험지 형식이 아니거나 문제 번호를 인식하지 못했을 수 있습니다. 원본을 PDF 탭에서 확인해 보세요. 추출 규칙이 개선된 뒤라면 아래 버튼으로 다시 시도할 수 있습니다(파일을 다시 올릴 필요 없음)."
+        /*
+          사유는 서버가 판정해 문장으로 준다(스캔본이면 "다시 추출해도 같다" 까지
+          문장에 들어 있다). 프론트는 스캔본 여부를 다시 판정하지 않는다.
+          `?? ` 가 null 과 undefined 를 함께 받아 옛 파일·옛 백엔드는 기존 문구로
+          조용히 폴백한다. `max-w-[42ch]` 로 감싸이므로 문장이 길어도 안 깨진다.
+        */
+        description={fileDetail?.extract_error ?? NO_PROBLEM_FALLBACK}
         icon="🔍"
+        /*
+          [문제 다시 추출] 은 스캔본이어도 남겨 둔다. 숨기려면 프론트가 "스캔본인가"
+          를 판정해야 하고 그건 서버 로직의 이중화다 — 대신 서버 문장이 "다시 추출해도
+          결과가 같습니다" 를 말해 주므로 사용자가 누를 이유가 없어진다. 나중에 OCR 이
+          들어가면 이 버튼이 그대로 해결 수단이 된다.
+        */
         action={<ReextractButton fileId={fileId} problemCount={0} />}
       />
     );

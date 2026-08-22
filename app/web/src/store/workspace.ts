@@ -1796,7 +1796,13 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => ({
         transcripts: dropFileTranscripts(state.transcripts, id),
         ...(stillOpen
           ? {
-              fileDetail: { node: result.node, problems: result.problems },
+              // 재추출 사유도 화면까지 실어 보낸다. 0문항이면 [풀이] 탭의 빈 상태가
+              // 이 문장을 그대로 띄운다(토스트는 사라지지만 화면은 남는다).
+              fileDetail: {
+                node: result.node,
+                problems: result.problems,
+                extract_error: result.extract_error,
+              },
               fileStatus: 'ready' as const,
               fileError: null,
               // 풀이는 서버에서 지워졌다. 화면 캐시도 함께 비운다.

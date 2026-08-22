@@ -172,11 +172,27 @@ export interface Problem {
 export interface FileDetail {
   node: TreeNode;
   problems: Problem[];
+  /**
+   * 마지막 추출의 실패/0문항 사유. 한국어 완성 문장이 그대로 오고, 성공이면 null.
+   * 스캔본(글자 정보 0자)인지 앵커만 못 찾았는지는 **백엔드가 판정한다** — 프론트는
+   * 이 문장을 그대로 보여주기만 한다(판정 로직을 이중화하지 않는다).
+   *
+   * optional 인 이유: 이 필드가 없던 백엔드가 떠 있는 순간(배포 순서 역전 등)에는
+   * 아예 오지 않아 `undefined` 다. 기존 파일도 백필하지 않았다. `string | null` 로
+   * 단정하면 타입이 거짓을 말해서 호출부가 `undefined` 를 잊고 빈 설명을 그리게 된다.
+   * optional 로 두면 컴파일러가 세 값(문장·null·없음)을 모두 다루게 강제한다.
+   * `has_transcript?` 처럼 "백엔드가 안 줄 수 있는 필드" 의 기존 관례와도 같다.
+   */
+  extract_error?: string | null;
 }
 
 /** `POST /api/files/{id}/reextract` 응답. 원본 PDF 를 그대로 다시 추출한 결과. */
 export interface ReextractResult extends FileDetail {
-  /** 추출 실패/문항 미검출 사유. 성공이면 null. */
+  /**
+   * 추출 실패/문항 미검출 사유. 성공이면 null. `FileDetail.extract_error` 와 **뜻이 같다**
+   * (같은 판정의 결과다). 다만 이 응답은 방금 돌린 추출의 결과라 서버가 언제나 값을
+   * 실어 주므로 required 로 좁힌다 — optional 인 상위 필드에 assignable 하다.
+   */
   extract_error: string | null;
   /** 재추출로 지워진 기존 풀이 건수. */
   deleted_solutions: number;

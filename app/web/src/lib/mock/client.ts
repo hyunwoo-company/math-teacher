@@ -13,9 +13,11 @@ import { toStreamEvent } from '@/lib/stream-events';
 import { mockSseStream, type MockSseEvent } from '@/lib/mock/sse-stream';
 import {
   MOCK_ACCESS_PASSWORD,
+  MOCK_ANCHOR_EXTRACT_ERROR,
   MOCK_NOTE_ID,
   MOCK_PDF_PATH,
   MOCK_PROBLEM_COUNT,
+  MOCK_SCAN_EXTRACT_ERROR,
   MOCK_TRANSCRIPT_NOTE,
   makeMockEnv,
   makeMockNodes,
@@ -251,6 +253,16 @@ const LATENCY_MS = 160;
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * 이 파일의 추출 사유. 실서버는 백엔드가 PDF 를 들여다보고 판정하지만, 목은 원본이
+ * 없으므로 노드에 이미 있는 `mode` 로 갈라낸다(스캔본은 `image`). 판정은 여기(가짜
+ * 서버)에만 있고 화면은 문장을 그대로 받는다 — 실서버와 같은 역할 분담이다.
+ */
+function mockExtractError(node: TreeNode, problemCount: number): string | null {
+  if (problemCount > 0) return null;
+  return node.file?.mode === 'image' ? MOCK_SCAN_EXTRACT_ERROR : MOCK_ANCHOR_EXTRACT_ERROR;
 }
 
 function nextId(prefix: string): string {
@@ -811,16 +823,30 @@ export const mockClient: ApiClient = {
         400,
       );
     }
+    /*
+      스캔본(사진만 있어 글자 정보가 0자인 PDF)을 목에서도 볼 수 있게 한다. 실서버는
+      PDF 안을 들여다보고 판정하지만 목은 그럴 원본이 없으므로 **파일 이름**을 스위치로
+      쓴다: 이름에 '스캔' 이 들어가면 0문항 + mode 'image' 로 만든다. 초기 트리에
+      0문항 파일을 새로 끼우지 않은 이유는 그러면 트리 노드 수를 세는 기존 테스트가
+      깨지기 때문이다(삭제 확인 창의 "모두 N개").
+    */
+    const scanned = file.name.includes('스캔');
+    const problemCount = scanned ? 0 : MOCK_PROBLEM_COUNT;
     const node: TreeNode = {
       id: nextId('file'),
       type: 'file',
       name: file.name,
       parent_id: parentId,
       created_at: nowIso(),
-      file: { pages: 7, problem_count: MOCK_PROBLEM_COUNT, mode: 'text', pua_ratio: 0.019 },
+      file: {
+        pages: 7,
+        problem_count: problemCount,
+        mode: scanned ? 'image' : 'text',
+        pua_ratio: scanned ? 0 : 0.019,
+      },
     };
     state.nodes = [...state.nodes, node];
-    state.problems.set(node.id, makeMockProblems(MOCK_PROBLEM_COUNT));
+    state.problems.set(node.id, makeMockProblems(problemCount));
     return { ...node };
   },
 
@@ -832,7 +858,11 @@ export const mockClient: ApiClient = {
       throw new ApiError('not_a_file', '파일이 아닙니다.', null, 400);
     }
     const problems = state.problems.get(id) ?? [];
-    return { node: { ...node }, problems: problems.map((problem) => ({ ...problem })) };
+    return {
+      node: { ...node },
+      problems: problems.map((problem) => ({ ...problem })),
+      extract_error: mockExtractError(node, problems.length),
+    };
   },
 
   async reextractFile(id: string): Promise<ReextractResult> {
@@ -857,7 +887,7 @@ export const mockClient: ApiClient = {
     return {
       node: { ...node },
       problems: problems.map((problem) => ({ ...problem })),
-      extract_error: problems.length === 0 ? '문제 번호 앵커를 찾지 못했습니다.' : null,
+      extract_error: mockExtractError(node, problems.length),
       deleted_solutions: deleted,
     };
   },
