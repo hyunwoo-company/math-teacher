@@ -1,0 +1,16 @@
+[Unit]
+Description=주 1회 hw-01 containerd 이미지 정리
+Documentation=https://github.com/hyunwoo-company/math-teacher/blob/main/docs/hw-01-image-prune.md
+
+[Timer]
+# 일요일 새벽. 배포가 없는 시간대를 골랐다.
+OnCalendar=Sun *-*-* 04:30:00
+# 노드가 꺼져 있어 놓친 회차는 부팅 후에 한 번 돌린다.
+Persistent=true
+# 다른 정기 작업과 겹치지 않게 흩뿌린다.
+RandomizedDelaySec=30min
+AccuracySec=1min
+Unit=k3s-image-prune.service
+
+[Install]
+WantedBy=timers.target

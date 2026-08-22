@@ -1,0 +1,29 @@
+[Unit]
+Description=hw-01 containerd 이미지 정리 (math-teacher-api 최근 N개만 유지)
+Documentation=https://github.com/hyunwoo-company/math-teacher/blob/main/docs/hw-01-image-prune.md
+# containerd 소켓이 있어야 crictl 이 붙는다. k3s 가 죽어 있으면 스크립트가
+# 스스로 FATAL 로그를 남기고 나가므로 Requires 대신 After 만 둔다.
+After=k3s.service network-online.target
+Wants=k3s.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/k3s-image-prune --apply
+# 실패해도 서비스 중단은 아니다. 다음 주 타이머에서 다시 시도한다.
+SuccessExitStatus=0
+TimeoutStartSec=30min
+
+# 밤에 도는 정리 작업이므로 우선순위를 낮춰 서비스 지연을 만들지 않는다.
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+
+# 최소 권한: root 로 돌지만 /usr, /etc, /boot 는 읽기 전용으로 잠근다.
+# /var(로그·containerd)와 /run(소켓)은 쓸 수 있어야 한다.
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
