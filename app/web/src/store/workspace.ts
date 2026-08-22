@@ -661,6 +661,9 @@ async function watchJob(job: Job): Promise<void> {
   const fileId = job.node_id;
   const isSolve = job.kind === 'solve';
   const isTranscribe = job.kind === 'transcribe';
+  // OCR 은 **페이지 단위**로 진행한다(`no` 가 문항이 아니라 페이지 번호다).
+  // 문항 상태를 건드리는 분기에 흘러들면 없는 문항의 빈 풀이 엔트리가 생긴다.
+  const isOcr = job.kind === 'ocr';
   /** 판독본 자리를 갱신한다(없으면 만들어서). */
   const touchTranscript = (no: number, patch: (entry: TranscriptEntry) => TranscriptEntry) => {
     const key = transcriptCacheKey(fileId, no);
@@ -873,6 +876,9 @@ async function watchJob(job: Job): Promise<void> {
                 : state.solve,
             totals: accumulate(state.totals, event.usage, event.cost),
           }));
+          // 진행률까지만 세고 끝낸다. `no` 가 페이지 번호라 문항 엔트리를
+          // 만들면 존재하지 않는 문항의 빈 풀이가 화면에 남는다.
+          if (isOcr) break;
           touch(event.no, (entry) => ({
             ...entry,
             status: 'done',

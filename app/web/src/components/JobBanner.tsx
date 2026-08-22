@@ -94,12 +94,21 @@ export function JobBanner() {
 function describe(job: Job): string {
   const kind = label(job);
   if (job.status === 'queued') return `${kind} 대기 중`;
-  const at = job.current_no != null ? `${job.current_no}번 ` : '';
+  // OCR 은 페이지 단위로 진행한다 — `current_no` 가 문항이 아니라 페이지 번호다.
+  const unit = job.kind === 'ocr' ? '쪽' : '번';
+  const at = job.current_no != null ? `${job.current_no}${unit} ` : '';
   return `${at}${kind} 중 (${job.done_count}/${job.total})`;
 }
 
+const KIND_LABELS: Record<Job['kind'], string> = {
+  solve: '풀이',
+  variant: '변형',
+  transcribe: '문항 텍스트화',
+  ocr: '스캔본 문항 찾기',
+};
+
 function label(job: Job): string {
-  return job.kind === 'solve' ? '풀이' : '변형';
+  return KIND_LABELS[job.kind];
 }
 
 /** 배너가 붙는 자리(테스트에서 존재 확인용). */

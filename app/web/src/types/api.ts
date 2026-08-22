@@ -462,8 +462,13 @@ export interface VariantsResponse {
 
 /* ── 작업 큐 ─────────────────────────────────────────────────────── */
 
-/** `transcribe` = 문항 텍스트화(1차 PDF 디코딩 → 실패분만 AI 비전). */
-export type JobKind = 'solve' | 'variant' | 'transcribe';
+/**
+ * `transcribe` = 문항 텍스트화(1차 PDF 디코딩 → 실패분만 AI 비전).
+ * `ocr` = 스캔본에서 문항 번호를 찾는 작업. **진행 단위가 페이지**이고
+ * (`total` = 페이지 수, `no` = 1부터 세는 페이지 번호) AI 를 부르지 않아
+ * `usage`/`cost`/`delta` 가 없다 — 문항 단위로 다루면 엉뚱한 곳이 갱신된다.
+ */
+export type JobKind = 'solve' | 'variant' | 'transcribe' | 'ocr';
 export type JobStatus =
   | 'queued'
   | 'running'
